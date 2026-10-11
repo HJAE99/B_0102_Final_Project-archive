@@ -18,8 +18,9 @@ TurtleBot4 두 대를 이동형 인프라 점검 플랫폼으로 써서, 물리 
 
 | 기기 | 대수 | 돌리는 것 |
 | --- | --- | --- |
-| 로봇 RPi (TurtleBot4 탑재) | 2 (4번 `/robot4`, 3번 `/robot3`) | 드라이버(Create 3 · LiDAR · OAK-D), `rssi_scanner`, Discovery Server |
-| 로봇 PC (MSI GPU 노트북) | 2 (로봇마다 1) | Nav2·AMCL·keepout 필터, `mission_executor`, `detection_alert`, `survey_buffer` |
+| 로봇 RPi (TurtleBot4 탑재) | 2 (4번 `/robot4`, 3번 `/robot3`) | 드라이버(Create 3 · LiDAR · OAK-D), Discovery Server · `rssi_scanner` 는 로봇 A(4번)에만 |
+| 로봇 PC A (MSI GPU 노트북, 로봇 4번) | 1 | Nav2·AMCL, `mission_executor`, `survey_buffer` — RSSI 측정만 |
+| 로봇 PC B (MSI GPU 노트북, 로봇 3번) | 1 | Nav2·AMCL·keepout 필터, `mission_executor`, `detection_alert` — 물리 인프라 검출·판정만 |
 | 관제 PC (Victus 노트북) | 1 | `inspection_manager`, `ros_bridge`, `network_map_engine`, 관제 웹, SQLite, Discovery Server |
 | 휴대폰 핫스팟 | 1 | 측정 대상. 로봇 통신에는 쓰지 않는다 |
 
@@ -60,7 +61,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 | Nav2·AMCL | 저장 지도 위 위치 추정·주행. 관제 PC 가 보낸 keepout 마스크의 칸을 경로에서 뺀다 (마스크는 로봇 B 에만 보낸다) |
 | `mission_executor` | 받은 작업(측정 구간·설비 점검·재검증·Dock)을 Nav2 로 수행하고 결과를 보고. 상태를 1 Hz 로 발행. 관제 PC 가 끊겨도 받은 작업은 끝낸다 |
 | `detection_alert` | 요청 때만 OAK-D 영상을 구독 → YOLO → 등록 위치와 대조 → 정면 판별(아니면 자세 보정 요청, 최대 3회) → 판정. 사진은 로봇 PC 에 저장하고 축소본을 결과와 함께 보낸다 |
-| `inspection_manager` | 작업·후보 상태의 주인. 경로 생성, 작업 배정, 후보 → 재검증 작업, 이탈 시 재배정, 최종 판정, 비상정지 |
+| `inspection_manager` | 작업·후보 상태의 주인. 경로 생성, 작업 배정, 후보 → 재검증 작업, 이탈 감지·경보, 최종 판정, 비상정지 (이탈 시 재배정은 풀사이클 뒤 추가 기능) |
 | `network_map_engine` | 격자 통계·신뢰도 → 기준선 비교 → 상태 추정 → 후보 · 음영 칸 → keepout 마스크 |
 | `ros_bridge` | 샘플·상태·판정·알림을 받아 (robot, seq) 중복을 거르고 SQLite 에 저장, 화면에 실시간 전달 |
 | 관제 웹 | 순찰 시작·재배정·비상정지, 네트워크 지도·작업/로봇·점검 이력, 보고서·점검표 |
@@ -83,7 +84,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 - 설비 판정: NORMAL · NOT_DETECTED · OCCLUDED · POSITION_ANOMALY · ABNORMAL · UNCONFIRMED → 최종 정상 / 이상 / 미확인.
 - 후보: 출처(네트워크·비전), 종류, 대상(격자 칸 또는 설비), 발견 로봇, 회차 → 재검증 뒤 확정 · 해제 · 미확인.
 - DB(SQLite): runs · net_samples · grid_stats · baselines · facilities · candidates · tasks · inspections · alerts.
-- 설정: `scv_bringup/config/facilities.yaml`(설비 번호·종류·예상 위치·관측 자세), `zones.yaml`(측정 구역·경로 간격), 저장 지도 `map.yaml`.
+- 설정: `scv_bringup/config/facilities.yaml`(설비 번호·종류·예상 위치·관측 자세), `zones.yaml`(측정 구역·경로 간격), 기준 지도 `scv_bringup/maps/testbed_v1.yaml`(주행 팀이 만든 지도, 10/11 PM 확정).
 
 ## 7. 다중 로봇 운영
 
@@ -104,7 +105,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 | D9 | 시험 AP 는 휴대폰 핫스팟 (로봇과 통신하지 않음) |
 | D10 | 측정 지표는 RSSI 만 (BSSID·채널·로밍·지연·손실·처리량 제외) |
 | D11 | 상태 추정은 커버리지 저하 의심 · 판단 불가 두 가지, 회피 기준과 해제 규칙 포함 |
-| 10/11 | 음영 재측정은 다른 로봇이 아니라 로봇 A 가 한다 · 회피(keepout)는 로봇 B 에만 적용 · 시연에서는 재측정 때 음영이 사라진다 · 순서는 A → B → A · 로봇 A 는 RSSI 만, 로봇 B 는 물리 점검만 · 음영 구역 안에는 설비를 두지 않는다 |
+| 10/11 | 음영 재측정은 다른 로봇이 아니라 로봇 A 가 한다 · 회피(keepout)는 로봇 B 에만 적용 · 시연에서는 재측정 때 음영이 사라진다 · 순서는 A → B → A · 로봇 A 는 RSSI 만, 로봇 B 는 물리 점검만 · 음영 구역 안에는 설비를 두지 않는다 · 두 로봇은 동시에 주행하지 않고 번갈아 구동 · 측정 노드는 로봇 A 쪽에만, 판정 노드는 로봇 B 쪽에만 · 이탈 재배정과 배터리 인계는 풀사이클 뒤 추가 기능 · 기준 지도는 주행 팀의 `testbed_v1` · 설계 문서의 원본은 저장소 |
 | 10/10 | 고정 웹캠은 쓰지 않는다 · 로봇은 4번·3번 · 미검출은 검출 여부로 표시 · 지도는 테스트베드에서 한 번 만든 것을 고정해 쓴다 |
 
 ## 9. 한계
