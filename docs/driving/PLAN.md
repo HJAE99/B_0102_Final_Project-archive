@@ -54,12 +54,25 @@ hhj가 권장값으로 확정했습니다. 요구사항이 바뀌면 이 표를 
 | 3-4 | [추가] goal checker 2종 구성 | 일반 지점 / 설비 점검 지점(정밀) 허용 오차 분리 | 3-3 |
 | 3-5 | [추가] 측정 속도 확정 | RSSI 팀과 최종 값 확정, 회차마다 같은 속도 재현 (BR-T02) | 3-3 |
 
+### 3-2 비교 대상 선정 (2026-10-10 확정)
+
+Jazzy controller_server 컨트롤러 중 **MPPI와 RPP 두 개만** 비교한다. 설정: `ros2_ws/src/scv_nav/config/nav2.yaml`(MPPI), `nav2_rpp.yaml`(RPP)
+
+- MPPI: TurtleBot4 Jazzy 기본 컨트롤러 → 기준선
+- RPP: 경로 추종 전용, 파라미터가 적음 → 통로를 일정 속도로 따라가는 목표에 가장 직접 맞음
+- DWB 제외: MPPI 이전 세대 기본값, 튜닝할 critic이 많음 (TurtleBot4도 Jazzy에서 MPPI로 바꿈)
+- Graceful 제외: 목표 지점 접근용에 가까움 → 3-4 정밀 도착에서 따로 검토. Rotation Shim은 래퍼라 비교 대상 아님
+- 컨트롤러 하나당 같은 코스 5회 → 하나 늘면 시험 시간 약 1.5배
+- 두 설정 모두 속도 상한을 0-3 측정 속도 0.2 m/s로 맞춤 (MPPI `vx_max` 0.5→0.2, velocity_smoother `max_velocity` 0.26→0.2). 컨트롤러 계획 속도가 smoother 상한보다 크면 추종 오차가 커져 같은 조건 비교가 안 됨
+
 ## 4단계. 회피·안전
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
 | 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 | 3-3 · 마스크 형식(RSSI) |
 | 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 | 3-3 |
+
+> ⚠ **4-1 시작 시 keepout_layer 를 반드시 켤 것.** 지금 `config/nav2.yaml`·`nav2_rpp.yaml` 의 global·local costmap `keepout_layer` 4곳이 `enabled: false` (2026-10-11). `keepout_mask` 발행자가 없으면 StaticLayer 가 준비되지 않아 costmap 전체가 "Costmap timed out waiting for update" → 모든 goal 경로 계획이 실패했기 때문. 켤 때는 RSSI 마스크(또는 `fake_servers.py -p mask:=true`)가 먼저 발행되고 있어야 함.
 
 ## 5단계. 작업 실행 (mission_executor)
 
