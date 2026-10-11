@@ -18,6 +18,7 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
+            'inspection_manager = scv_manager.inspection_manager:main',
         ],
     },
 )
