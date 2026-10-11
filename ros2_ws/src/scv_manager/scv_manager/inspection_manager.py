@@ -101,6 +101,14 @@ class InspectionManager(Node):
         waypoint.pose.position.z = 0.0
         waypoint.pose.orientation.w = 1.0
 
+        self.core.create_task(
+            task_id="test-survey-001",
+            run_id=1,
+            task_type=ExecuteTask.Goal.SURVEY_SEGMENT,
+            priority=1,
+            target_ref="Z1",
+        )
+
         self.send_task(
             robot_id="robot4",
             task_id="test-survey-001",
@@ -130,6 +138,8 @@ class InspectionManager(Node):
             )
             return
 
+        self.core.assign_task(task_id=task_id, robot_id=robot_id)
+
         goal = ExecuteTask.Goal()
         goal.task_id = task_id
         goal.run_id = run_id
@@ -157,9 +167,11 @@ class InspectionManager(Node):
         goal_handle = future.result()
 
         if not goal_handle.accepted:
+            self.core.finish_task(task_id, ok=False, reason='GOAL_REJECTED')
             self.get_logger().warning(f"{robot_id}: 작업 거절됨: {task_id}")
             return
 
+        self.core.start_task(task_id)
         self.get_logger().info(f"{robot_id}: 작업 승인됨: {task_id}")
 
         result_future = goal_handle.get_result_async()
@@ -173,6 +185,8 @@ class InspectionManager(Node):
     def on_task_feedback(self, robot_id: str, task_id: str, feedback_message) -> None:
         feedback = feedback_message.feedback
 
+        self.core.update_task_progress(task_id, feedback.progress)
+
         self.get_logger().info(
             f"{robot_id}: {task_id} 진행률 "
             f"{feedback.progress * 100:.0f}% "
@@ -183,11 +197,19 @@ class InspectionManager(Node):
         wrapped_result = future.result()
         result = wrapped_result.result
 
+        self.core.finish_task(task_id, ok=result.ok, reason=result.reason)
+
+        task = self.core.tasks[task_id]
+
         if result.ok:
-            self.get_logger().info(f"{robot_id}: 작업 완료: {task_id}")
+            self.get_logger().info(
+                f"{robot_id}: 작업 완료: "
+                f"{task_id}, state={task.state.value}"
+            )
         else:
             self.get_logger().error(
                 f"{robot_id}: 작업 실패: {task_id}, "
+                f"state={task.state.value}, "
                 f"reason={result.reason}"
             )
 
