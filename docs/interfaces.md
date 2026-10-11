@@ -6,6 +6,7 @@ v0.2: 회차 전달·근거 사진·후보 발견 로봇·재개/재배정·각�
 v0.2.1: 로봇 이름공간 `/robot4`·`/robot3`, 모든 기기 turtle08, 빌드 전 가상환경 끄기, 자세 보정 "뒤로" 처리 제안
 v0.2.2: 고정 웹캠은 쓰지 않습니다 (10/10 PM 결정) — `webcam_node` 없음, CAM 탭은 로봇 카메라(OAK-D)만
 v0.2.4: 설정 파일 형식(`facilities.yaml`, `zones.yaml`)과 기기별 launch 뼈대 추가
+v0.2.5: 시나리오 변경 (10/11 PM 결정) — 로봇 A 는 통신 측정·재측정, 로봇 B 는 물리 인프라 점검. keepout 마스크(IF-10)는 로봇 B 에만 발행하고, REINSPECTION 은 음영 후보를 로봇 A 가 그 구역 안에서 다시 재는 작업입니다. 메시지 정의(`scv_msgs`)는 그대로입니다
 v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSample` 에 `detected` 추가, 미검출 샘플의 `rssi_dbm` 은 쓰지 않음 (10/10 PM·RSSI 팀)
 
 팀 사이에 오가는 토픽·서비스·액션과 그 타입을 한곳에 모았습니다. 타입 정의는 `ros2_ws/src/scv_msgs/` 에 있습니다. 고칠 것이 있으면 그 약속의 **주인**에게 말하고, 주인이 `scv_msgs` 와 이 문서를 함께 고칩니다.
@@ -45,7 +46,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | 07 | `{ns}/scan` · `odom` · `tf` · `tf_static` / `{ns}/cmd_vel` | topic · 표준 타입 | RPi ↔ Nav2 (로봇 PC) | 센서 best effort · cmd_vel reliable | 주행 |
 | 08 | `{ns}/survey/sample` | topic · `scv_msgs/NetSample` | survey_buffer (로봇 PC) → ros_bridge · network_map_engine (관제 PC) | reliable · depth 50 · 1 Hz (sync 재발행은 depth를 넘지 않게 천천히, 예: 20 Hz 이하) | RSSI A |
 | 09 | `{ns}/survey/sync` | service · `scv_msgs/SyncSamples` | ros_bridge (관제 PC) → survey_buffer (로봇 PC) | 재연결 때 | RSSI A |
-| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | network_map_engine (관제 PC) → Nav2 (로봇 PC) | reliable · transient_local | RSSI B |
+| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | network_map_engine (관제 PC) → Nav2 (로봇 B 의 로봇 PC, `/robot3` 에만) | reliable · transient_local | RSSI B |
 | 11 | `{ns}/execute_task` | action · `scv_msgs/ExecuteTask` | inspection_manager (관제 PC) → mission_executor (로봇 PC) | — | 관제 A |
 | 12 | `{ns}/status` | topic · `scv_msgs/RobotStatus` | mission_executor (로봇 PC) → inspection_manager · ros_bridge (관제 PC) | reliable · 1 Hz | 관제 A |
 | 14 | `{ns}/oakd/rgb/image_raw/compressed` · depth | topic · `sensor_msgs/CompressedImage` | OAK-D (RPi) → detection_alert (로봇 PC) · CAM 탭 (관제 PC) | best effort · 구독할 때만 | 비전 B |
