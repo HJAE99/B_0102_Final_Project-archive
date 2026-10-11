@@ -303,7 +303,7 @@ ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 | 한 채널 검출률 | turtle09 (−45~−53 dBm) | 한 번 스캔 50–85 % (probe 응답 누락). 재스캔 2 회 넣고 노드로 40 회 중 40 회 검출 |
 | 캐시 | 노트북 | 한 채널 스캔에도 iw 가 AP 50 여 개를 출력 (대부분 수 초~20 s 전 캐시) → `fresh_bss` 필요 확인 |
 | 직접 입력·변경 | domain 87, 노트북 | `ssid:=turtle09` 로 채널 고정 후 1 Hz, `ros2 param set … target_ssid "서울법인_5G"` 로 바꿔 전체 스캔 → 5520 MHz 고정 → −82~−86 dBm |
-| 자동 선택 | 노트북 | 주변에 `iPhone` 이라는 남의 핫스팟이 있었다 (5745 MHz, −53 dBm) → 직접 입력 권장 |
+| 같은 이름 | 노트북·로봇 4번 | `iPhone` 핫스팟을 다시 켤 때마다 BSSID 가 바뀜 (로봇 4번 주행 중 3 번 모두 다름) → 대상은 SSID 로 판단. `iPhone` 같은 흔한 이름은 남의 아이폰과 겹칠 수 있어 고유한 이름 권장 |
 | turtle08 통신 영향 | ping 192.168.108.42, 10 Hz × 15 s | 스캔 없음 손실 0 · 한 채널 1 Hz 손실 0, 최대 RTT 11–23 ms · 전체 대역 연속 손실 0, 평균 16 ms·최대 115 ms |
 
 실제 시험에서 확인된 것 (10/10, link 방식):
