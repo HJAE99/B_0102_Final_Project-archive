@@ -87,7 +87,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 - 설비 판정: 종류는 소화기 · 셔터 · 유도등 · 랙(`KIND_RACK`, 10/12). NORMAL · NOT_DETECTED · OCCLUDED · POSITION_ANOMALY · ABNORMAL(압력·소등·적치·돌출) · UNCONFIRMED → 최종 정상 / 이상 / 미확인.
 - 후보: 출처(네트워크·비전), 종류, 대상(격자 칸 또는 설비), 발견 로봇, 회차 → 재검증 뒤 확정 · 해제 · 미확인. 음영 후보의 재측정은 그 섹터를 맡은 로봇(발견 로봇과 같다)이 한다.
 - DB: PostgreSQL 16 + Redis (관제 팀 설계 `scv_database`, 10/12). runs · net_samples · grid_stats · baselines · facilities · candidates · tasks · inspections · alerts 등 표의 원본은 그 패키지의 `sql/01_schema.sql`. 관제 PC 의 API 만 DB 에 쓴다.
-- 설정: `scv_bringup/config/facilities.yaml`(설비 번호·종류·예상 위치·관측 자세), `zones.yaml`(섹터 2개 — 구역 꼭짓점·맡는 로봇 `robot:`·경로 간격), 기준 지도 `scv_bringup/maps/testbed_v1.yaml`(주행 팀이 만든 지도, 10/11 PM 확정).
+- 설정: `scv_bringup/config/facilities.yaml`(설비 번호·종류·예상 위치·관측 자세), `zones.yaml`(섹터 2개 — 구역 꼭짓점·맡는 로봇 `robot:`·Dock 위치 `dock:`·경로 간격), 기준 지도 `scv_bringup/maps/testbed_v1.yaml`(주행 팀이 만든 지도, 10/11 PM 확정).
 
 ## 7. 다중 로봇 운영
 
