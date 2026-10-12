@@ -31,7 +31,9 @@ ros2 launch scv_bringup robot_pc.launch.py robot_ns:=robot4 iface:=<무선랜> s
 ros2 service call /inspection/start std_srvs/srv/Trigger
 ```
 
-- **로봇 PC launch 는 켜고 20초 뒤 `mission_executor` 가 스스로 undock 한다. 로봇이 움직인다.** 주변을 비우고 켠다.
+- **로봇 PC launch 는 켜고 10초 뒤 `mission_executor` 가 스스로 undock 한다. 로봇이 움직인다.** 주변을 비우고 켠다.
+- 순서는 localization → mission_executor(undock · 초기 pose) → Nav2(30초 뒤) 다. Dock 에 있는 채로 Nav2 를 먼저 띄우면
+  bringup 이 중단된다 (10/12 주행 일지). `Managed nodes are active` 가 나올 때까지 15초쯤 더 기다린다.
 - 로봇 PC launch 는 아직 실제 로봇에서 돌려 보지 못했다. 한 묶음으로 안 뜨면 2절처럼 터미널을 나눠 하나씩 띄운다.
 - RSSI 스캔은 로봇 PC 마다 한 번 `sudo setcap cap_net_admin+ep /usr/sbin/iw` 가 필요하다 (scv_survey/README 「스캔 권한」).
 - Discovery Server 를 쓰는 PC 에서 `ros2 topic list` 가 비어 보이면 `ROS_SUPER_CLIENT=True` 와 `--spin-time 8` 을 준다.
@@ -67,6 +69,7 @@ ros2 topic echo /inspection/alerts           # 알림 보기
 ## 2. 로봇 PC (MSI) — 로봇마다. 아래는 robot4, 다른 로봇은 robot3 으로 바꾼다
 
 ```bash
+# 순서: (1) 의 localization → (2) mission_executor → (1) 의 Nav2.  Dock 에서 Nav2 를 먼저 띄우면 bringup 이 중단된다
 # (1) localization · Nav2 — 저장소 뿌리에서, 반드시 이 launch 로 (params 안의 $(var namespace) 를 이 launch 가 바꿔 준다)
 ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=ros2_ws/src/scv_nav/maps/testbed_v1.yaml params:=ros2_ws/src/scv_nav/config/localization.yaml
 ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 params_file:=ros2_ws/src/scv_nav/config/nav2.yaml
