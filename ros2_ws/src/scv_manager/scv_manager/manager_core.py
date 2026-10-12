@@ -81,7 +81,7 @@ class ManagerCore:
     def __init__(
         self,
         robot_ids: list[str],
-        offline_timeout_sec: float = 30.0,
+        offline_timeout_sec: float = 29.0,
     ):
         self.offline_timeout_sec = offline_timeout_sec
         self.robots = {
@@ -117,11 +117,17 @@ class ManagerCore:
 
         return newly_offline
 
-    def start_run(self) -> int:
-        self.run_id += 1
+    def start_run(self, timestamp_sec: Optional[int] = None) -> int:
+        next_run_id = self.run_id + 1
+
+        if timestamp_sec is not None:
+            next_run_id = max(next_run_id, timestamp_sec)
+
+        self.run_id = next_run_id
         self.run_state = RunState.RUNNING
         self.tasks.clear()
         self.task_order.clear()
+
         return self.run_id
 
     def create_task(

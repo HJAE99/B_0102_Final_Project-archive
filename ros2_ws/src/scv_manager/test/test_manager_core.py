@@ -1,5 +1,6 @@
 from scv_manager.manager_core import (
     ManagerCore,
+    RobotStatusSnapshot,
     RunState,
     TaskState,
 )
@@ -167,3 +168,58 @@ def test_run_completes_only_when_all_tasks_are_terminal():
 
     core.complete_run()
     assert core.run_state == RunState.COMPLETED
+
+
+def make_robot_status() -> RobotStatusSnapshot:
+    return RobotStatusSnapshot(
+        state=0,
+        battery_percent=100.0,
+        accepting_tasks=True,
+        task_id="",
+        run_id=0,
+        task_type=0,
+        progress=0.0,
+        warning="",
+    )
+
+
+def test_timestamp_based_run_id():
+    core = ManagerCore(["robot4"])
+
+    first_run_id = core.start_run(timestamp_sec=1_700_000_000)
+    second_run_id = core.start_run(timestamp_sec=1_700_000_000)
+
+    assert first_run_id == 1_700_000_000
+    assert second_run_id == 1_700_000_001
+
+
+def test_robot_goes_offline_at_timeout_and_recovers():
+    core = ManagerCore(
+        ["robot4"],
+        offline_timeout_sec=29.0,
+    )
+
+    core.update_robot(
+        robot_id="robot4",
+        now=100.0,
+        status=make_robot_status(),
+    )
+
+    assert core.check_offline(now=128.999) == []
+    assert core.robots["robot4"].online is True
+
+    assert core.check_offline(now=129.0) == ["robot4"]
+    assert core.robots["robot4"].online is False
+
+    # 이미 OFFLINE인 로봇을 계속 반환하지 않는다.
+    assert core.check_offline(now=130.0) == []
+
+    # RobotStatus가 다시 오면 ONLINE으로 복귀한다.
+    core.update_robot(
+        robot_id="robot4",
+        now=131.0,
+        status=make_robot_status(),
+    )
+
+    assert core.robots["robot4"].online is True
+    assert core.robots["robot4"].last_seen == 131.0

@@ -57,7 +57,7 @@ class InspectionManager(Node):
         self.declare_parameter("robot_ids", ["robot4", "robot3"])
         self.declare_parameter("survey_robot_id", "robot4")
         self.declare_parameter("inspection_robot_id", "robot3")
-        self.declare_parameter("offline_timeout_sec", 30.0)
+        self.declare_parameter("offline_timeout_sec", 29.0)
         self.declare_parameter("require_robot_ready", True)
 
         bringup_share = Path(get_package_share_directory("scv_bringup"))
@@ -124,6 +124,7 @@ class InspectionManager(Node):
         self.seen_candidate_ids = set()
         self.seen_inspection_results = set()
         self.unavailable_action_servers = set()
+        self.unready_robot_reasons = {}
 
         self.status_subscriptions = [
             self.create_subscription(
@@ -240,7 +241,7 @@ class InspectionManager(Node):
             response.message = "zones.yaml과 facilities.yaml에 경로가 필요합니다."
             return response
 
-        run_id = self.core.start_run()
+        run_id = self.core.start_run(timestamp_sec=int(time.time()))
         self.seen_candidate_ids.clear()
         self.seen_inspection_results.clear()
 
@@ -293,8 +294,16 @@ class InspectionManager(Node):
             return
 
         robot_id = task.preferred_robot_id
-        if not self.robot_is_ready(robot_id):
+        ready, reason = self.robot_readiness(robot_id)
+        if not ready:
+            previous_reason = self.unready_robot_reasons.get(robot_id)
+
+            if previous_reason != reason:
+                self.get_logger().warning(f"{robot_id}: 작업 배정 대기 - {reason}")
+                self.unready_robot_reasons[robot_id] = reason
             return
+
+        self.unready_robot_reasons.pop(robot_id, None)
 
         client = self.execute_task_clients[robot_id]
         if not client.server_is_ready():
@@ -308,19 +317,37 @@ class InspectionManager(Node):
         self.unavailable_action_servers.discard(robot_id)
         self.send_task(task.task_id, robot_id)
 
-    def robot_is_ready(self, robot_id: str) -> bool:
+    def robot_readiness(self, robot_id: str) -> tuple[bool, str]:
         if not self.require_robot_ready:
-            return True
+            return True, ""
 
         robot = self.core.robots[robot_id]
-        if not robot.online or robot.status is None:
-            return False
 
-        return (
-            robot.status.accepting_tasks
-            and robot.status.state
-            in {RobotStatus.STATE_IDLE, RobotStatus.STATE_DOCKED}
-        )
+        if robot.status is None:
+            return False, "RobotStatus가 아직 수신되지 않음"
+
+        if not robot.online:
+            return False, "로봇이 OFFLINE 상태임"
+
+        if not robot.status.accepting_tasks:
+            return (
+                False,
+                "accepting_tasks=false "
+                f"(battery={robot.status.battery_percent:.1f}%)",
+            )
+
+        ready_states = {
+            RobotStatus.STATE_IDLE,
+            RobotStatus.STATE_DOCKED,
+        }
+
+        if robot.status.state not in ready_states:
+            return (
+                False,
+                f"작업을 받을 수 없는 상태임(state={robot.status.state})",
+            )
+
+        return True, ""
 
     def send_task(self, task_id: str, robot_id: str) -> None:
         task = self.core.tasks[task_id]
