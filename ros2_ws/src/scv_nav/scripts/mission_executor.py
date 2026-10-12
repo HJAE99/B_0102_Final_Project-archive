@@ -35,8 +35,8 @@ from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator
 
 T = ExecuteTask.Goal
 S = RobotStatus
-NORMAL_TOL = (0.10, 0.17)    # nav2.yaml general_goal_checker 와 같은 값 (m, rad)
-PRECISE_TOL = (0.05, 0.087)  # PLAN 0-1 설비 점검 지점 5 cm, 5°
+NORMAL_TOL = (0.05, 0.087)   # nav2_rpp.yaml general_goal_checker 와 같은 값 (m, rad). 3-4 시험 (2026-10-12)
+PRECISE_TOL = (0.03, 0.052)  # 설비 점검 지점 3 cm, 3° (PLAN 0-1 목표 5 cm, 5° 안쪽으로)
 # shortcut: facilities.yaml id 앞 세 글자로 종류를 정함, 관제가 kind 를 보내 주면 그 값으로 바꿈
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
         'EXL': InspectionResult.KIND_EXIT_LIGHT}

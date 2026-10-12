@@ -45,8 +45,8 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.10          # 원본 0.25, PLAN 0-1 일반 지점. 설비 점검 지점은 mission_executor 가 0.05 / 0.087 로 바꿈
-      yaw_goal_tolerance: 0.17
+      xy_goal_tolerance: 0.05          # 원본 0.25, 일반 지점 (10/12 3-4 시험: 0.10 이면 매번 7~9 cm 앞에서 멈춤). 정밀 지점은 mission_executor 가 0.03 / 0.052 로 바꿈
+      yaw_goal_tolerance: 0.087
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.2              # PLAN 0-3 측정 속도
@@ -55,7 +55,7 @@ controller_server:
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
       use_velocity_scaled_lookahead_dist: false
-      rotate_to_heading_angular_vel: 1.0
+      rotate_to_heading_angular_vel: 0.5   # 원본 1.0, 도착 회전 오버슈트 줄이기 시험 (2026-10-12)
       transform_tolerance: 0.1
       min_approach_linear_velocity: 0.05
       approach_velocity_scaling_dist: 0.6

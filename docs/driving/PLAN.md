@@ -51,7 +51,7 @@ hhj가 권장값으로 확정했습니다. 요구사항이 바뀌면 이 표를 
 | 3-1 | [추가] 통로 폭 실측 + footprint·inflation 정하기 | 통로 폭 기록(0-2 채움), 30 cm 이격을 지키면서 통로를 지나감 — **완료 10/12**: 최소 1.98 m, footprint·inflation 0.45 m 그대로 | 2-2 |
 | 3-2 | [추가] 컨트롤러 비교 시험 | TurtleBot4 Jazzy 기본 설정에서 시작, MPPI vs RPP 같은 코스 5회씩 경로 이탈 비교 → 하나 선택 — **완료 10/12: RPP 선택** (lookahead 0.4 m, waypoint 지움 거리 0.35 m). robot3 3회 평균 RPP 44.2초·이탈 4.5 cm·최대 16.6 cm / MPPI 47.5초·10.3 cm·27.2 cm (`docs/driving/data/2026-10-12_track_check.csv`) | 2-2 · 3-1 |
 | 3-3 | 선택한 컨트롤러·velocity_smoother 튜닝 (원 3) | 0-3 속도에서 cross-track 목표 달성, navigate_through_poses 통로 주행 | 3-2 |
-| 3-4 | [추가] goal checker 2종 구성 | 일반 지점 / 설비 점검 지점(정밀) 허용 오차 분리 | 3-3 |
+| 3-4 | [추가] goal checker 2종 구성 | 일반 지점 / 설비 점검 지점(정밀) 허용 오차 분리 — **10/12 확정**: 일반 0.05 m/5°, 정밀 0.03 m/3°, RPP `rotate_to_heading_angular_vel` 0.5 rad/s (단계 시험 `docs/driving/data/2026-10-12_tol_check.csv`) | 3-3 |
 | 3-5 | [추가] 측정 속도 확정 | RSSI 팀과 최종 값 확정, 회차마다 같은 속도 재현 (BR-T02) | 3-3 |
 
 ### 3-2 비교 대상 선정 (2026-10-10 확정)
