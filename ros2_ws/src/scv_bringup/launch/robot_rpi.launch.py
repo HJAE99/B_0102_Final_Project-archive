@@ -1,4 +1,6 @@
-"""로봇 RPi 한 대: rssi_scanner — 두 로봇 모두 띄운다 (10/12). (드라이버는 turtlebot4 기본 bringup 이 띄운다)
+"""로봇 RPi 한 대: 우리 노드는 없다 — 드라이버(Create 3 · LiDAR · OAK-D)는 turtlebot4 기본 bringup 이 띄운다.
+
+10/12 저녁: rssi_scanner 는 로봇 위에 얹은 로봇 PC 에서 돈다 (robot_pc.launch.py). 이 파일은 자리만 남긴다.
 
     ros2 launch scv_bringup robot_rpi.launch.py robot_ns:=robot4
 """
@@ -10,8 +12,7 @@ from launch_ros.actions import PushRosNamespace
 
 def generate_launch_description():
     nodes = [
-        # 노드가 준비되면 여기에 추가한다 (RSSI 팀):
-        # Node(package='scv_survey', executable='rssi_scanner', parameters=[{'robot_id': LaunchConfiguration('robot_ns')}]),
+        # RPi 에서 띄울 우리 노드는 없다 (10/12 저녁)
     ]
     return LaunchDescription([
         DeclareLaunchArgument('robot_ns', default_value='robot4', description='로봇 이름공간 (robot4, robot3)'),
