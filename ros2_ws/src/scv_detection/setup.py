@@ -1,4 +1,5 @@
 from setuptools import find_packages, setup
+from glob import glob
 
 package_name = 'scv_detection'
 
@@ -9,15 +10,19 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models', ['models/best.pt']),
+        ('share/' + package_name, ['README.md', 'rosdep.yaml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'numpy', 'opencv-python', 'torch', 'ultralytics'],
     zip_safe=True,
     maintainer='doyoon-kim',
     maintainer_email='tnduaehowl37@gmail.com',
-    description='로봇 PC: detection_alert (inspect_facility 액션 서버)',
+    description='로봇 PC 설비 검출 진단 노드 (InspectFacility 액션 연동 예정)',
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
+            'scv_detection_manager = scv_detection.scv_detection_manager:main',
         ],
     },
 )
