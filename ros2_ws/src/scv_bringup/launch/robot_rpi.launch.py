@@ -1,4 +1,4 @@
-"""로봇 RPi 한 대: rssi_scanner — 로봇 A(robot4)에만 띄운다. (드라이버는 turtlebot4 기본 bringup 이 띄운다)
+"""로봇 RPi 한 대: rssi_scanner — 두 로봇 모두 띄운다 (10/12). (드라이버는 turtlebot4 기본 bringup 이 띄운다)
 
     ros2 launch scv_bringup robot_rpi.launch.py robot_ns:=robot4
 """
