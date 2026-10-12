@@ -10,7 +10,7 @@ import time
 import rclpy
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 
 from scv_msgs.action import PreciseMeasure
@@ -58,7 +58,7 @@ def main(args=None):
     ex.add_node(node)
     try:
         ex.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

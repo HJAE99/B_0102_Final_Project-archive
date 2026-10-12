@@ -11,6 +11,7 @@ from pathlib import Path
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
@@ -90,7 +91,7 @@ def main(args=None):
     node = CellMapWriter()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
