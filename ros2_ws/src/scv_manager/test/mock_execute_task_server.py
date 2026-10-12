@@ -1,3 +1,4 @@
+import math
 import time
 
 import rclpy
@@ -7,7 +8,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from scv_msgs.action import ExecuteTask
-from scv_msgs.msg import RobotStatus
+from scv_msgs.msg import NetSample, RobotStatus
 
 
 class MockExecuteTaskServer(Node):
@@ -22,8 +23,27 @@ class MockExecuteTaskServer(Node):
         self.status_duration_sec = float(
             self.get_parameter("status_duration_sec").value
         )
+        # 묶음 시험: SURVEY 중 경로를 따라 가짜 RSSI 샘플을 낸다.
+        # 사각형은 [x0, y0, x1, y1] 을 이어 붙인 목록 (map 좌표, 칸 경계에 맞춤)
+        self.declare_parameter("publish_samples", True)
+        self.declare_parameter("sample_step_m", 0.25)
+        self.declare_parameter(
+            "shadow_rects",
+            [1.35, 1.75, 1.85, 2.25, 0.85, 4.75, 1.35, 5.25],
+        )
+        self.declare_parameter("miss_rects", [2.35, 2.75, 2.85, 3.25])
+        self.declare_parameter("clear_on_remeasure", ["cell:3,4"])
         self.started_at = time.monotonic()
         self.robot_ids = ("robot4", "robot3")
+        self.sample_seq = 0
+        self.sample_publishers = {
+            robot_id: self.create_publisher(
+                NetSample,
+                f"/{robot_id}/survey/sample",
+                50,
+            )
+            for robot_id in self.robot_ids
+        }
         self.status_publishers = {
             robot_id: self.create_publisher(
                 RobotStatus,
@@ -89,6 +109,45 @@ class MockExecuteTaskServer(Node):
             message.warning = ""
             self.status_publishers[robot_id].publish(message)
 
+    def in_rects(self, name, x, y):
+        values = list(self.get_parameter(name).value)
+        return any(
+            values[k] <= x < values[k + 2] and values[k + 1] <= y < values[k + 3]
+            for k in range(0, len(values) - 3, 4)
+        )
+
+    def publish_samples(self, robot_id, request):
+        step = float(self.get_parameter("sample_step_m").value)
+        points = [
+            (pose.pose.position.x, pose.pose.position.y)
+            for pose in request.waypoints
+        ]
+
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            count = max(int(math.dist((x0, y0), (x1, y1)) / step), 1)
+
+            for k in range(count):
+                sample = NetSample()
+                sample.seq = self.sample_seq
+                self.sample_seq += 1
+                sample.stamp = self.get_clock().now().to_msg()
+                sample.robot_id = robot_id
+                sample.run_id = request.run_id
+                sample.x = x0 + (x1 - x0) * k / count
+                sample.y = y0 + (y1 - y0) * k / count
+                sample.pose_ok = True
+                sample.detected = not self.in_rects(
+                    "miss_rects",
+                    sample.x,
+                    sample.y,
+                )
+                sample.rssi_dbm = (
+                    -80
+                    if self.in_rects("shadow_rects", sample.x, sample.y)
+                    else -55
+                )
+                self.sample_publishers[robot_id].publish(sample)
+
     def execute_callback(self, robot_id, goal_handle):
         request = goal_handle.request
         self.get_logger().info(
@@ -101,6 +160,12 @@ class MockExecuteTaskServer(Node):
         values["task_type"] = request.type
         values["progress"] = 0.0
         waypoint_count = max(len(request.waypoints), 1)
+
+        if (
+            request.type == ExecuteTask.Goal.SURVEY_SEGMENT
+            and self.get_parameter("publish_samples").value
+        ):
+            self.publish_samples(robot_id, request)
 
         for index in range(waypoint_count):
             if goal_handle.is_cancel_requested:
@@ -131,6 +196,16 @@ class MockExecuteTaskServer(Node):
         result = ExecuteTask.Result()
         result.ok = True
         result.reason = ""
+
+        if request.type == ExecuteTask.Goal.REINSPECTION:
+            cleared = request.target_ref in list(
+                self.get_parameter("clear_on_remeasure").value
+            )
+            # mission_executor 와 같은 꼴 (Result 필드는 채우지 않음)
+            result.reason = (
+                f"median={-60.0 if cleared else -80.0:.1f} iqr=2.0 n=30"
+            )
+
         return result
 
 

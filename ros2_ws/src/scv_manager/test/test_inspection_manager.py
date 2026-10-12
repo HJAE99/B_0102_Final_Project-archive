@@ -32,6 +32,17 @@ class FakeRouteBuilder:
         ]
 
 
+class FakeStore:
+    def open_run(self, sector_robots, close_stale=False) -> int:
+        del sector_robots, close_stale
+        return 7
+
+
+class FakeClient:
+    def call_async(self, request) -> None:
+        del request
+
+
 class FakeInspectionManager:
     """ROS 노드를 띄우지 않고 관제 콜백을 시험한다."""
 
@@ -46,6 +57,16 @@ class FakeInspectionManager:
         self.pending_candidates = {}
         self.seen_inspection_results = set()
         self.alerts = []
+        self.store = FakeStore()
+        self.writer_reset_client = FakeClient()
+        self.writer_commit_clients = {}
+
+    def get_parameter(self, name: str) -> SimpleNamespace:
+        del name
+        return SimpleNamespace(value=0)
+
+    def publish_mask(self, robot_id: str, cells: set) -> None:
+        del robot_id, cells
 
     def publish_alert(self, **kwargs) -> None:
         self.alerts.append(kwargs)

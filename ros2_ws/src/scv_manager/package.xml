@@ -14,6 +14,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>scv_bringup</exec_depend>
+  <exec_depend>scv_survey</exec_depend>
+  <depend>nav_msgs</depend>
 
   <test_depend>python3-pytest</test_depend>
 

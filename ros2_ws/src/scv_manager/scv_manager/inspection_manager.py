@@ -1,10 +1,12 @@
 import math
+import re
 import time
 from pathlib import Path
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import (
@@ -16,6 +18,8 @@ from rclpy.qos import (
 from scv_msgs.action import ExecuteTask
 from scv_msgs.msg import Alert, Candidate, InspectionResult, RobotStatus
 from scv_msgs.srv import Reassign
+from scv_survey.cellmap_store import open_store
+from scv_survey.heatmap import cell_center, cell_index, keepout_mask
 from std_srvs.srv import Trigger
 
 from .manager_core import (
@@ -25,6 +29,8 @@ from .manager_core import (
     RunState,
     TaskState,
     Waypoint,
+    mask_cells,
+    remeasure_targets,
 )
 from .route_builder import RouteBuilder
 
@@ -51,6 +57,14 @@ INSPECTION_RESULT_QOS = QoSProfile(
 )
 
 
+MASK_QOS = QoSProfile(
+    history=HistoryPolicy.KEEP_LAST,
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
+
+
 class InspectionManager(Node):
     def __init__(self):
         super().__init__("inspection_manager")
@@ -69,6 +83,25 @@ class InspectionManager(Node):
             "facilities_file",
             str(bringup_share / "config" / "facilities.yaml"),
         )
+
+        # 칸 맵(RSSI 측정 결과) 저장소와 회피 마스크 (묶음 시험)
+        self.declare_parameter("cellmap_backend", "file")
+        self.declare_parameter("cellmap_dir", "~/scv_cellmap")
+        self.declare_parameter("db_dsn_env", "SCV_DB_DSN")
+        self.declare_parameter(
+            "map_yaml",
+            str(bringup_share / "maps" / "testbed_v1.yaml"),
+        )
+        self.declare_parameter("cell_size", 0.5)
+        self.declare_parameter("wall_bounds", [0.08, -0.05, 3.18, 6.48])
+        self.declare_parameter("wall_clearance_m", 0.45)
+        self.declare_parameter("shadow_dbm", -72.0)
+        self.declare_parameter("max_remeasure_per_robot", 5)
+        self.declare_parameter("include_unmeasured", True)
+        self.declare_parameter("dock_keepout_radius_m", 0.6)
+        self.declare_parameter("writer_node", "cell_map_writer")
+        self.declare_parameter("commit_timeout_sec", 10.0)
+        self.declare_parameter("close_stale_run", False)
 
         robot_ids = list(self.get_parameter("robot_ids").value)
         zone_ids = list(self.get_parameter("zone_ids").value)
@@ -95,12 +128,53 @@ class InspectionManager(Node):
             robot_ids=robot_ids,
             offline_timeout_sec=self.offline_timeout_sec,
         )
+        self.cell_size = float(self.get_parameter("cell_size").value)
+        self.store = open_store(
+            str(self.get_parameter("cellmap_backend").value),
+            str(self.get_parameter("map_yaml").value),
+            self.cell_size,
+            str(self.get_parameter("cellmap_dir").value),
+            str(self.get_parameter("db_dsn_env").value),
+        )
         self.route_builder = RouteBuilder(
             zones_file=str(self.get_parameter("zones_file").value),
             facilities_file=str(
                 self.get_parameter("facilities_file").value
             ),
+            wall_bounds=tuple(self.get_parameter("wall_bounds").value),
+            wall_clearance=float(
+                self.get_parameter("wall_clearance_m").value
+            ),
+            origin=self.store.map.origin,
         )
+
+        # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는
+        # 마스크를 한 번 받아야 costmap 이 준비된다.
+        self.mask_publishers = {
+            robot_id: self.create_publisher(
+                OccupancyGrid,
+                f"/{robot_id}/keepout_mask",
+                MASK_QOS,
+            )
+            for robot_id in robot_ids
+        }
+        for robot_id in robot_ids:
+            self.publish_mask(robot_id, set())
+
+        writer_node = str(self.get_parameter("writer_node").value)
+        self.writer_reset_client = self.create_client(
+            Trigger,
+            f"/{writer_node}/reset",
+        )
+        self.writer_commit_clients = {
+            zone_id: self.create_client(
+                Trigger,
+                f"/{writer_node}/commit_{zone_id}",
+            )
+            for zone_id in zone_ids
+        }
+        self.commit_futures = []
+        self.commit_deadline = 0.0
 
         self.alert_publisher = self.create_publisher(
             Alert,
@@ -280,7 +354,24 @@ class InspectionManager(Node):
             )
             return response
 
-        run_id = self.core.start_run(timestamp_sec=int(time.time()))
+        try:
+            run_id = self.store.open_run(
+                {
+                    "".join(filter(str.isdigit, zone_id)) or zone_id: robot_id
+                    for robot_id, zone_id in self.zone_by_robot.items()
+                },
+                bool(self.get_parameter("close_stale_run").value),
+            )
+        except RuntimeError as exc:
+            response.success = False
+            response.message = f"회차를 열 수 없습니다: {exc}"
+            self.get_logger().error(response.message)
+            return response
+
+        run_id = self.core.start_run(run_id=run_id)
+        self.writer_reset_client.call_async(Trigger.Request())
+        for robot_id in self.core.robots:
+            self.publish_mask(robot_id, set())
         self.seen_candidate_ids.clear()
         self.pending_candidates.clear()
         self.seen_inspection_results.clear()
@@ -328,6 +419,7 @@ class InspectionManager(Node):
             PatrolPhase.WAITING_CANDIDATES,
             PatrolPhase.WAITING_KEEPOUT,
         }:
+            self.advance_waiting_phase()
             return
 
         for robot_id in self.core.robots:
@@ -559,6 +651,7 @@ class InspectionManager(Node):
                     ref=task.candidate_id,
                     message="네트워크 후보 재측정 작업을 완료했습니다.",
                 )
+                self.apply_remeasure(robot_id, task, result)
         else:
             message = f"작업 실패: {result.reason or '사유 없음'}"
             self.publish_task_failure(robot_id, task_id, message)
@@ -575,7 +668,14 @@ class InspectionManager(Node):
             self.core.patrol_phase = PatrolPhase.WAITING_CANDIDATES
             self.get_logger().info(
                 f"run_id={self.core.run_id}: 두 섹터 측정·Dock 종료, "
-                "RSSI 후보 분석 완료 신호 대기"
+                "칸 맵 확정 요청"
+            )
+            self.commit_futures = [
+                client.call_async(Trigger.Request())
+                for client in self.writer_commit_clients.values()
+            ]
+            self.commit_deadline = time.monotonic() + float(
+                self.get_parameter("commit_timeout_sec").value
             )
             return
 
@@ -583,7 +683,7 @@ class InspectionManager(Node):
             self.core.patrol_phase = PatrolPhase.WAITING_KEEPOUT
             self.get_logger().info(
                 f"run_id={self.core.run_id}: 재측정·Dock 종료, "
-                "최종 keepout 준비 신호 대기"
+                "회피 마스크 발행 후 설비 점검"
             )
             return
 
@@ -591,6 +691,18 @@ class InspectionManager(Node):
             return
 
         run_id = self.core.run_id
+        all_ok = all(
+            task.state == TaskState.SUCCEEDED
+            for task in self.core.tasks.values()
+        )
+        try:
+            self.store.close_run(run_id, "done" if all_ok else "partial")
+        except RuntimeError as exc:
+            self.get_logger().error(f"회차를 닫지 못했습니다: {exc}")
+        # 회차가 끝난 뒤 손으로 몰 때 막히지 않게 마스크를 비운다
+        for robot_id in self.core.robots:
+            self.publish_mask(robot_id, set())
+
         self.core.complete_run()
         self.publish_alert(
             level=Alert.LEVEL_INFO,
@@ -600,6 +712,233 @@ class InspectionManager(Node):
             message=f"run_id={run_id}의 모든 작업이 종료되었습니다.",
         )
         self.get_logger().info(f"run_id={run_id} 순찰 종료")
+
+    def advance_waiting_phase(self) -> None:
+        """대기 단계에서 다음 단계의 작업을 만든다 (dispatch 타이머에서 호출)."""
+        if self.core.patrol_phase == PatrolPhase.WAITING_KEEPOUT:
+            self.begin_facility_phase()
+            return
+
+        pending = [f for f in self.commit_futures if not f.done()]
+        if pending and time.monotonic() < self.commit_deadline:
+            return
+        if pending:
+            self.get_logger().warning(
+                "칸 맵 확정 응답이 없어 지금 저장된 값으로 진행합니다."
+            )
+        for future in self.commit_futures:
+            if future.done() and future.result() is not None:
+                self.get_logger().info(
+                    f"칸 맵 확정: {future.result().message}"
+                )
+
+        self.queue_cell_candidates()
+        count = self.begin_reinspection_phase()
+        self.get_logger().info(
+            f"run_id={self.core.run_id}: 재측정 대상 {count}칸"
+        )
+
+    def read_cells(self) -> dict:
+        try:
+            return self.store.read_cells(self.core.run_id)
+        except RuntimeError as exc:
+            self.get_logger().error(f"칸 맵을 읽지 못했습니다: {exc}")
+            return {}
+
+    def queue_cell_candidates(self) -> None:
+        """자기 섹터의 미검출·음영·미측정 칸을 그 로봇의 재측정 후보로 넣는다."""
+        cells = self.read_cells()
+        if not cells:
+            return
+
+        grid_cells = self.store.grid_cells()
+        origin = self.store.map.origin
+
+        for robot_id, zone_id in self.zone_by_robot.items():
+            targets = remeasure_targets(
+                cells,
+                self.route_builder.reachable_cells(zone_id, grid_cells),
+                int(self.get_parameter("max_remeasure_per_robot").value),
+                bool(self.get_parameter("include_unmeasured").value),
+            )
+
+            for ix, iy in targets:
+                candidate = Candidate()
+                candidate.candidate_id = f"cell-{ix}-{iy}"
+                candidate.run_id = self.core.run_id
+                candidate.robot_id = robot_id
+                candidate.source = Candidate.SOURCE_NETWORK
+                candidate.ref = f"cell:{ix},{iy}"
+                candidate.x, candidate.y = cell_center(
+                    ix,
+                    iy,
+                    origin[0],
+                    origin[1],
+                    self.cell_size,
+                )
+                self.pending_candidates.setdefault(
+                    candidate.candidate_id,
+                    candidate,
+                )
+
+    def apply_remeasure(self, robot_id: str, task, result) -> None:
+        """재측정 값으로 칸 상태를 다시 정해 저장한다 (target_ref 가 cell:ix,iy 일 때)."""
+        cell = re.fullmatch(r"cell:(-?\d+),(-?\d+)", task.target_ref)
+        if cell is None:
+            return
+
+        # mission_executor 가 Result 필드를 채우지 않으면 reason 에서 읽는다
+        text = re.search(r"median=(-?[\d.]+).*?n=(\d+)", result.reason)
+        if result.n_samples:
+            count, median = result.n_samples, result.rssi_median
+        elif text:
+            count, median = int(text.group(2)), float(text.group(1))
+        else:
+            count, median = 0, 0.0
+
+        if count == 0:
+            state = "miss"
+        elif median < float(self.get_parameter("shadow_dbm").value):
+            state = "shadow"
+        else:
+            state = "normal"
+
+        try:
+            self.store.update_cell(
+                self.core.run_id,
+                int(cell.group(1)),
+                int(cell.group(2)),
+                state,
+                median if count else None,
+                count,
+            )
+        except RuntimeError as exc:
+            self.get_logger().error(f"칸 상태를 쓰지 못했습니다: {exc}")
+
+        cleared = state == "normal"
+        self.publish_alert(
+            level=Alert.LEVEL_INFO if cleared else Alert.LEVEL_WARN,
+            code="CLEARED" if cleared else "REMAINS",
+            robot_id=robot_id,
+            ref=task.target_ref,
+            message=(
+                f"{task.target_ref} 재측정: {state} "
+                f"(median={median:.1f} dBm, n={count})"
+            ),
+        )
+
+    def begin_facility_phase(self) -> None:
+        """남은 음영·미검출 칸을 회피 마스크로 내고 설비 점검·Dock 작업을 만든다."""
+        self.core.patrol_phase = PatrolPhase.FACILITY
+        run_id = self.core.run_id
+        origin = self.store.map.origin
+        zones = self.route_builder.zones()
+
+        blocked = mask_cells(
+            self.read_cells(),
+            self.cell_size,
+            origin,
+            [
+                (float(zone["dock"]["x"]), float(zone["dock"]["y"]))
+                for zone in zones.values()
+                if zone.get("dock")
+            ],
+            float(self.get_parameter("dock_keepout_radius_m").value),
+        )
+        for robot_id in self.core.robots:
+            self.publish_mask(robot_id, blocked)
+        self.get_logger().info(
+            f"run_id={run_id}: 회피 칸 {len(blocked)}개 {sorted(blocked)}"
+        )
+
+        try:
+            routes = self.route_builder.build_facility_routes()
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            self.get_logger().error(f"설비 설정을 읽을 수 없습니다: {exc}")
+            routes = []
+
+        if self.route_builder.skipped_facilities:
+            self.publish_alert(
+                level=Alert.LEVEL_INFO,
+                code="FACILITY_SKIPPED",
+                robot_id="",
+                message="좌표가 없어 건너뛴 설비: "
+                + ", ".join(self.route_builder.skipped_facilities),
+            )
+
+        for robot_id, zone_id in self.zone_by_robot.items():
+            task_count = 0
+
+            for route in routes:
+                if route.zone_id != zone_id:
+                    continue
+
+                view = route.waypoints[0]
+                if cell_index(
+                    view.x,
+                    view.y,
+                    origin[0],
+                    origin[1],
+                    self.cell_size,
+                ) in blocked:
+                    self.publish_alert(
+                        level=Alert.LEVEL_WARN,
+                        code="KEEPOUT_BLOCKED",
+                        robot_id=robot_id,
+                        ref=route.facility_id,
+                        message=(
+                            f"{route.facility_id}: 회피 구역에 막혀 미확인"
+                        ),
+                    )
+                    continue
+
+                self.core.create_task(
+                    task_id=(
+                        f"run-{run_id}-{robot_id}-"
+                        f"facility-{route.facility_id}"
+                    ),
+                    run_id=run_id,
+                    task_type=ExecuteTask.Goal.FACILITY_CHECK,
+                    priority=1,
+                    target_ref=route.facility_id,
+                    preferred_robot_id=robot_id,
+                    allowed_robot_ids=(robot_id,),
+                    waypoints=route.waypoints,
+                )
+                task_count += 1
+
+            if task_count:
+                self.core.create_task(
+                    task_id=f"run-{run_id}-{robot_id}-facility-dock",
+                    run_id=run_id,
+                    task_type=ExecuteTask.Goal.DOCK,
+                    priority=1,
+                    target_ref="dock",
+                    preferred_robot_id=robot_id,
+                    allowed_robot_ids=(robot_id,),
+                    waypoints=(),
+                )
+
+    def publish_mask(self, robot_id: str, cells: set) -> None:
+        info = self.store.map
+        mask = OccupancyGrid()
+        mask.header.frame_id = "map"
+        mask.header.stamp = self.get_clock().now().to_msg()
+        mask.info.resolution = info.resolution
+        mask.info.width = info.width
+        mask.info.height = info.height
+        mask.info.origin.position.x = info.origin[0]
+        mask.info.origin.position.y = info.origin[1]
+        mask.info.origin.orientation.w = 1.0
+        mask.data = keepout_mask(
+            cells,
+            self.cell_size,
+            info.origin,
+            info.resolution,
+            info.width,
+            info.height,
+        )
+        self.mask_publishers[robot_id].publish(mask)
 
     def on_candidate(self, msg: Candidate) -> None:
         if msg.source != Candidate.SOURCE_NETWORK:

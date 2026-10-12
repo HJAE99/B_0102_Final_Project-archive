@@ -27,6 +27,8 @@ setup(
             'manual_tagger = scv_survey.manual_tagger:main',
             'network_map_engine = scv_survey.network_map_engine:main',
             'survey_keys = scv_survey.survey_keys:main',
+            'cell_map_writer = scv_survey.cell_map_writer:main',
+            'precise_server = scv_survey.precise_server:main',
         ],
     },
 )
