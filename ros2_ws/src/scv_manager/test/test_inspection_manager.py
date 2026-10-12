@@ -259,3 +259,15 @@ def test_offline_failure_is_terminal():
     core.fail_active_tasks_for_robot("robot4", "OFFLINE")
 
     assert core.tasks["survey"].state == TaskState.FAILED
+
+
+def test_start_is_rejected_without_cell_map_store():
+    core = ManagerCore(["robot4", "robot3"])
+    manager = FakeInspectionManager(core)
+    manager.store = None
+    response = SimpleNamespace(success=True, message="")
+
+    result = InspectionManager.on_start(manager, None, response)
+
+    assert result.success is False
+    assert core.tasks == {}

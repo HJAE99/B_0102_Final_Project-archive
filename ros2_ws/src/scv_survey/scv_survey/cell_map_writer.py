@@ -33,7 +33,7 @@ class CellMapWriter(Node):
             self.declare_parameter('backend', 'file').value,
             self.declare_parameter('map_yaml', str(bringup / 'maps' / 'testbed_v1.yaml')).value, cell,
             self.declare_parameter('out_dir', '~/scv_cellmap').value,
-            self.declare_parameter('db_dsn_env', 'SCV_DB_DSN').value)
+            self.declare_parameter('db_dsn_env', 'SCV_DB_DSN').value, self.ap_ssid)
         zones_file = self.declare_parameter('zones_file', str(bringup / 'config' / 'zones.yaml')).value
         with open(zones_file, encoding='utf-8') as f:
             self.zones = {str(z['id']): z['polygon'] for z in yaml.safe_load(f)['zones']}

@@ -33,3 +33,10 @@ def test_file_store_round_trip(tmp_path):
 def test_in_polygon():
     square = [[0, 0], [2, 0], [2, 2], [0, 2]]
     assert in_polygon(1, 1, square) and not in_polygon(3, 1, square)
+
+
+def test_db_backend_needs_ap_ssid(tmp_path):
+    import pytest
+    from scv_survey.cellmap_store import open_store
+    with pytest.raises(RuntimeError, match='ap_ssid'):
+        open_store('db', make_map(tmp_path), 0.5)

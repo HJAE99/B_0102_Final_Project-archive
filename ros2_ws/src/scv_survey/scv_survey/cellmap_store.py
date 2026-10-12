@@ -158,7 +158,9 @@ class FileStore:
 class DbStore:
     """PostgreSQL 직접 (scv_db 01_schema.sql 의 runs · grid_cells · aps · grid_stats). 스키마는 바꾸지 않는다"""
 
-    def __init__(self, map_yaml, cell_size: float = 0.5, dsn_env: str = 'SCV_DB_DSN'):
+    def __init__(self, map_yaml, cell_size: float = 0.5, dsn_env: str = 'SCV_DB_DSN', ap_ssid: str = ''):
+        if not ap_ssid:     # 빈 값이면 DB 에 뜻 없는 AP 줄이 생긴다
+            raise RuntimeError('db 백엔드는 ap_ssid 가 필요합니다')
         try:
             import psycopg as driver
         except ImportError:
@@ -177,6 +179,10 @@ class DbStore:
                 or abs(res - self.map.resolution) > 1e-6 or abs(grid - cell_size) > 1e-6):
             raise RuntimeError(f'DB 활성 지도(origin {ox:.3f},{oy:.3f} res {res} 격자 {grid})가 '
                                f'map_yaml·cell_size({cell_size})와 다릅니다')
+        # 쓰는 쪽(writer)과 고치는 쪽(관제)이 같은 AP 줄을 보도록 여기서 한 번 정한다
+        self._q('INSERT INTO aps (map_id, ssid, note, is_active) VALUES (%s, %s, %s, true) '
+                'ON CONFLICT (map_id, ssid) DO NOTHING', (self.map_id, ap_ssid, 'cell_map_writer 자동 등록 (묶음 시험)'))
+        self.ap_id = self._q('SELECT ap_id FROM aps WHERE map_id = %s AND ssid = %s', (self.map_id, ap_ssid))[0][0]
 
     def _q(self, sql: str, params=(), many=None):
         """한 번 접속해 실행하고 닫는다. SELECT·RETURNING 이면 줄 목록. 오류에 접속 정보를 싣지 않는다"""
@@ -215,20 +221,12 @@ class DbStore:
         r = self._q("SELECT run_id FROM runs WHERE status = 'running'")
         return r[0][0] if r else 0
 
-    def _ap_id(self, ssid: str = '') -> Optional[int]:
-        if ssid:
-            self._q('INSERT INTO aps (map_id, ssid, note, is_active) VALUES (%s, %s, %s, true) '
-                    'ON CONFLICT (map_id, ssid) DO NOTHING', (self.map_id, ssid, 'cell_map_writer 자동 등록 (묶음 시험)'))
-            return self._q('SELECT ap_id FROM aps WHERE map_id = %s AND ssid = %s', (self.map_id, ssid))[0][0]
-        r = self._q('SELECT ap_id FROM aps WHERE map_id = %s ORDER BY is_active DESC, ap_id LIMIT 1', (self.map_id,))
-        return r[0][0] if r else None
-
     def _cell_ids(self) -> Dict[Cell, int]:
         return {(i, j): cid for i, j, cid in
                 self._q('SELECT ix, iy, cell_id FROM grid_cells WHERE map_id = %s', (self.map_id,))}
 
     def write_cells(self, run_id: int, zone: str, rows: List[dict], ap_ssid: str = '') -> int:
-        ap, ids = self._ap_id(ap_ssid or 'unknown'), self._cell_ids()
+        ap, ids = self.ap_id, self._cell_ids()
         vals = [(run_id, ids[(c['ix'], c['iy'])], ap, c['n'], c['mean'], c['median'], c['var'], c['min'], c['max'],
                  'ok' if c['n'] >= MIN_SAMPLES_OK else 'low', TO_DB[c['state']])
                 for c in rows if (c['ix'], c['iy']) in ids]     # grid_cells 에 없는 칸(벽)은 건너뜀
@@ -242,12 +240,12 @@ class DbStore:
 
     def read_cells(self, run_id: int) -> Dict[Cell, CellRow]:
         rows = self._q('SELECT g.ix, g.iy, s.state, s.median, s.n, s.confidence FROM grid_stats s '
-                       'JOIN grid_cells g USING (cell_id) WHERE s.run_id = %s', (run_id,))
+                       'JOIN grid_cells g USING (cell_id) WHERE s.run_id = %s AND s.ap_id = %s', (run_id, self.ap_id))
         return {(i, j): CellRow(FROM_DB[st], med, n, conf) for i, j, st, med, n, conf in rows}
 
     def update_cell(self, run_id: int, ix: int, iy: int, state: str, median: Optional[float], n: int) -> bool:
-        cid, ap = self._cell_ids().get((ix, iy)), self._ap_id()
-        if cid is None or ap is None:
+        cid, ap = self._cell_ids().get((ix, iy)), self.ap_id
+        if cid is None:
             return False
         self._q('INSERT INTO grid_stats (run_id, cell_id, ap_id, n, median, confidence, state) '
                 "VALUES (%s, %s, %s, %s, %s, 'ok', %s) ON CONFLICT (run_id, cell_id, ap_id) DO UPDATE SET "
@@ -259,9 +257,10 @@ class DbStore:
         return self._q('SELECT ix, iy, center_x, center_y FROM grid_cells WHERE map_id = %s', (self.map_id,))
 
 
-def open_store(backend: str, map_yaml, cell_size: float = 0.5, out_dir='~/scv_cellmap', dsn_env: str = 'SCV_DB_DSN'):
+def open_store(backend: str, map_yaml, cell_size: float = 0.5, out_dir='~/scv_cellmap', dsn_env: str = 'SCV_DB_DSN',
+               ap_ssid: str = ''):
     if backend == 'db':
-        return DbStore(map_yaml, cell_size, dsn_env)
+        return DbStore(map_yaml, cell_size, dsn_env, ap_ssid)
     return FileStore(map_yaml, cell_size, out_dir)
 
 

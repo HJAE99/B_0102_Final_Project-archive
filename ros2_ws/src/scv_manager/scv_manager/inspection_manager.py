@@ -18,7 +18,7 @@ from rclpy.qos import (
 from scv_msgs.action import ExecuteTask
 from scv_msgs.msg import Alert, Candidate, InspectionResult, RobotStatus
 from scv_msgs.srv import Reassign
-from scv_survey.cellmap_store import open_store
+from scv_survey.cellmap_store import open_store, read_map_yaml
 from scv_survey.heatmap import cell_center, cell_index, keepout_mask
 from std_srvs.srv import Trigger
 
@@ -88,6 +88,7 @@ class InspectionManager(Node):
         self.declare_parameter("cellmap_backend", "file")
         self.declare_parameter("cellmap_dir", "~/scv_cellmap")
         self.declare_parameter("db_dsn_env", "SCV_DB_DSN")
+        self.declare_parameter("ap_ssid", "")
         self.declare_parameter(
             "map_yaml",
             str(bringup_share / "maps" / "testbed_v1.yaml"),
@@ -128,14 +129,13 @@ class InspectionManager(Node):
             robot_ids=robot_ids,
             offline_timeout_sec=self.offline_timeout_sec,
         )
-        self.cell_size = float(self.get_parameter("cell_size").value)
-        self.store = open_store(
-            str(self.get_parameter("cellmap_backend").value),
-            str(self.get_parameter("map_yaml").value),
-            self.cell_size,
-            str(self.get_parameter("cellmap_dir").value),
-            str(self.get_parameter("db_dsn_env").value),
+        self.alert_publisher = self.create_publisher(
+            Alert,
+            "/inspection/alerts",
+            10,
         )
+        self.cell_size = float(self.get_parameter("cell_size").value)
+        self.map = read_map_yaml(str(self.get_parameter("map_yaml").value))
         self.route_builder = RouteBuilder(
             zones_file=str(self.get_parameter("zones_file").value),
             facilities_file=str(
@@ -145,7 +145,7 @@ class InspectionManager(Node):
             wall_clearance=float(
                 self.get_parameter("wall_clearance_m").value
             ),
-            origin=self.store.map.origin,
+            origin=self.map.origin,
         )
 
         # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는
@@ -176,11 +176,27 @@ class InspectionManager(Node):
         self.commit_futures = []
         self.commit_deadline = 0.0
 
-        self.alert_publisher = self.create_publisher(
-            Alert,
-            "/inspection/alerts",
-            10,
-        )
+        # 저장소(DB)를 못 열어도 노드는 살려 둔다. 위에서 낸 빈 마스크가 없으면
+        # 주행의 costmap 이 준비되지 않기 때문이다. 순찰 시작만 거절한다.
+        try:
+            self.store = open_store(
+                str(self.get_parameter("cellmap_backend").value),
+                str(self.get_parameter("map_yaml").value),
+                self.cell_size,
+                str(self.get_parameter("cellmap_dir").value),
+                str(self.get_parameter("db_dsn_env").value),
+                str(self.get_parameter("ap_ssid").value),
+            )
+        except (RuntimeError, ImportError) as exc:
+            self.store = None
+            self.get_logger().error(f"칸 맵 저장소를 열지 못했습니다: {exc}")
+            self.publish_alert(
+                level=Alert.LEVEL_ERROR,
+                code="DB_UNAVAILABLE",
+                robot_id="",
+                message=f"칸 맵 저장소를 열지 못했습니다: {exc}",
+            )
+
         self.execute_task_clients = {
             robot_id: ActionClient(
                 self,
@@ -321,6 +337,11 @@ class InspectionManager(Node):
         if self.core.run_state in {RunState.RUNNING, RunState.ESTOPPED}:
             response.success = False
             response.message = "이미 진행 중인 순찰이 있습니다."
+            return response
+
+        if self.store is None:
+            response.success = False
+            response.message = "칸 맵 저장소를 열지 못했습니다."
             return response
 
         try:
@@ -752,7 +773,7 @@ class InspectionManager(Node):
             return
 
         grid_cells = self.store.grid_cells()
-        origin = self.store.map.origin
+        origin = self.map.origin
 
         for robot_id, zone_id in self.zone_by_robot.items():
             targets = remeasure_targets(
@@ -831,11 +852,12 @@ class InspectionManager(Node):
         """남은 음영·미검출 칸을 회피 마스크로 내고 설비 점검·Dock 작업을 만든다."""
         self.core.patrol_phase = PatrolPhase.FACILITY
         run_id = self.core.run_id
-        origin = self.store.map.origin
+        origin = self.map.origin
         zones = self.route_builder.zones()
 
+        cells = self.read_cells()
         blocked = mask_cells(
-            self.read_cells(),
+            cells,
             self.cell_size,
             origin,
             [
@@ -849,6 +871,14 @@ class InspectionManager(Node):
             self.publish_mask(robot_id, blocked)
         self.get_logger().info(
             f"run_id={run_id}: 회피 칸 {len(blocked)}개 {sorted(blocked)}"
+        )
+        low = sorted(
+            cell
+            for cell, row in cells.items()
+            if row.state != "normal" and row.confidence != "ok"
+        )
+        self.get_logger().info(
+            f"마스크 밖 low 음영·미검출 칸 {len(low)}개 {low}"
         )
 
         try:
@@ -920,7 +950,7 @@ class InspectionManager(Node):
                 )
 
     def publish_mask(self, robot_id: str, cells: set) -> None:
-        info = self.store.map
+        info = self.map
         mask = OccupancyGrid()
         mask.header.frame_id = "map"
         mask.header.stamp = self.get_clock().now().to_msg()

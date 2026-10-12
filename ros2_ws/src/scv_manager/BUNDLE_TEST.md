@@ -33,9 +33,11 @@ ros2 topic echo /inspection/alerts           # 알림 보기
 - `inspection_manager` 는 켜지자마자 `/{robot}/keepout_mask` 에 빈 마스크를 낸다. 주행의 keepout_layer 는
   이 마스크를 받아야 costmap 이 준비되므로 **관제를 먼저 켠다.**
 - 칸 맵은 기본으로 `~/scv_cellmap/Z1.json`·`Z2.json` 에 쓴다. DB(관제 PC 의 PostgreSQL)에 쓰려면
-  두 노드에 `-p backend:=db`(writer) · `-p cellmap_backend:=db`(manager) 를 주고, 같은 터미널에
-  `SCV_DB_DSN` 이 있어야 한다. DB 에는 testbed_v1 지도가 격자 0.5 m 로 올라가 활성이어야 한다.
-  db 쪽은 아직 실제로 돌려 보지 못했다.
+  두 노드에 `-p backend:=db -p ap_ssid:=<핫스팟>`(writer) · `-p cellmap_backend:=db -p ap_ssid:=<핫스팟>`(manager)
+  를 주고, 같은 터미널에 `SCV_DB_DSN` 이 있어야 한다. `ap_ssid` 는 rssi_scanner 의 대상 SSID 와 같은 값이다.
+  DB 에는 testbed_v1 지도가 격자 0.5 m 로 올라가 활성이어야 한다.
+  DB 를 열지 못해도 `inspection_manager` 는 살아서 빈 마스크를 내고, 순찰 시작만 거절한다 (알림 `DB_UNAVAILABLE`).
+  db 쪽은 아직 실제 DB 로 돌려 보지 못했다.
 
 ## 2. 로봇 PC (MSI) — 로봇마다. 아래는 robot4, 다른 로봇은 robot3 으로 바꾼다
 
