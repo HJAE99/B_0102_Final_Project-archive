@@ -13,3 +13,7 @@ facilities:
     kind: exit_light          # =3 · 비상구 유도등
     expected: {x: 0.0, y: 0.0}
     view: {x: 0.0, y: 0.0, yaw: 0.0}
+  - id: RCK-01
+    kind: rack                # =4 · 랙 적재물 돌출
+    expected: {x: 0.0, y: 0.0}          # 랙의 위치
+    view: {x: 0.0, y: 0.0, yaw: 0.0}    # 랙을 측면에서 보는 자세

@@ -3,12 +3,13 @@
 uint8 KIND_EXTINGUISHER=1       # 소화기 (유무·위치·압력계)
 uint8 KIND_SHUTTER=2            # 방화셔터 하강구간
 uint8 KIND_EXIT_LIGHT=3         # 비상구 유도등
+uint8 KIND_RACK=4               # 랙 적재물 돌출 (측면 시점, OpenCV)
 
 uint8 NORMAL=0
 uint8 NOT_DETECTED=1
 uint8 OCCLUDED=2
 uint8 POSITION_ANOMALY=3
-uint8 ABNORMAL=4                # 압력·소등·적치
+uint8 ABNORMAL=4                # 압력·소등·적치·돌출
 uint8 UNCONFIRMED=5             # 자세 보정 3회 뒤에도 판정 못 함 (E6)
 
 builtin_interfaces/Time stamp
