@@ -1,6 +1,6 @@
 # mission_executor 주행 흐름
 
-2026-10-12 · 기준 코드 `feature/driving` 8034dfd `ros2_ws/src/scv_nav/scripts/mission_executor.py` · 인터페이스 `docs/interfaces.md` v0.2.11
+2026-10-12 · 기준 코드 `feature/driving` fd23581 `ros2_ws/src/scv_nav/scripts/mission_executor.py` · 인터페이스 `docs/interfaces.md` v0.2.11
 
 주행에 관한 부분만 그렸습니다. 설비 점검(IF-05)·재측정(IF-04)은 "도착 뒤 다른 노드 액션 호출"까지만 나옵니다. `{ns}` 는 `/robot4`·`/robot3` 입니다.
 
@@ -35,9 +35,9 @@ flowchart LR
     ME -- "topic cmd_vel (TwistStamped 0)<br/>취소 때 정지" --> C3
 
     AMCL -- "topic amcl_pose<br/>position · orientation · covariance" --> ME
-    ME -- "topic initialpose<br/>HOME 자세" --> AMCL
+    ME -- "topic initialpose<br/>HOME 자세 · 공분산 0.15 m, 10°<br/>(amcl_pose 올 때까지 반복)" --> AMCL
 
-    ME -- "action navigate_through_poses (waypoints)<br/>navigate_to_pose (HOME)<br/>compute_path_to_pose (길 확인)<br/>spin · drive_on_heading (자세 보정)" --> NAV
+    ME -- "action navigate_through_poses (waypoints)<br/>navigate_to_pose (HOME)<br/>compute_path_to_pose (길 확인)<br/>spin (시작 ±15° · 자세 보정) · drive_on_heading (자세 보정)" --> NAV
     NAV -- "Feedback: number_of_poses_remaining · current_pose<br/>Result: SUCCEEDED · FAILED · CANCELED" --> ME
     ME -- "service controller_server/set_parameters<br/>general_goal_checker.xy · yaw_goal_tolerance" --> NAV
 
@@ -48,7 +48,7 @@ flowchart LR
 ```
 
 - keepout_mask 는 mission_executor 를 거치지 않고 Nav2 costmap 의 keepout_layer 로 바로 들어갑니다 (점선).
-- `dock`·`undock`·`dock_status`·`initialpose` 와 Nav2 액션은 `TurtleBot4Navigator`(`nav`)가 대신 주고받습니다.
+- `dock`·`undock`·`dock_status`·`initialpose` 와 Nav2 액션은 `TurtleBot4Navigator`(`nav`)가 대신 주고받습니다. initialpose 는 `localize()` 가 `nav` 의 publisher 로 직접 보냅니다 (setInitialPose 는 공분산 0 이라 AMCL 이 몇 도 틀린 것을 못 고침).
 
 ## 2. 시작 (main)
 
@@ -58,14 +58,15 @@ flowchart TD
     B -- 예 --> D["그 값을 HOME 으로"]
     B -- 아니오 --> C{"HOME 표에 ns 있음?"}
     C -- 아니오 --> X["종료: -p x y yaw 를 주세요"]
-    C -- 예 --> D2["HOME 표 값<br/>robot3 2.855, 4.656, 176.7°<br/>robot4 2.863, 0.948, 175.8°"]
+    C -- 예 --> D2["HOME 표 값<br/>robot3 2.806, 4.610, 179.9°<br/>robot4 2.863, 0.948, 175.8°"]
     D --> E{"dock_status.is_docked?"}
     D2 --> E
     E -- 예 --> F["undock 액션"]
     E -- 아니오 --> G
-    F --> G["initialpose ← HOME"]
-    G --> H["Nav2 활성화 대기"]
-    H --> I["IF-11 액션 서버 · IF-12 1 Hz 타이머 시작"]
+    F --> G["localize: initialpose ← HOME<br/>공분산 0.15 m · 10°, amcl_pose 올 때까지 반복"]
+    G --> H["Nav2 활성화 대기<br/>(localizer=robot_localization: (0,0) 다시 안 보냄)"]
+    H --> H2["settle: 제자리 +15° → −15° spin<br/>AMCL 이 라이다로 방향 맞춤"]
+    H2 --> I["IF-11 액션 서버 · IF-12 1 Hz 타이머 시작"]
     I --> J{"0.5초마다: 놀고 있고<br/>battery ≤ 20 %이고 docked 아님?"}
     J -- 예 --> K["go_dock (waypoints 없음 → HOME)"]
     K --> J
@@ -80,7 +81,7 @@ flowchart TD
     A -- 예 --> R["REJECT"]
     A -- 아니오 --> B["ACCEPT · busy=True"]
     B --> C{"state = DOCKED이고 type ≠ DOCK?"}
-    C -- 예 --> C1["undock → initialpose ← HOME"]
+    C -- 예 --> C1["undock → localize(HOME) → settle(±15°)"]
     C -- 아니오 --> D
     C1 --> D["state = EXECUTING"]
     D --> T{"type"}
@@ -142,7 +143,7 @@ flowchart TD
     A{"dock_status.is_docked?"} -- 예 --> A1["state = DOCKED · 성공"]
     A -- 아니오 --> B{"waypoints 있음?"}
     B -- 예 --> C["follow(waypoints)"]
-    B -- 아니오 --> D["navigate_to_pose(HOME)"]
+    B -- 아니오 --> D["navigate_to_pose<br/>HOME 에서 dock 반대쪽으로 0.3 m (DOCK_BACKOFF)"]
     C & D --> E{"ok?"}
     E -- 아니오 --> E1["실패 (그 사유)"]
     E -- 예 --> F["state = DOCKING · dock 액션"]
@@ -153,14 +154,15 @@ flowchart TD
 
 ## 6. artifact 「1 AMR · mission_executor」 와 비교
 
-artifact 는 807b7e9 기준이라 그 뒤 바뀐 곳이 틀립니다.
+artifact 는 807b7e9 기준이라 그 뒤(8034dfd·fd23581) 바뀐 곳이 틀립니다.
 
-| 항목 | artifact | 지금 코드 (8034dfd) |
+| 항목 | artifact | 지금 코드 (fd23581) |
 | --- | --- | --- |
 | 스스로 dock 하는 배터리 | 15 % | **20 %** (`DOCK_PCT`) |
 | 허용 오차 | 정밀 0.05 m/0.087 rad, 평소 0.10/0.17 | **정밀 0.03/0.052, 평소 0.05/0.087**. 못 바꾸면 `TOLERANCE_FAILED` |
 | 막힘 E1 | 5초에 그 점 건너뜀, 10초에 남은 점 모두 | 5초 BLOCKED(회전 0.3 rad 도 움직임으로 셈). 길 없는 점은 바로 뺌. 10초·Nav2 실패면 길 없는 점, 없으면 지금 향하던 점 **하나만** 뺌. 출발 전에도 길 없는 점을 뺌 |
-| DOCK | HOME 으로 가서 dock | waypoints 있으면 그 경로, 없으면 HOME. dock 뒤 안 붙었으면 `DOCK_FAILED` |
-| 작업 중 undock | undock | undock 뒤 initialpose ← HOME 도 줌 |
+| DOCK | HOME 으로 가서 dock | waypoints 있으면 그 경로, 없으면 HOME 에서 0.3 m 더 나간 자리. dock 뒤 안 붙었으면 `DOCK_FAILED` |
+| 초기 위치 | initialpose 설정 | `localize()`: 공분산 0.15 m·10° 넣어 보냄 → `settle()`: 제자리 ±15° 회전. 시작 때와 Dock 에서 작업 받아 undock 할 때 모두 |
+| robot3 HOME | 2.855, 4.656, 176.7° | 2.806, 4.610, 179.9° (10/12 재측정) |
 | 입출력 | — | `cmd_vel` 정지, `dock_status`, `compute_path_to_pose`, `navigate_to_pose`, `spin`, `drive_on_heading` 빠짐. initialpose 는 액션이 아니라 토픽 |
 | 결과 `rssi_*` · `InspectFacility.run_id` · RCK 종류 | 아직 안 채움 (⚠) | 맞음, 아직 안 채움 |
