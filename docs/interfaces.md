@@ -130,10 +130,12 @@ facilities:
 zones:
   - id: Z1
     robot: robot4                       # 이 섹터를 맡는 로봇 (robot4 · robot3)
+    dock: {x: 0.0, y: 0.0}               # Dock 위치 (초기 위치·Dock 접근 기준, 주행 목표 아님)
     polygon: [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
     spacing: 1.0                        # 왕복 경로 간격 [m]
   - id: Z2
     robot: robot3
+    dock: {x: 0.0, y: 0.0}
     polygon: [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
     spacing: 1.0
 ```
