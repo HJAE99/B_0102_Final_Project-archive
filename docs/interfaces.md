@@ -8,6 +8,9 @@ v0.2.2: 고정 웹캠은 쓰지 않습니다 (10/10 PM 결정) — `webcam_node`
 v0.2.4: 설정 파일 형식(`facilities.yaml`, `zones.yaml`)과 기기별 launch 뼈대 추가
 v0.2.5: 시나리오 변경 (10/11 PM 결정) — 로봇 A 는 통신 측정·재측정, 로봇 B 는 물리 인프라 점검. keepout 마스크(IF-10)는 로봇 B 에만 발행하고, REINSPECTION 은 음영 후보를 로봇 A 가 그 구역 안에서 다시 재는 작업입니다. 순서는 A → B → A 이고 로봇 A 는 RSSI 만, 로봇 B 는 물리 점검만 합니다. 음영 구역 안에는 설비를 두지 않습니다. 메시지 정의(`scv_msgs`)는 그대로입니다
 v0.2.6: 기준 지도 확정 (10/11 PM 결정) — 주행 팀의 `testbed_v1`, `scv_bringup/maps/` 에 한 벌. 아래 「기준 지도」 절. 측정 노드는 로봇 A 쪽에만, 판정 노드는 로봇 B 쪽에만 올립니다
+v0.2.7: 시나리오 변경 (10/12 PM 결정, v0.2.5·v0.2.6 의 역할 분리를 대신함) — 두 로봇이 동시에 주행하고 섹터 2개를 하나씩 맡아 같은 일(측정 → 재측정 → 점검)을 합니다. 측정·판정 노드는 두 로봇 쪽에 모두 올립니다. keepout 마스크(IF-10)는 지도 전체 크기 한 장을 **두 로봇에** 발행하되, 측정·재측정 동안은 빈 마스크이고 재측정 뒤 남은 칸으로 점검 단계 전에 발행합니다. REINSPECTION 은 그 섹터의 로봇이 음영 칸 안에서 다시 재는 작업입니다. 섹터와 맡는 로봇은 `zones.yaml` 의 `robot:`. DOCK 작업은 inspection_manager 가 만듭니다. 랙 적재물 돌출(`KIND_RACK=4`) 추가. 관제 PC 안의 DB·웹은 PostgreSQL + Redis + 웹 API (관제 팀 `scv_database`), 로봇 PC ↔ 관제 PC 는 이 문서의 ROS 인터페이스 그대로입니다.
+v0.2.8: keepout 마스크 발행 규칙 (10/12 오후 PM 결정) — 발행자는 시작부터 **빈 마스크**를 `/robot4/keepout_mask`·`/robot3/keepout_mask` 에 transient_local 로 발행합니다(지도 `testbed_v1` 과 같은 크기·원점·해상도). 발행자가 없으면 Nav2 의 `keepout_layer` 가 준비되지 않아 경로 계획이 실패하므로, 주행은 이 발행을 확인한 뒤 `keepout_layer` 를 켭니다. 두 로봇은 서로 기다리지 않고, 마스크는 **로봇마다 그 로봇이 점검 단계에 들어갈 때** 그 로봇 토픽으로 보냅니다 — 내용은 재측정이 끝난 섹터의 남은 음영·미검출·미측정 칸(Dock 반경 0.6 m 제외). 측정·재측정 중인 로봇은 빈 마스크 그대로입니다. 재측정 뒤에도 남은 칸은 관제에 알림을 띄워 사람이 확인합니다.
+v0.2.9: 맵은 DB 로, IF-10 은 관제가 (10/12 회의 뒤 PM 결정) — network_map_engine(RSSI)은 1차 측정의 칸 맵(칸 중심 좌표 · 중앙값 · 상태 미측정/미검출/음영/정상)을 **관제 API 로 DB 에 쓰고**, 재측정 대상 칸을 후보(IF-15)로 냅니다. 재측정 결과(IF-04 → IF-11 result)는 inspection_manager 가 DB 의 그 칸에 적습니다. **IF-10 은 inspection_manager(관제)가 냅니다** — 시작할 때 두 로봇에 빈 마스크, 로봇마다 점검 작업을 보내기 전에 DB 맵의 남은 칸으로 그 로봇 토픽에 발행합니다. 노드 사이에 요청을 주고받지 않고 DB 를 봅니다. DB 쓰기는 모두 관제 API 로 합니다. 칸 0.5 m · 칸 값은 검출된 RSSI 의 중앙값 · 검출 0개이거나 미검출 비율 ≥ 0.5 이면 미검출 · 중앙값 ≤ −75 dBm 이면 음영 · 샘플 수 기준 없음 (`scv_survey` 코드값). 미측정은 갈 수 있는 칸(섹터 안, 벽·장애물에서 0.45 m 밖) 중 샘플이 없는 칸이고, 재측정 대상입니다(로직에만, 시연에는 없음). 왕복 경로 간격(`spacing`)은 0.5 m 입니다.
 v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSample` 에 `detected` 추가, 미검출 샘플의 `rssi_dbm` 은 쓰지 않음 (10/10 PM·RSSI 팀)
 
 팀 사이에 오가는 토픽·서비스·액션과 그 타입을 한곳에 모았습니다. 타입 정의는 `ros2_ws/src/scv_msgs/` 에 있습니다. 고칠 것이 있으면 그 약속의 **주인**에게 말하고, 주인이 `scv_msgs` 와 이 문서를 함께 고칩니다.
@@ -43,7 +46,8 @@ v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSa
 | `scv_nav` | 로봇 PC | `mission_executor`, Nav2 설정 | 주행 |
 | `scv_detection` | 로봇 PC | `detection_alert` | 비전·물리 인프라 |
 | `scv_manager` | 관제 PC | `inspection_manager` | 관제·작업 관리 (A) |
-| `scv_monitor` | 관제 PC | `ros_bridge`, 관제 웹 | 관제·작업 관리 (B) |
+| `scv_monitor` | 관제 PC | `ros_bridge`, 관제 웹·API | 관제·작업 관리 (B) |
+| `scv_database` | 관제 PC | PostgreSQL·Redis 스키마·설치 (노드 없음, 10/12) | 관제·작업 관리 (B) |
 | `scv_bringup` | 5대 전부 | launch, params, 지도, `facilities.yaml` | PM |
 | `scv_testbed` | PC | 가짜 데이터 도구, 시험 스크립트 | PM |
 
@@ -62,7 +66,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | 07 | `{ns}/scan` · `odom` · `tf` · `tf_static` / `{ns}/cmd_vel` | topic · 표준 타입 | RPi ↔ Nav2 (로봇 PC) | 센서 best effort · cmd_vel reliable | 주행 |
 | 08 | `{ns}/survey/sample` | topic · `scv_msgs/NetSample` | survey_buffer (로봇 PC) → ros_bridge · network_map_engine (관제 PC) | reliable · depth 50 · 1 Hz (sync 재발행은 depth를 넘지 않게 천천히, 예: 20 Hz 이하) | RSSI A |
 | 09 | `{ns}/survey/sync` | service · `scv_msgs/SyncSamples` | ros_bridge (관제 PC) → survey_buffer (로봇 PC) | 재연결 때 | RSSI A |
-| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | network_map_engine (관제 PC) → Nav2 (로봇 B 의 로봇 PC, `/robot3` 에만) | reliable · transient_local | RSSI B |
+| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | inspection_manager (관제 PC, DB 맵을 읽어) → Nav2 (두 로봇 PC — 시작부터 빈 마스크, 로봇마다 점검 작업 전에 남은 칸으로, v0.2.9) | reliable · transient_local | 관제 A |
 | 11 | `{ns}/execute_task` | action · `scv_msgs/ExecuteTask` | inspection_manager (관제 PC) → mission_executor (로봇 PC) | — | 관제 A |
 | 12 | `{ns}/status` | topic · `scv_msgs/RobotStatus` | mission_executor (로봇 PC) → inspection_manager · ros_bridge (관제 PC) | reliable · 1 Hz | 관제 A |
 | 14 | `{ns}/oakd/rgb/image_raw/compressed` · depth | topic · `sensor_msgs/CompressedImage` | OAK-D (RPi) → detection_alert (로봇 PC) · CAM 탭 (관제 PC) | best effort · 구독할 때만 | 비전 B |
@@ -104,10 +108,10 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `Alert` 필드 전체 | `code` 는 문자열 (CANDIDATE, CONFIRMED, E1–E8 …) | 관제 A |
 | `Candidate` 위치 | 초안의 `geometry_msgs/Pose2D` 는 폐기 예정 타입이라 `x`·`y`·`yaw` 로 바꿈 | RSSI B · 관제 A |
 | `Candidate` 종류 | 혼잡·로밍 의심은 범위에서 빠져 상수에서 뺌 (1 과 4 만 남김) | RSSI B |
-| `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가 | 관제 A · 주행 |
+| `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가. DOCK 작업은 inspection_manager 가 만든다 (측정 → DOCK → 재측정 → DOCK → 점검 → DOCK, 10/12) | 관제 A · 주행 |
 | 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 | 관제 A · 주행 · RSSI A |
 | 근거 사진 축소본 | JPEG, 긴 변 640 px 이하. 원본은 로봇 PC `image_ref` | 비전 B · 관제 B |
-| 네트워크 후보의 `robot_id` | 측정은 로봇 A 만 하므로 `robot4` (10/11) | RSSI B · 관제 A |
+| 네트워크 후보의 `robot_id` | 측정한 로봇의 이름 (10/12: 두 로봇이 각자 섹터를 측정) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
 | `resent` | sync 요청으로 다시 보낸 샘플만 true | RSSI A · 관제 B |
 | 자세 보정 "뒤로" (`adjust_forward_m` < 0) | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
@@ -120,15 +124,22 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 # facilities.yaml — 설비 등록. kind 는 InspectionResult 의 KIND_* 와 같다
 facilities:
   - id: EXT-01
-    kind: extinguisher                  # extinguisher · shutter · exit_light
+    kind: extinguisher                  # extinguisher · shutter · exit_light · rack
     expected: {x: 0.0, y: 0.0}          # 설비가 있어야 할 위치 (shutter 는 band: 하강 띠의 네 꼭짓점)
     view: {x: 0.0, y: 0.0, yaw: 0.0}    # 로봇이 서서 볼 자세 (설비에서 1.0–1.2 m)
 
-# zones.yaml — 측정 구역
+# zones.yaml — 측정 구역 = 섹터 (10/12: 2개, 로봇 하나가 섹터 하나)
 zones:
   - id: Z1
+    robot: robot4                       # 이 섹터를 맡는 로봇 (robot4 · robot3)
+    dock: {x: 0.0, y: 0.0}               # Dock 위치 (초기 위치·Dock 접근 기준, 주행 목표 아님)
     polygon: [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
-    spacing: 1.0                        # 왕복 경로 간격 [m]
+    spacing: 0.5                        # 왕복 경로 간격 [m] = 칸 크기 (10/12)
+  - id: Z2
+    robot: robot3
+    dock: {x: 0.0, y: 0.0}
+    polygon: [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]
+    spacing: 0.5
 ```
 
 기기별 실행: `ros2 launch scv_bringup robot_rpi.launch.py robot_ns:=robot4` · `robot_pc.launch.py robot_ns:=robot4` · `control_pc.launch.py` — 노드가 준비되면 PM 이 launch 에 넣습니다.
