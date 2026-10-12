@@ -1,4 +1,3 @@
-# ⚠ keepout_layer 는 enabled: false (2026-10-11, global·local 2곳). PLAN 4-1 에서 RSSI 마스크 발행 확인 후 반드시 true 로 다시 켤 것
 # turtlebot4_navigation (jazzy) config/nav2.yaml 사본. 원본에서 바꾼 곳은 "# 원본" 주석 (속도 0.2 m/s 두 곳)
 # 컨트롤러 MPPI (TurtleBot4 기본). RPP 비교는 nav2_rpp.yaml
 # 실행 (저장소 루트에서, robot3 예시):
@@ -152,13 +151,13 @@ local_costmap:
                   [-0.134,  0.134],
                   [ 0.000,  0.189],
                   [ 0.134,  0.134]]"
+      use_maximum: true                  # StaticLayer 가 읽는 costmap 단위 값 (플러그인 안에 두면 무시됨). false 면 keepout 마스크의 빈 칸이 지도 벽을 덮어 지움 (2026-10-12)
       plugins: ["static_layer", "voxel_layer", "keepout_layer", "inflation_layer"]
       keepout_layer:                     # PLAN 4-1 · IF-10 RSSI 음영 마스크. 점유(100) 칸 = 통과 불가
         plugin: "nav2_costmap_2d::StaticLayer"
-        enabled: false                   # ⚠ 4-1 에서 반드시 true 로 켤 것. 마스크(keepout_mask) 발행자가 없으면 costmap 이 준비 안 됨 → 경로 계획 실패 (2026-10-11)
-        map_topic: keepout_mask
+        enabled: true                    # 마스크(keepout_mask) 발행자가 없으면 costmap 이 준비 안 됨 → 경로 계획 실패. 관제가 시작부터 빈 마스크를 냄 (interfaces v0.2.8)
+        map_topic: $(var namespace)/keepout_mask   # 그냥 keepout_mask 면 {ns}/global_costmap/keepout_mask 로 붙음 (IF-10 은 {ns}/keepout_mask)
         map_subscribe_transient_local: true
-        use_maximum: true                # 마스크의 빈 칸이 지도 벽을 지우지 않게
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 4.0
@@ -206,13 +205,13 @@ global_costmap:
                   [ 0.134,  0.134]]"
       resolution: 0.06
       track_unknown_space: true
+      use_maximum: true                  # StaticLayer 가 읽는 costmap 단위 값 (플러그인 안에 두면 무시됨). false 면 keepout 마스크의 빈 칸이 지도 벽을 덮어 지움 (2026-10-12)
       plugins: ["static_layer", "obstacle_layer", "keepout_layer", "inflation_layer"]
       keepout_layer:                     # PLAN 4-1 · IF-10 RSSI 음영 마스크. 점유(100) 칸 = 통과 불가
         plugin: "nav2_costmap_2d::StaticLayer"
-        enabled: false                   # ⚠ 4-1 에서 반드시 true 로 켤 것. 마스크(keepout_mask) 발행자가 없으면 costmap 이 준비 안 됨 → 경로 계획 실패 (2026-10-11)
-        map_topic: keepout_mask
+        enabled: true                    # 마스크(keepout_mask) 발행자가 없으면 costmap 이 준비 안 됨 → 경로 계획 실패. 관제가 시작부터 빈 마스크를 냄 (interfaces v0.2.8)
+        map_topic: $(var namespace)/keepout_mask   # 그냥 keepout_mask 면 {ns}/global_costmap/keepout_mask 로 붙음 (IF-10 은 {ns}/keepout_mask)
         map_subscribe_transient_local: true
-        use_maximum: true                # 마스크의 빈 칸이 지도 벽을 지우지 않게
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true

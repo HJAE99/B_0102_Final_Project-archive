@@ -11,8 +11,8 @@
 #   FACILITY_CHECK: 마지막 waypoint 에 정밀 도착 → {ns}/inspect_facility (자세 보정 피드백은 회전·전진으로 따름)
 #   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 30초
 #   DOCK:           waypoints(없으면 undock 위치)로 가서 dock
-# 막힘(E1): 5초 동안 5 cm 도 못 가면 BLOCKED, 10초면 그 waypoint 를 건너뜀
-# 배터리(E2): 30 % 이하 새 작업 거절(DOCK 제외), 15 % 이하 작업 취소 후 dock
+# 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
+# 배터리(E2): 30 % 이하 새 작업 거절(DOCK 제외), DOCK_PCT 이하 작업 취소 후 dock
 import math
 import threading
 import time
@@ -41,6 +41,7 @@ PRECISE_TOL = (0.03, 0.052)  # 설비 점검 지점 3 cm, 3° (PLAN 0-1 목표 5
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
         'EXL': InspectionResult.KIND_EXIT_LIGHT}
 # undock 직후 위치 (x m, y m, yaw 도). 2-1 pose_check 3회 평균 (docs/driving/data/2026-10-11_pose_check.csv)
+DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
 HOME = {'/robot3': (2.855, 4.656, 176.7), '/robot4': (2.863, 0.948, 175.8)}
 
 
@@ -143,52 +144,79 @@ class MissionExecutor(Node):
     def follow(self, gh, waypoints, precise=False):
         if not waypoints:
             return False, 'NO_WAYPOINTS'
-        if precise:
-            self.set_tolerance(*PRECISE_TOL)
         try:
+            # 정밀 값으로 못 바꾸면 일반 오차로 도착해 버리므로 출발하지 않음 (원복은 finally)
+            if precise and not self.set_tolerance(*PRECISE_TOL):
+                return False, 'TOLERANCE_FAILED'
             return self.follow_loop(gh, list(waypoints))
         finally:
             if precise:
                 self.set_tolerance(*NORMAL_TOL)
 
     def follow_loop(self, gh, waypoints):
-        n, done, skipped = len(waypoints), 0, 0
-        while waypoints:
-            self.nav.goThroughPoses(waypoints)
-            last_xy, last_t = None, time.time()
+        n = len(waypoints)
+        left = self.drop_unreachable(list(enumerate(waypoints)))   # (원래 번호, pose)
+        skipped = n - len(left)
+        while left:
+            self.nav.goThroughPoses([w for _, w in left])
+            fb, last_xy, last_t = None, None, time.time()
             while not self.nav.isTaskComplete():
-                if gh.is_cancel_requested or self.battery <= 15.0:
+                if gh.is_cancel_requested or self.battery <= DOCK_PCT:
                     self.nav.cancelTask()
                     self.stop()
                     return False, 'CANCELED' if gh.is_cancel_requested else 'LOW_BATTERY'
-                fb = self.nav.getFeedback()
+                fb = self.nav.getFeedback() or fb
                 if fb:
-                    i = done + len(waypoints) - fb.number_of_poses_remaining
+                    i = left[min(len(left) - fb.number_of_poses_remaining, len(left) - 1)][0]
                     self.progress = i / n
                     gh.publish_feedback(ExecuteTask.Feedback(waypoint_index=i, progress=self.progress))
-                    xy = (fb.current_pose.pose.position.x, fb.current_pose.pose.position.y)
-                    if last_xy is None or math.dist(xy, last_xy) > 0.05:
+                    q = fb.current_pose.pose.orientation
+                    xy = (fb.current_pose.pose.position.x, fb.current_pose.pose.position.y,
+                          2 * math.atan2(q.z, q.w))
+                    # 5 cm 또는 0.3 rad 바뀌면 움직임 (제자리 회전을 막힘으로 세지 않게)
+                    if last_xy is None or math.dist(xy[:2], last_xy[:2]) > 0.05 or \
+                            abs(math.remainder(xy[2] - last_xy[2], math.tau)) > 0.3:
                         last_xy, last_t = xy, time.time()
                         if self.state == S.STATE_BLOCKED:
                             self.state, self.warning = S.STATE_EXECUTING, ''
                     elif time.time() - last_t > 10.0:
-                        break   # 막힘 10초: 지금 향하는 waypoint 를 건너뜀
+                        break   # 막힘 10초
                     elif time.time() - last_t > 5.0 and self.state != S.STATE_BLOCKED:
                         self.state, self.warning = S.STATE_BLOCKED, 'BLOCKED'   # 5초: Nav2 가 재계획하는 중
+                        rest = left[max(len(left) - fb.number_of_poses_remaining, 0):]
+                        if len(self.drop_unreachable(rest)) < len(rest):
+                            break   # 길이 사라진 점이 있으면 10초를 기다리지 않고 바로 뺌
                 time.sleep(0.2)
             else:
                 res = self.nav.getResult()
                 if res == TaskResult.SUCCEEDED:
                     return (True, '') if not skipped else (False, f'BLOCKED skipped={skipped}')
-                return False, str(res)
-            # 막힘으로 빠져나옴
+                if res != TaskResult.FAILED:
+                    return False, str(res)
+            # 막힘 10초 또는 Nav2 실패: 지난 점을 버리고, 남은 점 중 길 없는 점만 뺌. 다 갈 수 있으면(사람·상자 같은 일시 막힘) 지금 향하던 점을 뺌
             self.nav.cancelTask()
-            k = len(waypoints) - fb.number_of_poses_remaining   # 지금 향하던 waypoint 위치
-            self.get_logger().warn(f'BLOCKED 10 s → waypoint {done + k} 건너뜀')
-            done, skipped = done + k + 1, skipped + 1
-            waypoints = waypoints[k + 1:]
+            left = left[max(len(left) - fb.number_of_poses_remaining, 0):] if fb else left
+            kept = self.drop_unreachable(left)
+            if len(kept) == len(left):
+                kept = left[1:]
+            gone = [i for i, _ in left if all(i != j for j, _ in kept)]
+            self.get_logger().warn(f'BLOCKED → waypoint {gone} 건너뜀')
+            skipped += len(gone)
+            left = kept
             self.state = S.STATE_EXECUTING
-        return False, f'BLOCKED skipped={skipped}'   # 마지막 waypoint 가 막힘
+        return False, f'BLOCKED skipped={skipped}'   # 남은 waypoint 가 모두 막힘
+
+    def drop_unreachable(self, left):
+        # 앞 점 → 다음 점 경로가 없는 waypoint 를 뺌 (첫 구간은 지금 위치에서). 플래너 tolerance(0.5 m) 안이면 갈 수 있는 것으로 봄
+        kept, prev = [], None
+        for i, w in left:
+            path = self.nav.getPath(prev or w, w, use_start=prev is not None)
+            if path and path.poses:
+                kept.append((i, w))
+                prev = w
+            else:
+                self.get_logger().warn(f'waypoint {i} 로 가는 길 없음')
+        return kept
 
     def inspect(self, gh, g):
         adjust = []   # 피드백 콜백은 executor 스레드라서 nav 호출은 이 스레드에서 한다
@@ -245,7 +273,10 @@ class MissionExecutor(Node):
         if not ok:
             return ok, reason
         self.state = S.STATE_DOCKING
-        self.nav.dock()
+        self.nav.dock()   # 결과를 돌려주지 않아 dock 상태로 확인
+        if not self.nav.getDockedStatus():
+            self.state = S.STATE_IDLE
+            return False, 'DOCK_FAILED'
         self.state = S.STATE_DOCKED
         return True, ''
 
@@ -262,11 +293,13 @@ class MissionExecutor(Node):
             Parameter('general_goal_checker.yaw_goal_tolerance', value=yaw).to_parameter_msg()])
         if not self.param_cli.wait_for_service(timeout_sec=2.0):
             self.get_logger().error('controller_server 파라미터 서비스 없음, 허용 오차 못 바꿈')
-            return
+            return False
         f = self.param_cli.call_async(req)
         while not f.done():
             time.sleep(0.05)
-        self.get_logger().info(f'goal 허용 오차 xy={xy} yaw={yaw}')
+        ok = all(r.successful for r in f.result().results)
+        self.get_logger().info(f'goal 허용 오차 xy={xy} yaw={yaw} ok={ok}')
+        return ok
 
     def wait_nav(self):
         while not self.nav.isTaskComplete():
@@ -299,8 +332,8 @@ def main():
     spin.start()
     try:
         while rclpy.ok():
-            # 놀고 있을 때 배터리 15 % 이하면 스스로 dock (작업 중이면 follow 가 처리)
-            if not node.busy and node.battery <= 15.0 and node.state != S.STATE_DOCKED:
+            # 놀고 있을 때 배터리 DOCK_PCT 이하면 스스로 dock (작업 중이면 follow 가 처리)
+            if not node.busy and node.battery <= DOCK_PCT and node.state != S.STATE_DOCKED:
                 node.busy = True
                 node.go_dock(None, [])
                 node.busy = False
