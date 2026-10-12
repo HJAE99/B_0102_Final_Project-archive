@@ -107,7 +107,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가 | 관제 A · 주행 |
 | 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 | 관제 A · 주행 · RSSI A |
 | 근거 사진 축소본 | JPEG, 긴 변 640 px 이하. 원본은 로봇 PC `image_ref` | 비전 B · 관제 B |
-| 네트워크 후보의 `robot_id` | 측정은 로봇 A 만 하므로 `robot4` (10/11) | RSSI B · 관제 A |
+| 네트워크 후보의 `robot_id` | 측정한 로봇의 이름 (10/12: 두 로봇이 각자 섹터를 측정) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
 | `resent` | sync 요청으로 다시 보낸 샘플만 true | RSSI A · 관제 B |
 | 자세 보정 "뒤로" (`adjust_forward_m` < 0) | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
@@ -120,7 +120,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 # facilities.yaml — 설비 등록. kind 는 InspectionResult 의 KIND_* 와 같다
 facilities:
   - id: EXT-01
-    kind: extinguisher                  # extinguisher · shutter · exit_light
+    kind: extinguisher                  # extinguisher · shutter · exit_light · rack
     expected: {x: 0.0, y: 0.0}          # 설비가 있어야 할 위치 (shutter 는 band: 하강 띠의 네 꼭짓점)
     view: {x: 0.0, y: 0.0, yaw: 0.0}    # 로봇이 서서 볼 자세 (설비에서 1.0–1.2 m)
 
