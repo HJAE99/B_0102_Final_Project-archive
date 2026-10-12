@@ -8,5 +8,8 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 개인 일정표 (로컬 전용)
+docs/driving/SCHEDULE.md
+
 # 편집기 설정
 .vscode/
