@@ -14,6 +14,31 @@
 - 설비 좌표가 (0, 0) 인 EXT-01·EXL-01·RCK-01 은 건너뛴다. 지금은 robot4 의 SHT-01·SHT-02 만 한다.
 - 단계는 회차 전체에 하나라서, 한 로봇이 먼저 끝나도 다른 로봇이 Dock 에 올 때까지 다음 단계를 기다린다.
 
+## 한 번에 띄우기 (PC 마다 명령 하나)
+
+빌드(0절)를 한 뒤, **관제 PC 를 먼저** 띄운다.
+
+```bash
+# 관제 PC — robot4 한 대, 칸 맵은 파일
+ros2 launch scv_bringup control_pc.launch.py robots:=robot4
+# 관제 PC — 두 대, 칸 맵은 DB (같은 터미널에 SCV_DB_DSN 을 직접 export 해 둔다)
+ros2 launch scv_bringup control_pc.launch.py backend:=db ap_ssid:=<핫스팟>
+
+# 로봇 PC — 저장소 뿌리에서. localization · Nav2 · mission_executor · RSSI · 정밀 측정 서버 · 가짜 비전이 함께 뜬다
+ros2 launch scv_bringup robot_pc.launch.py robot_ns:=robot4 iface:=<무선랜> ssid:=<핫스팟>
+
+# 시작 (관제 PC)
+ros2 service call /inspection/start std_srvs/srv/Trigger
+```
+
+- **로봇 PC launch 는 켜고 20초 뒤 `mission_executor` 가 스스로 undock 한다. 로봇이 움직인다.** 주변을 비우고 켠다.
+- 로봇 PC launch 는 아직 실제 로봇에서 돌려 보지 못했다. 한 묶음으로 안 뜨면 2절처럼 터미널을 나눠 하나씩 띄운다.
+- RSSI 스캔은 로봇 PC 마다 한 번 `sudo setcap cap_net_admin+ep /usr/sbin/iw` 가 필요하다 (scv_survey/README 「스캔 권한」).
+- Discovery Server 를 쓰는 PC 에서 `ros2 topic list` 가 비어 보이면 `ROS_SUPER_CLIENT=True` 와 `--spin-time 8` 을 준다.
+- 시험은 `python3 -m pytest -p no:launch_testing -p no:launch_ros src/scv_manager/test src/scv_survey/test -q` (87 passed).
+
+아래 1–2절은 같은 것을 하나씩 띄우는 방법이다.
+
 ## 0. 모든 PC
 
 ```bash
