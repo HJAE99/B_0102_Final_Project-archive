@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+websockets
+numpy
+pillow
+pyyaml
+# rclpy · sensor_msgs · nav_msgs · geometry_msgs · std_msgs · irobot_create_msgs는 ROS 2 Jazzy(apt)에서 — pip로 설치하지 않음
