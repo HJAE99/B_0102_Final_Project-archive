@@ -2,24 +2,27 @@
 # PLAN 3-2·3-3: 같은 코스를 한 번 주행 (컨트롤러마다 5회 반복 실행)
 #   python3 course_run.py --ros-args -r __ns:=/robot3
 # 순서: 시작점으로 이동 → Enter 대기(이때 track_check 를 켬) → COURSE 웨이포인트를 차례로 통과
-# COURSE 좌표는 3-1 통로 실측 후 testbed_v1 지도 기준으로 채움
+# 코스(testbed_v1, 약 7.2 m): 가운데 틈(y≈3.55)·위쪽 틈(y≈4.8)을 가운데로 지나고 90° 코너 4개. 골판지 레일(x 1.9–2.0, y 2.1–2.8)은 피함
 import rclpy
 from nav2_simple_commander.robot_navigator import TaskResult
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator
 
-# (x m, y m, yaw 도). 첫 점이 시작점. 아래는 자리 표시용 값
+# (x m, y m, yaw 도). 첫 점이 시작점. yaw 는 진행 방향 (navigate_through_poses 는 마지막 점의 yaw 만 맞춤)
 COURSE = [
-    (0.5, 0.5, 90.0),
-    (0.5, 3.0, 90.0),
-    (0.5, 5.5, 0.0),
-    (2.5, 5.5, -90.0),
+    (1.0, 1.0, 90.0),
+    (1.0, 3.55, 90.0),    # 가운데 틈 (x 0.05–1.95, 실측 1.98 m)
+    (1.0, 4.2, 0.0),
+    (2.2, 4.2, 90.0),
+    (2.2, 5.6, 180.0),    # 위쪽 틈 (x 1.15–3.2, 실측 2.05 m) 지나서
+    (0.8, 5.6, 180.0),
 ]
 
 
 def main():
     rclpy.init()
     nav = TurtleBot4Navigator()
-    nav.waitUntilNav2Active()
+    # 'amcl' 이면 amcl_pose 를 받을 때까지 (0,0) 초기 pose 를 보냄 → 초기 pose 는 건드리지 않고 Nav2 만 기다림
+    nav.waitUntilNav2Active(localizer='robot_localization')
     poses = [nav.getPoseStamped([x, y], yaw) for x, y, yaw in COURSE]
 
     nav.info('시작점으로 이동')

@@ -16,6 +16,7 @@ bt_navigator:
     wait_for_service_timeout: 1000
     action_server_result_timeout: 900.0
     navigators: ["navigate_to_pose", "navigate_through_poses"]
+    default_nav_through_poses_bt_xml: $(find-pkg-share scv_nav)/config/navigate_through_poses_scv.xml   # waypoint 지움 거리 0.7 → 0.35 (2026-10-12)
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
     navigate_through_poses:
