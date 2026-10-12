@@ -6,7 +6,8 @@ v0.2: 회차 전달·근거 사진·후보 발견 로봇·재개/재배정·각�
 v0.2.1: 로봇 이름공간 `/robot4`·`/robot3`, 모든 기기 turtle08, 빌드 전 가상환경 끄기, 자세 보정 "뒤로" 처리 제안
 v0.2.2: 고정 웹캠은 쓰지 않습니다 (10/10 PM 결정) — `webcam_node` 없음, CAM 탭은 로봇 카메라(OAK-D)만
 v0.2.4: 설정 파일 형식(`facilities.yaml`, `zones.yaml`)과 기기별 launch 뼈대 추가
-v0.2.5: 시나리오 변경 (10/11 PM 결정) — 로봇 A 는 통신 측정·재측정, 로봇 B 는 물리 인프라 점검. keepout 마스크(IF-10)는 로봇 B 에만 발행하고, REINSPECTION 은 음영 후보를 로봇 A 가 그 구역 안에서 다시 재는 작업입니다. 메시지 정의(`scv_msgs`)는 그대로입니다
+v0.2.5: 시나리오 변경 (10/11 PM 결정) — 로봇 A 는 통신 측정·재측정, 로봇 B 는 물리 인프라 점검. keepout 마스크(IF-10)는 로봇 B 에만 발행하고, REINSPECTION 은 음영 후보를 로봇 A 가 그 구역 안에서 다시 재는 작업입니다. 순서는 A → B → A 이고 로봇 A 는 RSSI 만, 로봇 B 는 물리 점검만 합니다. 음영 구역 안에는 설비를 두지 않습니다. 메시지 정의(`scv_msgs`)는 그대로입니다
+v0.2.6: 기준 지도 확정 (10/11 PM 결정) — 주행 팀의 `testbed_v1`, `scv_bringup/maps/` 에 한 벌. 아래 「기준 지도」 절. 측정 노드는 로봇 A 쪽에만, 판정 노드는 로봇 B 쪽에만 올립니다
 v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSample` 에 `detected` 추가, 미검출 샘플의 `rssi_dbm` 은 쓰지 않음 (10/10 PM·RSSI 팀)
 
 팀 사이에 오가는 토픽·서비스·액션과 그 타입을 한곳에 모았습니다. 타입 정의는 `ros2_ws/src/scv_msgs/` 에 있습니다. 고칠 것이 있으면 그 약속의 **주인**에게 말하고, 주인이 `scv_msgs` 와 이 문서를 함께 고칩니다.
@@ -16,6 +17,21 @@ v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSa
 - `{ns}` 는 로봇 이름공간입니다: 로봇 A = 4번 `/robot4`, 로봇 B = 3번 `/robot3`. `robot_id` 필드에는 앞의 `/` 없이 `robot4`, `robot3` 을 씁니다.
 - 코드에 로봇 번호를 직접 쓰지 않습니다. 노드는 이름공간을 launch 인자(`robot_ns`)로 받아, 로봇이 바뀌어도 launch만 고치면 되게 합니다.
 - 좌표는 저장 지도(`map`) 기준이고 단위는 m, 각도는 rad 입니다.
+
+## 기준 지도
+
+모든 팀이 같은 지도 한 벌을 씁니다: `ros2_ws/src/scv_bringup/maps/testbed_v1.yaml` · `testbed_v1.pgm` (주행 팀이 10/10 에 만든 지도, 10/11 PM 확정).
+
+| 항목 | 값 |
+| --- | --- |
+| 해상도 | 0.05 m/px |
+| origin | `[-0.150, -0.250, 0]` — 지도 그림 왼쪽 아래 모서리의 map 좌표 |
+| map 원점 (0, 0) | 주행 공간 안쪽 왼쪽 아래 벽 모서리 |
+| 크기 | 69 × 138 px (주행 공간 약 3.2 × 6.5 m) |
+
+- 격자 지도·keepout 마스크·`facilities.yaml`·`zones.yaml` 의 좌표는 모두 이 지도의 `map` 좌표입니다.
+- 지도는 바꾸지 않습니다. 바꿔야 하면 PM 에게 말하고, PM 이 이 폴더의 파일과 이 절을 함께 고칩니다.
+- 각 팀 패키지 안의 지도 사본(`scv_nav/maps`, `scv_survey/maps`)은 기준이 아닙니다.
 - `/inspection/...` 은 로봇과 무관한 관제 PC 쪽 이름입니다.
 
 ## 기기와 패키지
@@ -91,7 +107,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가 | 관제 A · 주행 |
 | 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 | 관제 A · 주행 · RSSI A |
 | 근거 사진 축소본 | JPEG, 긴 변 640 px 이하. 원본은 로봇 PC `image_ref` | 비전 B · 관제 B |
-| 네트워크 후보의 `robot_id` | 두 로봇 병합 칸이면 그 칸의 가장 최근 샘플을 잰 로봇 (제안) | RSSI B · 관제 A |
+| 네트워크 후보의 `robot_id` | 측정은 로봇 A 만 하므로 `robot4` (10/11) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
 | `resent` | sync 요청으로 다시 보낸 샘플만 true | RSSI A · 관제 B |
 | 자세 보정 "뒤로" (`adjust_forward_m` < 0) | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
