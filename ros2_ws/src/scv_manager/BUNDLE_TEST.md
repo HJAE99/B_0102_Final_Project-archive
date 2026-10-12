@@ -1,0 +1,82 @@
+# 묶음 시험 실행 순서 (RSSI + 주행 + 관제) — 임시 브랜치 `temp/bundle-test-1012`
+
+시연과 같은 배치: 로봇마다 로봇 PC(MSI) 한 대, 관제 PC(VICTUS) 한 대.
+로봇은 PM 이 허락하고 다른 팀이 쓰지 않을 때만 움직인다.
+
+## 흐름
+
+```
+두 로봇 측정(SURVEY) → Dock → 칸 맵 확정 → 자기 섹터의 미검출·음영·미측정 칸 재측정 → Dock
+→ 남은 칸을 회피 마스크로 → 설비 점검 → Dock → 회차 종료
+```
+
+- robot4 = Z1(아래, 셔터 띠), robot3 = Z2(위). `robot_ids`·`zone_ids` 파라미터의 순서로 짝짓는다.
+- 설비 좌표가 (0, 0) 인 EXT-01·EXL-01·RCK-01 은 건너뛴다. 지금은 robot4 의 SHT-01·SHT-02 만 한다.
+- 단계는 회차 전체에 하나라서, 한 로봇이 먼저 끝나도 다른 로봇이 Dock 에 올 때까지 다음 단계를 기다린다.
+
+## 0. 모든 PC
+
+```bash
+git fetch && git checkout temp/bundle-test-1012 && git pull
+cd ros2_ws && colcon build --packages-select scv_msgs scv_bringup scv_survey scv_manager scv_nav
+source install/setup.bash
+```
+
+## 1. 관제 PC (VICTUS) — 로봇 PC 의 Nav2 보다 먼저
+
+```bash
+ros2 run scv_survey cell_map_writer          # 한 대만 시험: --ros-args -p sample_topics:="['/robot4/survey/sample']"
+ros2 run scv_manager inspection_manager      # 한 대만 시험: --ros-args -p robot_ids:="['robot4']" -p zone_ids:="['Z1']"
+ros2 topic echo /inspection/alerts           # 알림 보기
+```
+
+- `inspection_manager` 는 켜지자마자 `/{robot}/keepout_mask` 에 빈 마스크를 낸다. 주행의 keepout_layer 는
+  이 마스크를 받아야 costmap 이 준비되므로 **관제를 먼저 켠다.**
+- 칸 맵은 기본으로 `~/scv_cellmap/Z1.json`·`Z2.json` 에 쓴다. DB(관제 PC 의 PostgreSQL)에 쓰려면
+  두 노드에 `-p backend:=db`(writer) · `-p cellmap_backend:=db`(manager) 를 주고, 같은 터미널에
+  `SCV_DB_DSN` 이 있어야 한다. DB 에는 testbed_v1 지도가 격자 0.5 m 로 올라가 활성이어야 한다.
+  db 쪽은 아직 실제로 돌려 보지 못했다.
+
+## 2. 로봇 PC (MSI) — 로봇마다. 아래는 robot4, 다른 로봇은 robot3 으로 바꾼다
+
+```bash
+# (1) localization · Nav2 — 주행 팀 방식 그대로 (params 는 scv_nav/config/nav2.yaml 또는 nav2_rpp.yaml)
+# (2) 작업 실행
+python3 src/scv_nav/scripts/mission_executor.py --ros-args -r __ns:=/robot4
+# (3) RSSI 측정 (rssi_scanner · manual_tagger · 미리보기 히트맵)
+ros2 launch scv_survey laptop_test.launch.py pose_source:=tf robot_ns:=robot4 rviz:=false iface:=<무선랜> ssid:=<핫스팟>
+# (4) 재측정용 30초 정밀 측정 서버 (임시)
+ros2 run scv_survey precise_server --ros-args -r __ns:=/robot4
+# (5) 가짜 비전 (설비 점검 요청에 2초 뒤 NORMAL)
+python3 src/scv_manager/test/mock_inspect_facility_server.py --ros-args -r __ns:=/robot4
+```
+
+- 주행의 `fake_servers.py` 는 같이 켜지 않는다. 가짜 `survey/precise` 가 (4) 와 이름이 겹친다.
+- (4) 가 없으면 재측정 작업이 `NO_SERVER` 로 실패하고, (5) 가 없으면 설비 점검이 실패한다. 회차는 끝까지 간다.
+
+## 3. 시작 · 멈춤 (관제 PC)
+
+```bash
+ros2 service call /inspection/start  std_srvs/srv/Trigger
+ros2 service call /inspection/estop  std_srvs/srv/Trigger    # 두 로봇 작업 모두 취소
+ros2 service call /inspection/resume std_srvs/srv/Trigger
+```
+
+## 4. 볼 것
+
+| 단계 | 확인 |
+| --- | --- |
+| 시작 | 관제 로그에 두 로봇 `작업 전송` 이 함께 나온다 |
+| 측정 | 섹터당 12점. x 0.53 ↔ 2.73, y 0.5 간격. 2–4분 |
+| 칸 확정 | 관제 로그 `칸 맵 확정: Z1: N칸 (음영 a · 미검출 b · low c)` 가 로봇 PC 히트맵과 맞는지 |
+| 재측정 | 로봇마다 최대 5칸(`max_remeasure_per_robot`). 알림 `CLEARED`(해제) · `REMAINS`(남음) |
+| 마스크 | 관제 로그 `회피 칸 N개 [...]`. RViz 의 `/{robot}/global_costmap/costmap` 에 그 칸이 장애물로 보인다 |
+| 설비 | SHT-01·SHT-02. 관측 자리가 회피 칸 안이면 `KEEPOUT_BLOCKED` 알림을 내고 건너뛴다 |
+| 끝 | 알림 `RUN_COMPLETED`, 마스크가 다시 빈 것으로 |
+
+## 알아 둘 것
+
+- 샘플이 1개뿐인 칸(low)은 음영이어도 마스크에 넣지 않는다. 측정 속도가 빨라 low 가 많으면 음영 칸이 빠질 수 있다.
+- keepout_layer 는 inflation 앞에 있어서 회피 칸 둘레 0.45 m 도 비용이 붙는다. 좁은 곳에서는 길이 막힐 수 있다.
+- 로봇 없이 관제 PC 한 대로 흐름만 보려면 2절 대신
+  `python3 src/scv_manager/test/mock_execute_task_server.py` 를 켠다 (가짜 샘플도 함께 낸다).
