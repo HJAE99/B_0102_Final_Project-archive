@@ -7,3 +7,6 @@ log/
 __pycache__/
 *.pyc
 *.pyo
+
+# 편집기 설정
+.vscode/
