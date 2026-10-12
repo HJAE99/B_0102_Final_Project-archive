@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # PLAN 5-1·5-2·5-3·3-4·4-2: IF-11 {ns}/execute_task 액션 서버 + IF-12 {ns}/status 1 Hz. 작업 한 건씩 받아 Nav2 로 실행
-#   python3 mission_executor.py --ros-args -r __ns:=/robot3 -p x:=0.0 -p y:=0.0 -p yaw:=0.0
+#   python3 mission_executor.py --ros-args -r __ns:=/robot3
+#   (undock 상태로 다른 자리에서 다시 켤 때만 -p x:=… -p y:=… -p yaw:=… 로 그 자리 좌표를 줌)
 # 시작: Dock 에 있으면 undock → 초기 pose 설정 → Nav2 활성화 대기 (dock_init.py 를 합침)
-# x, y(m), yaw(도)는 undock 직후 로봇의 지도(testbed_v1) 좌표. Dock 에서는 lidar 가 꺼져 있어 이 위치를 기준으로 함
+# HOME 의 x, y(m), yaw(도)는 undock 직후 로봇의 지도(testbed_v1) 좌표. Dock 에서는 lidar 가 꺼져 있어 이 위치를 기준으로 함
 # 이 위치는 Dock 바로 앞이므로 배터리 부족·DOCK 작업 때 여기로 돌아와 dock 한다
 # 속도 상한 0.2 m/s 는 Nav2 controller·velocity_smoother 설정에서 건다 (이 파일에서 속도를 내지 않음)
 # 작업 종류
@@ -39,6 +40,8 @@ PRECISE_TOL = (0.05, 0.087)  # PLAN 0-1 설비 점검 지점 5 cm, 5°
 # shortcut: facilities.yaml id 앞 세 글자로 종류를 정함, 관제가 kind 를 보내 주면 그 값으로 바꿈
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
         'EXL': InspectionResult.KIND_EXIT_LIGHT}
+# undock 직후 위치 (x m, y m, yaw 도). 2-1 pose_check 3회 평균 (docs/driving/data/2026-10-11_pose_check.csv)
+HOME = {'/robot3': (2.855, 4.656, 176.7), '/robot4': (2.863, 0.948, 175.8)}
 
 
 class MissionExecutor(Node):
@@ -278,14 +281,16 @@ class MissionExecutor(Node):
 def main():
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     nav = TurtleBot4Navigator()
-    x = nav.declare_parameter('x', 0.0).value
-    y = nav.declare_parameter('y', 0.0).value
-    yaw = nav.declare_parameter('yaw', 0.0).value
-    home = nav.getPoseStamped([x, y], yaw)
-    # 이미 undock 상태면(재시작 등) undock 위치가 아니므로 AMCL 추정값을 그대로 둠
+    xyyaw = [nav.declare_parameter(k, math.nan).value for k in ('x', 'y', 'yaw')]
+    if any(map(math.isnan, xyyaw)):
+        if nav.get_namespace() not in HOME:
+            raise SystemExit(f'HOME 에 {nav.get_namespace()} 없음 — -p x y yaw 를 주세요')
+        xyyaw = HOME[nav.get_namespace()]
+    home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
     if nav.getDockedStatus():
         nav.undock()
-        nav.setInitialPose(home)
+    # undock 상태로 시작해도 home 을 줌. 안 주면 waitUntilNav2Active 가 (0,0) 을 초기 pose 로 보냄
+    nav.setInitialPose(home)
     nav.waitUntilNav2Active()
     node = MissionExecutor(nav, home)
     ex = MultiThreadedExecutor()
