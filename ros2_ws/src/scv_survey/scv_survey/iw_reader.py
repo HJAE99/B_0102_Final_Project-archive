@@ -17,7 +17,9 @@ import subprocess
 import time
 from typing import List, NamedTuple, Optional, Sequence
 
+# SSID만 뽑기
 _SSID_RE = re.compile(r'^\s*SSID:\s*(.*)$', re.MULTILINE)
+# dBm값만 뽑기
 _SIGNAL_RE = re.compile(r'^\s*signal:\s*(-?\d+)\s*dBm', re.MULTILINE)
 
 # iw scan 출력 (BSS 블록 안). SSID 는 탭 하나로 시작하는 줄만 (다른 IE 안의 SSID 와 구분)
@@ -36,7 +38,7 @@ class LinkReading(NamedTuple):
     ssid: Optional[str]     # 지금 붙어 있는 SSID (없으면 None)
 
 
-class ScanBss(NamedTuple):
+class ScanBss(NamedTuple): # 스캔에서 발견한 AP 하나
     bssid: str
     ssid: str                      # UTF-8 로 되돌린 SSID (숨은 SSID 는 '')
     freq_mhz: int
@@ -55,14 +57,15 @@ class ScanResult(NamedTuple):
     full: bool               # 전체 대역 스캔이면 True
 
     @property
+    # 스캔까지 걸린 시간
     def duration_s(self) -> float:
         return self.end_boottime - self.start_boottime
 
-
+# 터미널에서 which iw를 친 것과 같음.
 def iw_available() -> bool:
     return shutil.which('iw') is not None
 
-
+# iw의 boottime과 같은 시계라 비교가 가능함.
 def _boottime() -> float:
     return time.clock_gettime(time.CLOCK_BOOTTIME)
 
@@ -115,9 +118,9 @@ def decode_iw_ssid(text: str) -> str:
 
 def parse_iw_scan(text: str) -> List[ScanBss]:
     """`iw dev <iface> scan` 출력을 BSS 목록으로. signal·freq 가 없는 블록은 버린다."""
-    heads = list(_BSS_HEAD_RE.finditer(text))
+    heads = list(_BSS_HEAD_RE.finditer(text)) # 모든 'BSS ...' 머리줄 위치를 찾음
     out = []
-    for i, h in enumerate(heads):
+    for i, h in enumerate(heads):   # i는 번호, h는 머리줄
         block = text[h.end():heads[i + 1].start() if i + 1 < len(heads) else len(text)]
         sig = _SCAN_SIGNAL_RE.search(block)
         freq = _SCAN_FREQ_RE.search(block)
