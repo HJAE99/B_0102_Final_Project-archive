@@ -40,9 +40,10 @@ PRECISE_TOL = (0.03, 0.052)  # 설비 점검 지점 3 cm, 3° (PLAN 0-1 목표 5
 # shortcut: facilities.yaml id 앞 세 글자로 종류를 정함, 관제가 kind 를 보내 주면 그 값으로 바꿈
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
         'EXL': InspectionResult.KIND_EXIT_LIGHT}
-# undock 직후 위치 (x m, y m, yaw 도). 2-1 pose_check 3회 평균 (docs/driving/data/2026-10-11_pose_check.csv)
+# undock 직후 위치 (x m, y m, yaw 도). pose_check 3회 평균 — robot3 10/12 재측정(좌우 spin 으로 AMCL 수렴 뒤, yaw 범위 2.1°), robot4 10/11 (docs/driving/data/2026-10-1{1,2}_pose_check.csv)
+DOCK_BACKOFF = 0.3   # dock 명령 내리는 자리: undock 위치보다 dock 에서 이만큼 더 먼 곳 (m, 10/12 hhj 요청)
 DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
-HOME = {'/robot3': (2.855, 4.656, 176.7), '/robot4': (2.863, 0.948, 175.8)}
+HOME = {'/robot3': (2.806, 4.610, 179.9), '/robot4': (2.863, 0.948, 175.8)}
 
 
 class MissionExecutor(Node):
@@ -108,7 +109,8 @@ class MissionExecutor(Node):
         self.task, self.progress, self.warning = g, 0.0, ''
         if self.state == S.STATE_DOCKED and g.type != T.DOCK:
             self.nav.undock()
-            self.nav.setInitialPose(self.home)   # 시작할 때와 같은 이유 (Dock 에서는 lidar 꺼짐)
+            localize(self.nav, self.home)   # 시작할 때와 같은 이유 (Dock 에서는 lidar 꺼짐)
+            settle(self.nav)
         self.state = S.STATE_EXECUTING
         self.get_logger().info(f'task {g.task_id} type={g.type} waypoints={len(g.waypoints)}')
         try:
@@ -281,7 +283,11 @@ class MissionExecutor(Node):
         return True, ''
 
     def go_home(self):
-        self.nav.goToPose(self.home)
+        # dock 명령은 undock 위치에서 DOCK_BACKOFF 만큼 앞(dock 반대쪽)으로 나간 자리에서 내림
+        p, q = self.home.pose.position, self.home.pose.orientation
+        yaw = 2 * math.atan2(q.z, q.w)
+        self.nav.goToPose(self.nav.getPoseStamped(
+            [p.x + DOCK_BACKOFF * math.cos(yaw), p.y + DOCK_BACKOFF * math.sin(yaw)], math.degrees(yaw)))
         self.wait_nav()
         res = self.nav.getResult()
         return res == TaskResult.SUCCEEDED, '' if res == TaskResult.SUCCEEDED else str(res)
@@ -311,6 +317,31 @@ class MissionExecutor(Node):
             time.sleep(0.05)
 
 
+def localize(nav, home):
+    # setInitialPose 는 공분산 0 이라 AMCL 이 몇 도 틀린 것도 못 고침 (10/12 robot3 6° 틀어짐)
+    # → 위치 0.15 m, 각도 10° 불확실성을 넣어 보내고 amcl_pose 가 올 때까지 반복
+    msg = PoseWithCovarianceStamped()
+    msg.header.frame_id = 'map'
+    msg.pose.pose = home.pose
+    cov = [0.0] * 36
+    cov[0] = cov[7] = 0.15 ** 2
+    cov[35] = math.radians(10.0) ** 2
+    msg.pose.covariance = cov
+    nav.initial_pose_received = False
+    while not nav.initial_pose_received:
+        msg.header.stamp = nav.get_clock().now().to_msg()
+        nav.initial_pose_pub.publish(msg)
+        rclpy.spin_once(nav, timeout_sec=1.0)
+
+
+def settle(nav):
+    # 제자리에서 좌우로 0.26 rad(15°) 돌려 AMCL 이 라이다로 방향을 맞추게 함 (10/12 시험: ±0.5 두 번과 차이 없음)
+    for yaw in (0.26, -0.26):
+        nav.spin(yaw)
+        while not nav.isTaskComplete():
+            time.sleep(0.1)
+
+
 def main():
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     nav = TurtleBot4Navigator()
@@ -322,9 +353,10 @@ def main():
     home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
     if nav.getDockedStatus():
         nav.undock()
-    # undock 상태로 시작해도 home 을 줌. 안 주면 waitUntilNav2Active 가 (0,0) 을 초기 pose 로 보냄
-    nav.setInitialPose(home)
-    nav.waitUntilNav2Active()
+    # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
+    localize(nav, home)
+    nav.waitUntilNav2Active(localizer='robot_localization')   # 'amcl' 이면 공분산 0 인 (0,0) 초기 pose 를 다시 보냄
+    settle(nav)
     node = MissionExecutor(nav, home)
     ex = MultiThreadedExecutor()
     ex.add_node(node)

@@ -78,9 +78,9 @@ Jazzy controller_server 컨트롤러 중 **MPPI와 RPP 두 개만** 비교한다
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
-| 5-1 | execute_task 서버(IF-11) + SURVEY 흐름 (원 5) | 가짜 manager로 작업 왕복·취소 | scv_msgs(PM) |
-| 5-2 | FACILITY 흐름(inspect_facility·자세 보정) · REINSPECTION(precise) (원 6) | 정밀 goal checker 사용, 비전·RSSI와 1건씩 실기 | 5-1 · 3-4 |
-| 5-3 | 예외 E1·E2·E4·E7 + DOCK + status 1 Hz (IF-12) (원 7) | 관제 PC 끊김에도 완주, 비상정지 시 goal 취소·cmd_vel 0 | 5-1 |
+| 5-1 | execute_task 서버(IF-11) + SURVEY 흐름 (원 5) | 가짜 manager로 작업 왕복·취소 — **완료 10/12** (취소 0.2초 정지) | scv_msgs(PM) |
+| 5-2 | FACILITY 흐름(inspect_facility·자세 보정) · REINSPECTION(precise) (원 6) | 정밀 goal checker 사용, 비전·RSSI와 1건씩 실기 — **가짜 서버로 완료 10/12** (정밀 0.03 m/3°), 실제 비전·RSSI 실기 남음 | 5-1 · 3-4 |
+| 5-3 | 예외 E1·E2·E4·E7 + DOCK + status 1 Hz (IF-12) (원 7) | 관제 PC 끊김에도 완주, 비상정지 시 goal 취소·cmd_vel 0 — **10/12**: E1·E2(30% 거절)·DOCK·status 1 Hz 확인, E2 20% 자동 dock·E4·E7 남음 | 5-1 |
 
 ## 6단계. 두 대·통합
 
