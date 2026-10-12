@@ -42,15 +42,17 @@ ros2 topic echo /inspection/alerts           # 알림 보기
 ## 2. 로봇 PC (MSI) — 로봇마다. 아래는 robot4, 다른 로봇은 robot3 으로 바꾼다
 
 ```bash
-# (1) localization · Nav2 — 주행 팀 방식 그대로 (params 는 scv_nav/config/nav2.yaml 또는 nav2_rpp.yaml)
+# (1) localization · Nav2 — 저장소 뿌리에서, 반드시 이 launch 로 (params 안의 $(var namespace) 를 이 launch 가 바꿔 준다)
+ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=ros2_ws/src/scv_nav/maps/testbed_v1.yaml params:=ros2_ws/src/scv_nav/config/localization.yaml
+ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 params_file:=ros2_ws/src/scv_nav/config/nav2.yaml
 # (2) 작업 실행
-python3 src/scv_nav/scripts/mission_executor.py --ros-args -r __ns:=/robot4
+python3 ros2_ws/src/scv_nav/scripts/mission_executor.py --ros-args -r __ns:=/robot4
 # (3) RSSI 측정 (rssi_scanner · manual_tagger · 미리보기 히트맵)
 ros2 launch scv_survey laptop_test.launch.py pose_source:=tf robot_ns:=robot4 rviz:=false iface:=<무선랜> ssid:=<핫스팟>
 # (4) 재측정용 30초 정밀 측정 서버 (임시)
 ros2 run scv_survey precise_server --ros-args -r __ns:=/robot4
 # (5) 가짜 비전 (설비 점검 요청에 2초 뒤 NORMAL)
-python3 src/scv_manager/test/mock_inspect_facility_server.py --ros-args -r __ns:=/robot4
+python3 ros2_ws/src/scv_manager/test/mock_inspect_facility_server.py --ros-args -r __ns:=/robot4
 ```
 
 - 주행의 `fake_servers.py` 는 같이 켜지 않는다. 가짜 `survey/precise` 가 (4) 와 이름이 겹친다.
@@ -68,6 +70,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 
 | 단계 | 확인 |
 | --- | --- |
+| Nav2 를 띄운 뒤 | `ros2 topic info /robot4/keepout_mask -v` — 발행은 `inspection_manager` 하나, 구독은 global·local costmap 둘. costmap 이 `/robot4/global_costmap/keepout_mask` 에 붙어 있으면 설정이 틀린 것 |
 | 시작 | 관제 로그에 두 로봇 `작업 전송` 이 함께 나온다 |
 | 측정 | 섹터당 12점. x 0.53 ↔ 2.73, y 0.5 간격. 2–4분 |
 | 칸 확정 | 관제 로그 `칸 맵 확정: Z1: N칸 (음영 a · 미검출 b · low c)` 가 로봇 PC 히트맵과 맞는지 |
@@ -79,6 +82,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 ## 알아 둘 것
 
 - 샘플이 1개뿐인 칸(low)은 음영이어도 마스크에 넣지 않는다. 측정 속도가 빨라 low 가 많으면 음영 칸이 빠질 수 있다.
+- 마스크 설정(`nav2*.yaml` 의 keepout_layer)은 주행 팀의 것을 그대로 쓴다 (`map_topic: $(var namespace)/keepout_mask`, costmap 단위 `use_maximum: true`).
 - keepout_layer 는 inflation 앞에 있어서 회피 칸 둘레 0.45 m 도 비용이 붙는다. 좁은 곳에서는 길이 막힐 수 있다.
 - 로봇 없이 관제 PC 한 대로 흐름만 보려면 2절 대신
   `python3 src/scv_manager/test/mock_execute_task_server.py` 를 켠다 (가짜 샘플도 함께 낸다).

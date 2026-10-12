@@ -69,8 +69,8 @@ Jazzy controller_server 컨트롤러 중 **MPPI와 RPP 두 개만** 비교한다
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
-| 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 | 3-3 · 마스크 형식(RSSI) |
-| 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 | 3-3 |
+| 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 — **완료 10/12**: robot3 재계획 3.87·1.09초, `{ns}/keepout_mask` 구독·`use_maximum` costmap 단위 수정. 실제 발행(관제 inspection_manager) 미구현 | 3-3 · 마스크 형식(RSSI) |
+| 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 — **완료 10/12**: 5초 BLOCKED, 길 없는 점만 건너뜀(출발 전 확인·5초 확인), 주행 중 막힘 10.4초 | 3-3 |
 
 > ⚠ **4-1 시작 시 keepout_layer 를 반드시 켤 것.** 지금 `config/nav2.yaml`·`nav2_rpp.yaml` 의 global·local costmap `keepout_layer` 4곳이 `enabled: false` (2026-10-11). `keepout_mask` 발행자가 없으면 StaticLayer 가 준비되지 않아 costmap 전체가 "Costmap timed out waiting for update" → 모든 goal 경로 계획이 실패했기 때문. 켤 때는 RSSI 마스크(또는 `fake_servers.py -p mask:=true`)가 먼저 발행되고 있어야 함.
 

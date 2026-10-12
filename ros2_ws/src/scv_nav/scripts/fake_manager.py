@@ -13,8 +13,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from scv_msgs.action import ExecuteTask
 
-# (x m, y m, yaw 도). course_run.py 와 같은 자리 표시용 값
-WAYPOINTS = [(0.5, 1.5, 90.0), (0.5, 3.0, 90.0)]
+# (x m, y m, yaw 도). course_run 첫 직선 위 두 점 + 가운데 틈 너머 한 점. 4-2 막힘 시험은 가운데 틈(y 3.25–3.75, x 0–2.0)을 keepout 으로 막음
+WAYPOINTS = [(1.0, 1.5, 90.0), (1.0, 2.5, 90.0), (1.0, 4.2, 90.0)]
 
 
 def pose(x, y, yaw):
