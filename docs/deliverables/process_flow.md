@@ -2,7 +2,7 @@
 
 > 이 저장소 문서가 원본이다 (10/11 PM 결정). 노션 「SCV 설계」는 10/10 까지의 예전 판이다. 시나리오는 10/12 PM 결정(두 대 동시 주행 · 섹터 2개 · 측정 → 재측정 → 점검)이다.
 
-2026-10-10 · 작성 도윤 (PM) · 출처: 팀 노션 「SCV 설계」 3·10장, 시스템 다이어그램 v2.0. GitHub 에서 열면 그림으로 보입니다. 한 장짜리 전체 그림(기기 스택·인터페이스·노드별 흐름)은 같은 폴더의 `scv-system-diagram.drawio`(그림은 `.png`)가 원본입니다.
+2026-10-10 · 작성 도윤 (PM) · 출처: 팀 노션 「SCV 설계」 3·10장, 시스템 다이어그램 v2.1. GitHub 에서 열면 그림으로 보입니다. 한 장짜리 전체 그림(기기 스택·인터페이스·노드별 흐름)은 같은 폴더의 `scv-system-diagram.drawio`(그림은 `.png`)가 원본입니다.
 
 ## 1. As-Is → To-Be
 
@@ -21,7 +21,7 @@
 flowchart TD
   S0["S0 운영자 로그인 → 순찰 시작<br>(관제 웹 · System Monitor)"] --> S1["S1 inspection_manager<br>섹터마다 작업 배정 (zones.yaml 의 robot:)<br>측정 → Dock → 재측정 → Dock → 점검 → Dock"]
   S1 --> S2["S2 Undock (두 로봇 동시에)<br>→ 초기 위치 → AMCL 수렴"]
-  S2 --> S3["S3 측정: 자기 섹터를 왕복하며 핫스팟 RSSI<br>RPi → 로봇 PC 버퍼(위치 결합) → 관제 PC → 히트맵"]
+  S2 --> S3["S3 측정: 자기 섹터를 왕복하며 핫스팟 RSSI<br>로봇 PC(rssi_scanner → 버퍼 · 위치 결합) → 관제 PC → 히트맵"]
   S3 --> D1["Dock (1바퀴 끝)"]
   D1 --> Q1{"자기 섹터에<br>음영·미검출·미측정 칸?"}
   Q1 -- 예 --> S4["S4 재측정: Undock → 그 칸 안에서<br>정지 30초 측정 → Dock (2바퀴)"]
@@ -64,7 +64,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  R["rssi_scanner (각 로봇 RPi)<br>RSSI + 시각 · 검출 여부"] -- IF-02 --> B["survey_buffer (각 로봇 PC)<br>AMCL 위치 결합 · seq · 디스크 저장"]
+  R["rssi_scanner (각 로봇 PC · 로봇 위)<br>RSSI + 시각 · 검출 여부"] -- IF-02 --> B["survey_buffer (각 로봇 PC)<br>AMCL 위치 결합 · seq · 디스크 저장"]
   B -- IF-08 --> G["ros_bridge (관제 PC)<br>→ 관제 API → PostgreSQL<br>(중복은 DB 유일키가 거름)"]
   B -- IF-08 --> M["network_map_engine (관제 PC)<br>두 로봇 샘플로 0.5 m 칸 맵 → DB"]
   G -. "seq 끊김 → IF-09 sync" .-> B

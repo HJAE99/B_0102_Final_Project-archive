@@ -12,6 +12,7 @@ v0.2.7: 시나리오 변경 (10/12 PM 결정, v0.2.5·v0.2.6 의 역할 분리�
 v0.2.8: keepout 마스크 발행 규칙 (10/12 오후 PM 결정) — 발행자는 시작부터 **빈 마스크**를 `/robot4/keepout_mask`·`/robot3/keepout_mask` 에 transient_local 로 발행합니다(지도 `testbed_v1` 과 같은 크기·원점·해상도). 발행자가 없으면 Nav2 의 `keepout_layer` 가 준비되지 않아 경로 계획이 실패하므로, 주행은 이 발행을 확인한 뒤 `keepout_layer` 를 켭니다. 두 로봇은 서로 기다리지 않고, 마스크는 **로봇마다 그 로봇이 점검 단계에 들어갈 때** 그 로봇 토픽으로 보냅니다 — 내용은 재측정이 끝난 섹터의 남은 음영·미검출·미측정 칸(Dock 반경 0.6 m 제외). 측정·재측정 중인 로봇은 빈 마스크 그대로입니다. 재측정 뒤에도 남은 칸은 관제에 알림을 띄워 사람이 확인합니다.
 v0.2.9: 맵은 DB 로, IF-10 은 관제가 (10/12 회의 뒤 PM 결정) — network_map_engine(RSSI)은 1차 측정의 칸 맵(칸 중심 좌표 · 중앙값 · 상태 미측정/미검출/음영/정상)을 **관제 API 로 DB 에 쓰고**, 재측정 대상 칸을 후보(IF-15)로 냅니다. 재측정 결과(IF-04 → IF-11 result)는 inspection_manager 가 DB 의 그 칸에 적습니다. **IF-10 은 inspection_manager(관제)가 냅니다** — 시작할 때 두 로봇에 빈 마스크, 로봇마다 점검 작업을 보내기 전에 DB 맵의 남은 칸으로 그 로봇 토픽에 발행합니다. 노드 사이에 요청을 주고받지 않고 DB 를 봅니다. DB 쓰기는 모두 관제 API 로 합니다. 칸 0.5 m · 칸 값은 검출된 RSSI 의 중앙값 · 검출 0개이거나 미검출 비율 ≥ 0.5 이면 미검출 · 중앙값 < −72 dBm 이면 음영 (`SHADOW_DBM`, −75 dBm 은 지도 색 기준) · 회피 마스크는 샘플 2개 이상 칸만 (`min_samples_for_mask`) (`scv_survey` 코드값, 9d3a4cc). 미측정은 갈 수 있는 칸(섹터 안, 벽·장애물에서 0.45 m 밖) 중 샘플이 없는 칸이고, 재측정 대상입니다(로직에만, 시연에는 없음). 왕복 경로 간격(`spacing`)은 0.5 m 입니다.
 v0.2.10: `scv_msgs` 필드 셋·하나 추가 (10/12 저녁 PM 결정) — `ExecuteTask` 결과에 `rssi_median`·`rssi_iqr`·`n_samples` (REINSPECTION 만, PreciseMeasure 결과를 그대로 옮김 · 다른 종류는 0). inspection_manager 가 이 값으로 DB 의 그 칸을 고칩니다 (`reason` 문자열을 읽지 않음). `InspectFacility` 목표에 `run_id` — mission_executor 가 받은 작업의 `run_id` 를 그대로 넣고 detection_alert 가 `InspectionResult.run_id` 로 씁니다. 기존 필드는 그대로라 지금 코드는 다시 빌드만 하면 됩니다 (`colcon build --packages-select scv_msgs`).
+v0.2.11: RSSI 측정은 로봇 PC 에서 (10/12 저녁 PM 결정, 강사 조언) — 로봇 PC(MSI)를 두 로봇 위에 하나씩 얹고 `rssi_scanner` 를 그 PC 에서 돌립니다. RPi 에는 드라이버만 남습니다. IF-02·IF-04 는 같은 로봇 PC 안의 토픽·액션이 되고, `rssi_scanner` 는 `robot_pc.launch.py` 로 띄웁니다. 스캔은 로봇 PC 내장 무선랜으로 하고, 스캔 중 turtle08 통신이 흔들리면 USB 무선랜으로 나눕니다 (D2).
 v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSample` 에 `detected` 추가, 미검출 샘플의 `rssi_dbm` 은 쓰지 않음 (10/10 PM·RSSI 팀)
 
 팀 사이에 오가는 토픽·서비스·액션과 그 타입을 한곳에 모았습니다. 타입 정의는 `ros2_ws/src/scv_msgs/` 에 있습니다. 고칠 것이 있으면 그 약속의 **주인**에게 말하고, 주인이 `scv_msgs` 와 이 문서를 함께 고칩니다.
@@ -43,7 +44,7 @@ v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSa
 | 패키지 | 실행 위치 | 들어갈 노드 | 팀 |
 | --- | --- | --- | --- |
 | `scv_msgs` | 5대 전부 | 메시지·서비스·액션 | PM |
-| `scv_survey` | RPi · 로봇 PC · 관제 PC | `rssi_scanner`, `survey_buffer`, `network_map_engine` | 통신 인프라·RSSI (A·B) |
+| `scv_survey` | 로봇 PC · 관제 PC | `rssi_scanner`, `survey_buffer`, `network_map_engine` | 통신 인프라·RSSI (A·B) |
 | `scv_nav` | 로봇 PC | `mission_executor`, Nav2 설정 | 주행 |
 | `scv_detection` | 로봇 PC | `detection_alert` | 비전·물리 인프라 |
 | `scv_manager` | 관제 PC | `inspection_manager` | 관제·작업 관리 (A) |
@@ -52,7 +53,7 @@ v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSa
 | `scv_bringup` | 5대 전부 | launch, params, 지도, `facilities.yaml` | PM |
 | `scv_testbed` | PC | 가짜 데이터 도구, 시험 스크립트 | PM |
 
-5대 = 로봇 RPi 2대(4번·3번) · 로봇 PC 2대(MSI GPU) · 관제 PC 1대(Victus). **모두 turtle08**에 붙습니다. Discovery Server는 RPi 4번 · RPi 3번 · 관제 PC 세 곳이고, 로봇 PC는 자기 로봇 RPi 서버의 클라이언트입니다.
+5대 = 로봇 RPi 2대(4번·3번) · 로봇 PC 2대(MSI GPU, 로봇 위에 얹음 · 10/12) · 관제 PC 1대(Victus). **모두 turtle08**에 붙습니다. Discovery Server는 RPi 4번 · RPi 3번 · 관제 PC 세 곳이고, 로봇 PC는 자기 로봇 RPi 서버의 클라이언트입니다.
 
 ## 인터페이스
 
@@ -60,8 +61,8 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 
 | IF | 이름 | 종류 · 타입 | 보내는 쪽 → 받는 쪽 | QoS · 주기 | 주인 |
 | --- | --- | --- | --- | --- | --- |
-| 02 | `{ns}/survey/raw` | topic · `scv_msgs/NetRaw` | rssi_scanner (RPi) → survey_buffer (로봇 PC) | reliable · transient_local · KEEP_LAST 600 · 1 Hz | RSSI A |
-| 04 | `{ns}/survey/precise` | action · `scv_msgs/PreciseMeasure` | mission_executor (로봇 PC) → rssi_scanner (RPi) | — | RSSI A |
+| 02 | `{ns}/survey/raw` | topic · `scv_msgs/NetRaw` | rssi_scanner → survey_buffer (같은 로봇 PC) | reliable · transient_local · KEEP_LAST 600 · 1 Hz | RSSI A |
+| 04 | `{ns}/survey/precise` | action · `scv_msgs/PreciseMeasure` | mission_executor → rssi_scanner (같은 로봇 PC) | — | RSSI A |
 | 05 | `{ns}/inspect_facility` | action · `scv_msgs/InspectFacility` | mission_executor → detection_alert (같은 로봇 PC) | feedback 보정값은 rad · m | 비전 B |
 | 06 | `{ns}/dock` · `{ns}/undock` | action · `irobot_create_msgs` | mission_executor (로봇 PC) → Create 3 | — | 주행 |
 | 07 | `{ns}/scan` · `odom` · `tf` · `tf_static` / `{ns}/cmd_vel` | topic · 표준 타입 | RPi ↔ Nav2 (로봇 PC) | 센서 best effort · cmd_vel reliable | 주행 |
