@@ -1,5 +1,6 @@
 # IF-05 {ns}/inspect_facility · mission_executor → detection_alert (둘 다 로봇 PC)
 string task_id
+uint32 run_id                   # 순찰 회차. mission_executor 가 ExecuteTask.Goal.run_id 를 그대로 넣고, detection_alert 가 InspectionResult.run_id 로 씀 (10/12)
 string facility_id              # facilities.yaml
 uint8  kind                     # InspectionResult.KIND_*
 ---
