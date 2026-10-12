@@ -7,6 +7,10 @@ SSID 에 ssid_pattern(iPhone) 이 들어간 AP 중 처음 가장 센 것으로 �
   ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 노트북을 TurtleBot4 위에 올리고 (위치는 로봇 TF, 지도·AMCL 은 turtlebot4_navigation localization 이 띄움):
   ros2 launch scv_survey laptop_test.launch.py pose_source:=tf robot_ns:=robot3 ssid:="csh의 iPhone"
+
+회피 마스크 시험 (manual): 다른 터미널에서 ros2 run scv_survey survey_keys → 다 쟀으면 s.
+  manual 에서는 Nav2 코스트맵(global_costmap, KeepoutFilter 포함)을 노트북에 따로 띄워 /costmap 으로 보여 준다
+  (keepout_costmap:=false 로 끔). 로봇 시험(tf)에서는 띄우지 않는다 — 로봇 Nav2 와 섞이지 않게
 """
 
 import os
@@ -63,7 +67,10 @@ def _nodes(context):
                           'cell_size': float(arg('cell_size')),
                           'rssi_strong': float(arg('rssi_strong')),
                           'rssi_weak': float(arg('rssi_weak')),
-                          'csv_path': csv_path}]),
+                          'csv_path': csv_path,
+                          'mask_topic': arg('mask_topic'),
+                          'shadow_dbm': float(arg('shadow_dbm')),
+                          'mask_margin': float(arg('mask_margin'))}]),
     ]
     if not use_tf:
         # 로봇 시험에서는 localization.launch.py 의 map_server 가 /{ns}/map 을 낸다
@@ -74,12 +81,54 @@ def _nodes(context):
                  name='lifecycle_manager_map', output='screen',
                  parameters=[{'autostart': True, 'node_names': ['map_server']}]),
         ]
+        if arg('keepout_costmap') == 'true':
+            nodes += _keepout_costmap(arg('mask_topic'))
     if arg('rviz') == 'true':
         nodes.append(
             Node(package='rviz2', executable='rviz2', name='rviz2', output='log',
                  arguments=['-d', os.path.join(share, 'rviz', 'survey.rviz')],
                  remappings=rviz_remaps))
     return nodes
+
+
+def _keepout_costmap(mask_topic):
+    """노트북에서 Nav2 전역 코스트맵만 띄워 회피 마스크가 장애물로 바뀌는지 본다 (로봇 B 설정의 축소판).
+
+    KeepoutFilter 는 costmap_filter_info 로 마스크 토픽을 알고, 마스크 100 → LETHAL. 노트북엔 로봇이 없어
+    코스트맵이 기다리는 map → base_link 는 원점 고정 TF 로 준다.
+    """
+    costmap = {
+        'global_frame': 'map', 'robot_base_frame': 'base_link',
+        'update_frequency': 2.0, 'publish_frequency': 2.0,
+        'robot_radius': 0.19, 'track_unknown_space': True, 'always_send_full_costmap': True,
+        'plugins': ['static_layer', 'inflation_layer'],
+        'filters': ['keepout_filter'],
+        'static_layer.plugin': 'nav2_costmap_2d::StaticLayer',
+        'static_layer.map_topic': '/map',
+        'static_layer.map_subscribe_transient_local': True,
+        'inflation_layer.plugin': 'nav2_costmap_2d::InflationLayer',
+        'inflation_layer.inflation_radius': 0.45,           # turtlebot4_navigation nav2.yaml 과 같게
+        'inflation_layer.cost_scaling_factor': 4.0,
+        'keepout_filter.plugin': 'nav2_costmap_2d::KeepoutFilter',
+        'keepout_filter.enabled': True,
+        'keepout_filter.filter_info_topic': '/costmap_filter_info',
+    }
+    return [
+        Node(package='tf2_ros', executable='static_transform_publisher', name='keepout_test_base_link',
+             arguments=['--frame-id', 'map', '--child-frame-id', 'base_link'], output='log'),
+        Node(package='nav2_map_server', executable='costmap_filter_info_server',
+             name='costmap_filter_info_server', output='screen',
+             parameters=[{'type': 0, 'filter_info_topic': '/costmap_filter_info', 'mask_topic': mask_topic,
+                          'base': 0.0, 'multiplier': 1.0}]),
+        # 단독 코스트맵 노드는 이름을 global_costmap 으로, 코스트맵 토픽은 /costmap
+        Node(package='nav2_costmap_2d', executable='nav2_costmap_2d', name='global_costmap',
+             output='screen', parameters=[costmap]),
+        # 단독 코스트맵 노드는 bond 를 만들지 않아 bond_timeout 0 (끔)
+        Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+             name='lifecycle_manager_keepout', output='screen',
+             parameters=[{'autostart': True, 'bond_timeout': 0.0,
+                          'node_names': ['costmap_filter_info_server', 'global_costmap']}]),
+    ]
 
 
 def generate_launch_description():
@@ -122,6 +171,14 @@ def generate_launch_description():
                               description='이 값 이하는 파랑(음영) [dBm]'),
         DeclareLaunchArgument('csv_path', default_value='',
                               description='비우면 ~/scv_survey_logs/{robot_ns}_{pose_source}.csv'),
+        DeclareLaunchArgument('mask_topic', default_value='/keepout_mask',
+                              description='회피 마스크 (IF-10). 실제 구성은 점검 로봇의 /{ns}/keepout_mask'),
+        DeclareLaunchArgument('shadow_dbm', default_value='-72.0',
+                              description='칸 중앙값이 이 값보다 작으면 음영 → 회피 [dBm] (BR-T04)'),
+        DeclareLaunchArgument('mask_margin', default_value='0.0',
+                              description='회피 칸을 넓히는 폭 [m]. 0 = 0.5 m 칸 그대로 (KeepoutFilter 는 팽창되지 않음)'),
+        DeclareLaunchArgument('keepout_costmap', default_value='true',
+                              description='manual 에서 Nav2 전역 코스트맵(KeepoutFilter)을 노트북에 띄워 /costmap 으로'),
         DeclareLaunchArgument('rviz', default_value='true'),
         OpaqueFunction(function=_nodes),
     ])

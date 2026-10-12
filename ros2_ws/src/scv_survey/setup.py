@@ -26,6 +26,7 @@ setup(
             'rssi_scanner = scv_survey.rssi_scanner:main',
             'manual_tagger = scv_survey.manual_tagger:main',
             'network_map_engine = scv_survey.network_map_engine:main',
+            'survey_keys = scv_survey.survey_keys:main',
         ],
     },
 )

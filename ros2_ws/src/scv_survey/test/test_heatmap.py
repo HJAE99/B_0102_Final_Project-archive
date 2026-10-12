@@ -1,8 +1,9 @@
 import pytest
 
 from scv_survey.heatmap import (
-    MISS_COLOR, CellStats, Sample, SurveyGrid,
-    cell_center, cell_color, cell_index, pose_usable, rssi_to_color)
+    KEEPOUT, MISS, MISS_COLOR, NORMAL, SHADOW, CellStats, Sample, SurveyGrid,
+    cell_center, cell_color, cell_index, cell_status, keepout_cells, keepout_mask,
+    pose_usable, rssi_to_color)
 
 RED, YELLOW, GREEN, CYAN, BLUE = (1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)
 
@@ -156,3 +157,96 @@ def test_teleop_path_fills_cells_along_route():
     cells = g.cells()
     assert sorted(cells) == [(6, 9), (6, 10), (6, 11), (6, 12), (6, 13)]
     assert sum(st.n_total for st in cells.values()) == 10
+
+
+# ---------------- 회피 마스크 ----------------
+
+# testbed_v1.yaml (주행 팀 기준 지도): 69 x 138 px, 0.05 m, 원점 (-0.15, -0.25)
+TB_O, TB_RES, TB_W, TB_H = (-0.15, -0.25), 0.05, 69, 138
+
+
+def mask_px(data, r, c, w=TB_W):
+    return data[r * w + c]
+
+
+def test_cell_status_rules():
+    assert cell_status(CellStats(rssi=[-50, -52])) == NORMAL
+    assert cell_status(CellStats(rssi=[-72, -72])) == NORMAL        # 기준 -72 는 음영 아님 (미만만)
+    assert cell_status(CellStats(rssi=[-73, -80])) == SHADOW
+    assert cell_status(CellStats(rssi=[], n_missed=3)) == MISS
+    assert cell_status(CellStats(rssi=[-50], n_missed=1)) == MISS   # 미검출 비율 0.5 = 회색과 같은 조건
+    assert cell_status(CellStats(rssi=[-75, -75]), shadow_dbm=-80) == NORMAL
+
+
+def test_keepout_cells_picks_shadow_and_miss_only():
+    g = SurveyGrid(0.5)
+    g.set_map(*TB_O, TB_W * TB_RES, TB_H * TB_RES)
+    seq = iter(range(100))
+    for x, y, vals in [(0.1, 0.0, [-45, -46, -44]),            # 정상
+                       (0.6, 0.0, [-80, -78, -79]),            # 음영
+                       (1.1, 0.0, [None, None, None]),         # 미검출
+                       (1.6, 0.0, [-90])]:                     # 음영이지만 샘플 1 개 → 제외
+        for v in vals:
+            g.add(s(next(seq), x=x, y=y, rssi=v or 0, detected=v is not None))
+    ko = keepout_cells(g.cells(), min_samples=2)
+    assert ko == {(1, 0): SHADOW, (2, 0): MISS}
+
+
+def test_keepout_mask_empty_when_no_cells():
+    # 측정 중·새 측정 시작: 전부 0 → 코스트맵에 회피 칸이 남지 않는다
+    data = keepout_mask({}, 0.5, TB_O, TB_RES, TB_W, TB_H)
+    assert len(data) == TB_W * TB_H and not any(data)
+
+
+def test_keepout_mask_one_cell_with_margin():
+    # 칸 (1, 2) = x -0.15+0.5 ~ +1.0, y -0.25+1.0 ~ +1.5 → 픽셀 열 10~19, 행 20~29
+    data = keepout_mask({(1, 2): SHADOW}, 0.5, TB_O, TB_RES, TB_W, TB_H, margin=0.2)
+    assert mask_px(data, 20, 10) == KEEPOUT and mask_px(data, 29, 19) == KEEPOUT
+    # 0.2 m = 4 픽셀까지 넓힘, 5 번째는 아님
+    assert mask_px(data, 25, 6) == KEEPOUT and mask_px(data, 25, 5) == 0
+    assert mask_px(data, 25, 23) == KEEPOUT and mask_px(data, 25, 24) == 0
+    assert mask_px(data, 16, 15) == KEEPOUT and mask_px(data, 15, 15) == 0
+    assert mask_px(data, 33, 15) == KEEPOUT and mask_px(data, 34, 15) == 0
+    # 모서리는 둥글게: 대각선으로 4 번째 픽셀은 0.247 m 라 제외, 3 번째는 0.177 m 라 포함
+    assert mask_px(data, 16, 6) == 0 and mask_px(data, 17, 7) == KEEPOUT
+    # 칸 10x10 + 변 4x10x4 + 모서리 13x4
+    assert sum(1 for v in data if v) == 100 + 160 + 52
+    assert set(data) == {0, KEEPOUT}
+
+
+def test_keepout_mask_default_is_cell_only():
+    # 기본(margin 0): 0.5 m 칸 그대로 10x10 픽셀만, 옆 칸은 0
+    data = keepout_mask({(1, 2): MISS}, 0.5, TB_O, TB_RES, TB_W, TB_H)
+    on = {(i // TB_W, i % TB_W) for i, v in enumerate(data) if v}
+    assert on == {(r, c) for r in range(20, 30) for c in range(10, 20)}
+
+
+def test_keepout_mask_clipped_at_map_edge():
+    # 지도 끝 칸 (마지막 열 칸 6 은 x 2.85 ~ 3.35 인데 지도는 3.30 까지) — 넘치지 않고 잘림
+    data = keepout_mask({(6, 0), (0, 0)}, 0.5, TB_O, TB_RES, TB_W, TB_H, margin=0.2)
+    assert len(data) == TB_W * TB_H
+    assert mask_px(data, 0, 68) == KEEPOUT and mask_px(data, 0, 0) == KEEPOUT
+
+
+def test_keepout_mask_matches_grid_cells():
+    # 엔진과 같은 흐름: 샘플 → 칸 → 회피 칸 → 마스크. 정상 칸 픽셀은 0, 음영 칸 가운데 픽셀은 100
+    g = SurveyGrid(0.5)
+    g.set_map(*TB_O, TB_W * TB_RES, TB_H * TB_RES)
+    for k in range(3):
+        g.add(s(k, x=0.0, y=0.0, rssi=-45))          # 칸 (0, 0) 정상
+        g.add(s(10 + k, x=1.5, y=2.0, rssi=-85))     # 칸 (3, 4) 음영
+    data = keepout_mask(keepout_cells(g.cells()), g.cell_size, g.origin, TB_RES, TB_W, TB_H)
+    c, r = int((0.0 - TB_O[0]) / TB_RES), int((0.0 - TB_O[1]) / TB_RES)
+    assert mask_px(data, r, c) == 0
+    c, r = int((1.5 - TB_O[0]) / TB_RES), int((2.0 - TB_O[1]) / TB_RES)
+    assert mask_px(data, r, c) == KEEPOUT
+
+
+def test_grid_clear_for_new_survey():
+    g = SurveyGrid(0.5)
+    g.set_map(*TB_O, TB_W * TB_RES, TB_H * TB_RES)
+    g.add(s(0, rssi=-85))
+    g.clear()
+    assert g.cells() == {} and g.samples == []
+    assert g.add(s(0, rssi=-50))                     # 비운 뒤엔 같은 seq 도 새 샘플
+    assert g.bounds is not None                      # 지도 정보는 그대로

@@ -19,6 +19,32 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
+    # 회피 마스크 시험 (manual, keepout_costmap:=true): Nav2 코스트맵. 측정 끝(s) 뒤 회피 칸이 자홍(LETHAL)
+    - Class: rviz_default_plugins/Map
+      Name: Nav2 Costmap (keepout)
+      Enabled: true
+      Alpha: 0.6
+      Color Scheme: costmap
+      Draw Behind: false
+      Topic:
+        Value: /costmap
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    # 엔진이 보내는 마스크 그대로 (코스트맵 없이 볼 때 켠다)
+    - Class: rviz_default_plugins/Map
+      Name: Keepout Mask
+      Enabled: false
+      Alpha: 0.6
+      Color Scheme: costmap
+      Draw Behind: false
+      Topic:
+        Value: /keepout_mask
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
     - Class: rviz_default_plugins/MarkerArray
       Name: RSSI Heatmap
       Enabled: true
@@ -33,6 +59,7 @@ Visualization Manager:
         labels: true
         points: true
         legend: true
+        keepout: true
     # 아래 셋은 pose_source:=tf 에서만 보인다 (launch 가 /scan, /robot_description 을 /{ns}/... 로 바꿈)
     - Class: rviz_default_plugins/RobotModel
       Name: TurtleBot4

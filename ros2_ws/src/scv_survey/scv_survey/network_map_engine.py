@@ -7,6 +7,11 @@
 - 색: 강할수록 빨강 → 주황 → 노랑 → 초록 → 하늘 → 약할수록(음영) 파랑, 미검출은 회색
   CUBE_LIST 는 RViz 조명 때문에 색이 절반쯤 어두워져서, 조명을 받지 않는 TRIANGLE_LIST 로 칸을 그린다
 - csv_path 를 주면 지도에 쓴 샘플을 CSV 로 남긴다 (일지 근거)
+- 회피 마스크 (IF-10, mask_topic): 미검출·음영 칸(0.5 m 칸 그대로, mask_margin 기본 0)이 100 인 OccupancyGrid.
+  Nav2 KeepoutFilter 가 이 칸을 장애물(LETHAL)로 만든다. 측정 중에는 비어 있고(전부 0),
+  ~/finish_survey (모든 측정 끝) 를 부른 뒤에만 칸이 채워진다
+  ~/reset_survey (새 측정 시작): 샘플·히트맵·마스크를 모두 비운다. 노드를 새로 띄워도 처음엔 빈 마스크를 보낸다
+  (KeepoutFilter 는 마지막으로 받은 마스크를 계속 쓰므로, 빈 마스크로 덮어야 예전 회피 칸이 사라진다)
 """
 
 import csv
@@ -18,11 +23,13 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import ColorRGBA
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
 from scv_msgs.msg import NetSample
 from scv_survey.heatmap import (
-    MISS_COLOR, STRONG_DBM, WEAK_DBM, Sample, SurveyGrid, cell_color, rssi_to_color)
+    MISS, MISS_COLOR, SHADOW_DBM, STRONG_DBM, WEAK_DBM, Sample, SurveyGrid, cell_color,
+    keepout_cells, keepout_mask, rssi_to_color)
 from scv_survey.manual_tagger import SAMPLE_QOS
 
 def add_square(m: Marker, cx: float, cy: float, half_x: float, half_y: float,
@@ -69,9 +76,16 @@ class NetworkMapEngine(Node):
         self.max_points = self.declare_parameter('max_points', 2000).value
         self.strong = float(self.declare_parameter('rssi_strong', float(STRONG_DBM)).value)
         self.weak = float(self.declare_parameter('rssi_weak', float(WEAK_DBM)).value)
+        mask_topic = self.declare_parameter('mask_topic', '/keepout_mask').value
+        self.shadow_dbm = float(self.declare_parameter('shadow_dbm', float(SHADOW_DBM)).value)
+        self.mask_margin = float(self.declare_parameter('mask_margin', 0.0).value)
+        self.mask_min_samples = int(self.declare_parameter('min_samples_for_mask', 2).value)
 
         self.grid = SurveyGrid(cell_size=cell)
         self.dirty = True
+        self.map_info = None
+        self.survey_done = False
+        self.keepout = {}           # 회피 칸 (i, j) → MISS·SHADOW. finish_survey 때 정한다
         self.csv = None
         if csv_path:
             path = os.path.expanduser(csv_path)
@@ -86,20 +100,73 @@ class NetworkMapEngine(Node):
             self.get_logger().info(f'CSV 기록: {path}')
 
         self.pub = self.create_publisher(MarkerArray, '/survey/heatmap', LATCHED)
+        self.mask_pub = self.create_publisher(OccupancyGrid, mask_topic, LATCHED)
+        self.create_service(Trigger, '~/finish_survey', self.on_finish)
+        self.create_service(Trigger, '~/reset_survey', self.on_reset)
         self.create_subscription(OccupancyGrid, map_topic, self.on_map, LATCHED)
         for t in topics:
             self.create_subscription(NetSample, t, self.on_sample, SAMPLE_QOS)
         self.create_timer(1.0, self.on_timer)
         self.get_logger().info(f'구독: {list(topics)} + {map_topic}, 칸 {cell} m, '
                                f'색 {self.strong:.0f} dBm 빨강 ~ {self.weak:.0f} dBm 파랑')
+        self.get_logger().info(
+            f'회피 마스크 {mask_topic}: 측정 중엔 비어 있음, finish_survey 후 미검출·음영(< {self.shadow_dbm:.0f} dBm) '
+            f'칸 + {self.mask_margin} m (샘플 {self.mask_min_samples} 개 이상 칸만)')
 
     def on_map(self, m: OccupancyGrid):
         o = m.info.origin.position
         w = m.info.width * m.info.resolution
         h = m.info.height * m.info.resolution
         self.grid.set_map(o.x, o.y, w, h)
+        self.map_info = m.info
         self.dirty = True
         self.get_logger().info(f'지도 받음: 원점 ({o.x:.3f}, {o.y:.3f}), {w:.2f} x {h:.2f} m')
+        self.publish_mask()     # 새로 띄웠으면 빈 마스크 → 지난 측정의 회피 칸이 코스트맵에 남지 않게
+
+    # ---------------- 회피 마스크 ----------------
+
+    def publish_mask(self) -> int:
+        """지금 상태의 마스크를 보낸다. 측정 끝 전이면 전부 0. 회피 픽셀 수를 돌려준다"""
+        info = self.map_info
+        cells = self.keepout if self.survey_done else {}
+        data = keepout_mask(cells, self.grid.cell_size, self.grid.origin, info.resolution,
+                            info.width, info.height, self.mask_margin)
+        mask = OccupancyGrid()
+        mask.header.frame_id = 'map'
+        mask.header.stamp = self.get_clock().now().to_msg()
+        mask.info = info
+        mask.data = data
+        self.mask_pub.publish(mask)
+        return sum(1 for v in data if v)
+
+    def on_finish(self, req, res):
+        if self.map_info is None:
+            res.success, res.message = False, '지도를 아직 못 받음'
+            return res
+        self.keepout = keepout_cells(self.grid.cells(), self.shadow_dbm, self.miss_thresh,
+                                     self.mask_min_samples)
+        self.survey_done = True
+        n_px = self.publish_mask()
+        self.dirty = True
+        n_miss = sum(1 for v in self.keepout.values() if v == MISS)
+        cells = ', '.join(f'({i},{j}){"미검출" if v == MISS else "음영"}'
+                          for (i, j), v in sorted(self.keepout.items()))
+        res.success = True
+        res.message = (f'측정 끝: 회피 칸 {len(self.keepout)} 개 (미검출 {n_miss}, 음영 {len(self.keepout) - n_miss}), '
+                       f'마스크 {n_px} px')
+        self.get_logger().info(res.message + (f' — {cells}' if cells else ''))
+        return res
+
+    def on_reset(self, req, res):
+        self.grid.clear()
+        self.survey_done = False
+        self.keepout = {}
+        if self.map_info is not None:
+            self.publish_mask()
+        self.dirty = True
+        res.success, res.message = True, '새 측정: 샘플·히트맵·회피 마스크를 비움'
+        self.get_logger().warn(res.message)
+        return res
 
     def on_sample(self, m: NetSample):
         s = Sample(m.robot_id, m.seq, m.x, m.y, m.pose_ok, m.detected, m.rssi_dbm)
@@ -159,10 +226,26 @@ class NetworkMapEngine(Node):
 
         if cells.points:
             out.markers.insert(1, cells)
+        if self.survey_done and self.keepout:
+            out.markers.append(self.build_keepout(header))
         if self.show_points:
             out.markers.append(self.build_points(header))
         out.markers.extend(self.build_legend(header))
         return out
+
+    def build_keepout(self, header) -> Marker:
+        """회피 칸 테두리 (자홍). 넓힌 부분은 코스트맵·마스크 표시로 본다"""
+        m = flat_marker(header, 'keepout', 0, Marker.LINE_LIST)
+        m.scale.x = 0.04
+        half = self.grid.cell_size / 2
+        col = ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0)
+        for idx in self.keepout:
+            cx, cy = self.grid.center(idx)
+            c = [(cx - half, cy - half), (cx + half, cy - half), (cx + half, cy + half), (cx - half, cy + half)]
+            for a, b in zip(c, c[1:] + c[:1]):
+                m.points += [Point(x=a[0], y=a[1], z=0.03), Point(x=b[0], y=b[1], z=0.03)]
+                m.colors += [col, col]
+        return m
 
     def build_points(self, header) -> Marker:
         # 칸과 같은 색이면 칸 위에서 안 보이므로 검은 점 (미검출 샘플은 회색 점)

@@ -27,6 +27,8 @@
                                                                              ▼
                                               /survey/heatmap (MarkerArray) ──▶ RViz
                                               ~/scv_survey_logs/*.csv (지도에 쓴 샘플)
+                                              /keepout_mask (IF-10, 측정 끝 뒤 미검출·음영 칸) ──▶ Nav2 KeepoutFilter
+ survey_keys (s: 측정 끝 · r: 새 측정) ──▶ network_map_engine/finish_survey · reset_survey
 ```
 
 ## 파일 구성
@@ -38,7 +40,8 @@ scv_survey/
 │   ├── heatmap.py             칸 계산·색·위치 판정 (ROS 무관, pytest 대상)
 │   ├── rssi_scanner.py        노드: RSSI 측정 → NetRaw
 │   ├── manual_tagger.py       노드(시험용): NetRaw + 위치 → NetSample
-│   └── network_map_engine.py  노드: NetSample → 히트맵 마커·CSV
+│   ├── network_map_engine.py  노드: NetSample → 히트맵 마커·CSV·회피 마스크
+│   └── survey_keys.py         노드(시험용): 키 s·r 로 측정 끝·새 측정 서비스 호출
 ├── launch/laptop_test.launch.py
 ├── rviz/survey.rviz
 ├── maps/test_map.yaml, test_map.pgm   (해상도 0.05 m, 94×230 px, 원점 −3.107, −4.823)
@@ -93,6 +96,10 @@ link 방식: `parse_iw_link`·`read_iw_link`. `target_ssid` 를 비우면 붙어
 | `rssi_to_color(rssi, strong, weak)` | RSSI → 색 (아래 「색 규칙」) |
 | `cell_color(stats, …)` | 칸 색. 검출 0개거나 미검출 비율 ≥ 0.5 면 회색 |
 | `pose_usable(age, cov, max_age, max_cov, lag)` | TF 위치를 지도에 써도 되는지와 이유 (아래 「샘플 제외 규칙」) |
+| `cell_status(stats, shadow_dbm, thresh)` | 칸 상태: `miss` (회색과 같은 조건) / `shadow` (중앙값 < −72 dBm, BR-T04) / `normal` |
+| `keepout_cells(cells, …, min_samples)` | 회피할 칸 → 상태. 샘플 2 개 미만 칸은 뺀다 |
+| `keepout_mask(cells, cell, origin, res, w, h, margin)` | OccupancyGrid 값: 회피 칸(0.5 m 칸 그대로)은 100, 나머지(정상·측정 안 한 칸) 0. `margin` 을 주면 그만큼 넓힘 (기본 0, 모서리는 둥글게) |
+| `SurveyGrid.clear()` | 새 측정: 샘플·중복 기록 비움 (지도 정보는 그대로) |
 
 ### `rssi_scanner.py` — 노드: RSSI 측정 (IF-02)
 
@@ -176,6 +183,19 @@ link 방식: `parse_iw_link`·`read_iw_link`. `target_ssid` 를 비우면 붙어
 - 칸을 CUBE_LIST 가 아닌 TRIANGLE_LIST 로 그리는 이유: RViz 조명 때문에 CUBE_LIST 는 색이 절반쯤 어두워진다. TRIANGLE_LIST 는 지정한 색 그대로 나온다. (마커 `color.a` 를 1 로 둬야 반투명 칸이 사라지지 않는다.)
 - CSV 열: `stamp, robot_id, seq, run_id, x, y, detected, rssi_dbm`. header 는 파일이 없거나 비어 있을 때 쓰고 바로 flush.
 
+회피 마스크 (IF-10, `mask_topic`, reliable · transient_local):
+
+| 때 | 마스크 |
+| --- | --- |
+| 노드 시작 (지도 받음) | **전부 0.** KeepoutFilter 는 마지막으로 받은 마스크를 계속 쓰므로, 새로 띄우면 빈 마스크로 덮어 지난 측정의 회피 칸을 지운다 (10/12 확인: 엔진만 꺼 두면 코스트맵에 남아 있음) |
+| 측정 중 | 전부 0 (회피 칸 없음) |
+| `~/finish_survey` (Trigger, 모든 측정 끝) | 그때의 칸으로 회피 칸을 정해 고정. 미검출·음영 칸(0.5 m 칸 그대로)이 100. RViz 에 자홍 테두리(`keepout` 마커) |
+| `~/reset_survey` (Trigger, 새 측정 시작) | 샘플·히트맵을 비우고 마스크 전부 0 |
+
+- 지도와 원점·해상도·크기가 같다 (0.5 m 칸 = 10 × 10 px). 측정 안 한 칸은 0 — 그쪽으로 갈 일이 없다.
+- KeepoutFilter 는 inflation 뒤에 적용돼 회피 칸 주변을 팽창시키지 않는다. 넓히지 않고(`mask_margin` 0) 칸 그대로 둔다 — 0.2 m 넓히면 회피가 너무 커져서 (10/12 결정). 로봇 중심은 칸에 못 들어가지만 몸체(반경 0.19 m)는 칸 가장자리에 걸칠 수 있다.
+- 마스크 100 → 코스트맵 LETHAL (코스트맵 토픽 값 100). 50 같은 중간 값은 중간 비용이 되므로 쓰지 않는다.
+
 | 파라미터 | 기본값 | 설명 |
 | --- | --- | --- |
 | `sample_topics` | `['/laptop/survey/sample']` | 구독할 샘플 토픽들 (launch 가 `/{ns}/survey/sample` 로) |
@@ -186,6 +206,14 @@ link 방식: `parse_iw_link`·`read_iw_link`. `target_ssid` 를 비우면 붙어
 | `alpha`, `min_samples_full_alpha` | 0.7, 2 | 칸 투명도, 진하게 칠할 최소 샘플 수 |
 | `show_points`, `max_points` | true, 2000 | 잰 자리 점 |
 | `csv_path` | (없음) | CSV 경로 |
+| `mask_topic` | `/keepout_mask` | 회피 마스크. 실제 구성은 점검 로봇의 `/{ns}/keepout_mask` |
+| `shadow_dbm` | −72 | 칸 중앙값이 이보다 작으면 음영 |
+| `mask_margin` | 0.0 m | 회피 칸을 넓히는 폭 (0 = 칸 그대로) |
+| `min_samples_for_mask` | 2 | 이 개수 미만 칸은 회피 칸에서 뺀다 |
+
+### `survey_keys.py` — 노드(시험용): 키 입력
+
+터미널에서 따로 띄운다 (`ros2 run scv_survey survey_keys`). `s` = `finish_survey`, `r` = `reset_survey`, `q` = 종료, 다른 키 = 도움말. 결과 문구를 로그로 (`측정 끝: 회피 칸 2 개 (미검출 1, 음영 1), 마스크 624 px`). 파라미터 `engine` (기본 `/network_map_engine`).
 
 ### `launch/laptop_test.launch.py`
 
@@ -201,6 +229,8 @@ link 방식: `parse_iw_link`·`read_iw_link`. `target_ssid` 를 비우면 붙어
 | `base_frame`, `max_pose_age` | `base_link`, 0.5 | tf |
 | `cell_size`, `rssi_strong`, `rssi_weak` | 0.5, −35, −75 | |
 | `csv_path` | (비움) | 비우면 `~/scv_survey_logs/{robot_ns}_{pose_source}.csv` |
+| `mask_topic`, `shadow_dbm`, `mask_margin` | `/keepout_mask`, −72, 0.0 | 엔진 회피 마스크 |
+| `keepout_costmap` | true | manual 에서 Nav2 전역 코스트맵(KeepoutFilter)을 노트북에 띄움 (아래) |
 | `rviz` | true | |
 
 모드별로 띄우는 것:
@@ -210,11 +240,12 @@ link 방식: `parse_iw_link`·`read_iw_link`. `target_ssid` 를 비우면 붙어
 | rssi_scanner, manual_tagger | `/laptop` | `/{ns}` (+ `/tf` → `/{ns}/tf` 바꿈) |
 | network_map_engine | `/map` 구독 | `/{ns}/map` 구독 |
 | map_server + lifecycle_manager | 띄움 (test_map) | 안 띄움 |
+| 코스트맵 시험 (`keepout_costmap`) | `global_costmap`(static + inflation 0.45 + KeepoutFilter) · `costmap_filter_info_server` · `lifecycle_manager_keepout`(bond 끔) · TF `map → base_link` 원점 고정 → `/costmap` | 안 띄움 (로봇 Nav2 와 섞이지 않게) |
 | RViz | 그대로 | `/tf`, `/tf_static`, `/map`, `/initialpose`, `/scan`, `/robot_description` 을 `/{ns}/…` 로 |
 
 ### `rviz/survey.rviz`
 
-Fixed Frame `map`, 위에서 내려다보는 시점. 표시: Map, RSSI Heatmap(`/survey/heatmap`), TurtleBot4 모델, `base_link` 축, LaserScan. 도구: Publish Point(`/clicked_point`), 2D Pose Estimate(`/initialpose`). 로봇 모델·축·스캔은 tf 모드에서만 보인다.
+Fixed Frame `map`, 위에서 내려다보는 시점. 표시: Map, Nav2 Costmap(`/costmap`, costmap 색), Keepout Mask(`/keepout_mask`, 기본 꺼짐), RSSI Heatmap(`/survey/heatmap`), TurtleBot4 모델, `base_link` 축, LaserScan. 도구: Publish Point(`/clicked_point`), 2D Pose Estimate(`/initialpose`). 로봇 모델·축·스캔은 tf 모드에서만 보인다.
 
 ## 색 규칙
 
@@ -266,6 +297,18 @@ ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 
 노트북을 옮기고 → RViz Publish Point 로 그 자리 클릭 → 5 초 대기 → 다음 자리.
 
+**회피 마스크 시험 (manual)** — 미검출·음영 칸이 Nav2 코스트맵에서 장애물로 바뀌는지
+
+| 순서 | 터미널 | 명령 / 할 일 |
+| --- | --- | --- |
+| 1 | 측정+코스트맵+RViz | `ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"` |
+| 2 | 키 | `ros2 run scv_survey survey_keys` |
+| 3 | RViz | 노트북을 들고 자리마다 Publish Point → 5 초. 음영을 만들려면 핫스팟에서 멀리, 미검출은 핫스팟을 끄고 잰다 |
+| 4 | 키 터미널 | `s` → 회피 칸이 자홍 테두리 + 코스트맵 자홍(LETHAL, 칸 그대로) |
+| 5 | 키 터미널 | `r` → 히트맵·회피 칸이 모두 사라짐 (새 측정) |
+
+끝낼 때: 2 에서 `q` → 1 에서 Ctrl+C. RViz 의 `base_link` 축이 원점에 보이는 것은 코스트맵용 고정 TF 다.
+
 **TurtleBot4 위에 (tf)** — 터미널마다 (로봇 3번 예):
 
 | 순서 | 터미널 | 명령 |
@@ -311,6 +354,16 @@ ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 - 로봇 3번 undock 위치는 지도 원점 (0, 0) 이지만 **방향이 yaw π** 다. 0 으로 넣으면 스캔이 지도 밖으로 돈다.
 - 초기위치 공분산을 RViz 기본(x, y 각 0.25)으로 주면 AMCL 공분산이 0.50 에서 시작해, 0.25 아래로 내려갈 때까지(약 3 분, 89 개) 샘플이 제외됐다.
 
+## 시험 결과 (2026-10-12, 회피 마스크)
+
+| 시험 | 환경 | 결과 |
+| --- | --- | --- |
+| pytest | mock | 56 개 통과 (이전 48 + 칸 상태·회피 칸·마스크 넓힘·모서리·지도 끝·새 측정 8) |
+| KeepoutFilter 값 | 노트북 domain 87, Nav2 Jazzy 1.3.13 단독 코스트맵, testbed_v1 | 마스크 100 → 코스트맵 100, 50 → 49, 0 으로 다시 보내면 지워짐 |
+| 측정 끝·새 측정 | 노트북 domain 87, launch(manual, link) + 가짜 샘플 | 측정 중 마스크 0 px → finish 후 회피 칸 2 개(미검출 1, 음영 1) 624 px, 코스트맵 100 → reset 후 0 px, 코스트맵 원래 값 |
+| 엔진 재시작 | 같은 환경 | 엔진만 끄면 코스트맵에 회피 칸이 남음(100) → 엔진을 새로 띄우면 빈 마스크로 0 |
+| 키 입력 | pty | `s` → 측정 끝 응답, `r` → 새 측정 응답, 다른 키 → 도움말, `q` 종료 |
+
 ## 알려진 한계 · 다음 작업
 
 - 위치 정확도는 AMCL(보통 5–10 cm)을 넘지 못한다. 노트북 안테나와 `base_link` 사이 거리(0.1–0.2 m)는 반영하지 않았다.
@@ -319,6 +372,7 @@ ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 - 엔진은 시간 구분 없이 샘플을 쌓는다. 한 번 주행 중 핫스팟을 껐다 켜면 같은 칸에 두 상태가 섞인다 (UC-08 은 최근 N 초 창이 필요).
 - 노드를 재시작할 때는 launch 전체를 함께. `manual_tagger` 만 재시작하면 `seq` 가 0 부터 다시 시작해 엔진이 중복으로 버린다.
 - `/survey/heatmap` 은 `docs/interfaces.md` 에 없는 관제 PC 내부 토픽이다. 관제 웹에서 쓰려면 PM 에 등록 요청.
+- 회피 마스크는 노트북 코스트맵으로만 확인했다. 점검 로봇 Nav2 에 넣으려면 전역·지역 코스트맵에 `filters: [keepout_filter]` 와 `costmap_filter_info_server` 를 그 로봇 PC 에만 (주행 팀·PM 과 `scv_bringup` 에서 협의). launch 의 `_keepout_costmap` 설정이 축소판이다.
 - 다음 작업 후보
   - launch 인자 `max_pose_cov`, `init_pose:=0,0,3.14` (시작할 때 작은 공분산으로 AMCL 초기위치 자동 설정)
   - `manual_tagger` 의 tf 모드를 실제 `survey_buffer` (로봇 PC, 버퍼·`survey/sync` 재발행)로 옮기기

@@ -3,6 +3,7 @@
 - 칸 번호는 지도 원점(origin) 기준: i = floor((x - ox) / cell), j = floor((y - oy) / cell)
 - 칸 대표값은 검출된 RSSI 의 중앙값. 미검출 샘플은 통계에 넣지 않고 따로 센다
 - (robot_id, seq) 가 같은 샘플은 한 번만, pose_ok 가 False 인 샘플은 버린다
+- 회피 마스크: 미검출·음영 칸(0.5 m 칸 그대로, margin 을 주면 그만큼 넓혀)은 100, 나머지(정상·측정 안 한 칸) 0 인 OccupancyGrid 값
 """
 
 import colorsys
@@ -18,6 +19,11 @@ Color = Tuple[float, float, float]
 STRONG_DBM = -35
 WEAK_DBM = -75
 MISS_COLOR: Color = (0.4, 0.4, 0.4)    # 회색 (미검출 — 파랑(약함)과 구분)
+
+# 칸 상태 (회피 마스크용). 음영 기준은 BR-T04 의 −72 dBm
+SHADOW_DBM = -72
+NORMAL, SHADOW, MISS = 'normal', 'shadow', 'miss'
+KEEPOUT = 100   # OccupancyGrid 값 → Nav2 KeepoutFilter 가 LETHAL 로 바꾼다 (0 은 영향 없음)
 
 
 class Sample(NamedTuple):
@@ -96,6 +102,58 @@ def cell_color(stats: CellStats, miss_ratio_thresh: float = 0.5,
     return rssi_to_color(stats.median, strong, weak)
 
 
+def cell_status(stats: CellStats, shadow_dbm: float = SHADOW_DBM,
+                miss_ratio_thresh: float = 0.5) -> str:
+    """미검출(회색과 같은 조건) / 음영(중앙값 < shadow_dbm) / 정상"""
+    if stats.n_detected == 0 or stats.miss_ratio >= miss_ratio_thresh:
+        return MISS
+    if stats.median < shadow_dbm:
+        return SHADOW
+    return NORMAL
+
+
+def keepout_cells(cells: Dict[Tuple[int, int], CellStats], shadow_dbm: float = SHADOW_DBM,
+                  miss_ratio_thresh: float = 0.5, min_samples: int = 2) -> Dict[Tuple[int, int], str]:
+    """회피할 칸 → 상태(MISS·SHADOW). 샘플이 min_samples 개보다 적은 칸은 한 번 튄 값일 수 있어 뺀다"""
+    out = {}
+    for idx, st in cells.items():
+        if st.n_total < min_samples:
+            continue
+        status = cell_status(st, shadow_dbm, miss_ratio_thresh)
+        if status != NORMAL:
+            out[idx] = status
+    return out
+
+
+def keepout_mask(cells, cell_size: float, origin: Tuple[float, float], resolution: float,
+                 width: int, height: int, margin: float = 0.0) -> List[int]:
+    """OccupancyGrid.data (아래 행부터, 행 우선). 칸 사각형에서 margin [m] 안의 픽셀은 KEEPOUT, 나머지 0.
+
+    지도(/map)와 원점·해상도·크기가 같다고 본다 (회전 없는 지도). 측정 안 한 칸은 0.
+    KeepoutFilter 는 inflation 뒤에 적용돼 회피 칸 주변이 팽창되지 않는다. 기본(margin 0)은 칸 그대로라
+    로봇 중심은 칸에 못 들어가지만 몸체(반경 0.19 m)는 칸 가장자리에 걸칠 수 있다.
+    """
+    ox, oy = origin
+    data = [0] * (width * height)
+    m2 = margin * margin + 1e-9
+    for i, j in cells:
+        x0, y0 = ox + i * cell_size, oy + j * cell_size
+        x1, y1 = x0 + cell_size, y0 + cell_size
+        c0 = max(0, math.floor((x0 - margin - ox) / resolution))
+        c1 = min(width - 1, math.floor((x1 + margin - ox) / resolution))
+        r0 = max(0, math.floor((y0 - margin - oy) / resolution))
+        r1 = min(height - 1, math.floor((y1 + margin - oy) / resolution))
+        for r in range(r0, r1 + 1):
+            py = oy + (r + 0.5) * resolution
+            dy = max(y0 - py, 0.0, py - y1)
+            for c in range(c0, c1 + 1):
+                px = ox + (c + 0.5) * resolution
+                dx = max(x0 - px, 0.0, px - x1)
+                if dx * dx + dy * dy <= m2:     # 모서리는 둥글게
+                    data[r * width + c] = KEEPOUT
+    return data
+
+
 class SurveyGrid:
     """받은 샘플을 보관하고, 요청할 때 칸별 통계를 계산한다.
 
@@ -112,6 +170,11 @@ class SurveyGrid:
     def set_map(self, ox: float, oy: float, width_m: float, height_m: float) -> None:
         self.origin = (ox, oy)
         self.bounds = (ox, oy, ox + width_m, oy + height_m)
+
+    def clear(self) -> None:
+        """새 측정: 샘플·중복 기록을 비운다 (지도 원점·범위는 그대로)"""
+        self._samples = []
+        self._seen = set()
 
     def in_bounds(self, x: float, y: float) -> bool:
         if self.bounds is None:
