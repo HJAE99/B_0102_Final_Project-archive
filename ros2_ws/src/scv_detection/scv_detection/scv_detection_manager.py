@@ -47,8 +47,6 @@ class ScvDetectionManager(Node):
         self.declare_parameter("max_fps", 10.0)
         self.declare_parameter("jpeg_quality", 85)
         self.declare_parameter("show", False)
-        self.declare_parameter("frontal_min_size", 48)
-        self.declare_parameter("frontal_min_axis_ratio", 0.90)
         self.declare_parameter('enable_yolo', True)
         self.declare_parameter('rack_enabled', False)
         self.declare_parameter('rack_confirm_frames', 3)
@@ -137,17 +135,13 @@ class ScvDetectionManager(Node):
             raise ValueError('Launch with robot_ns, or pass --ros-args -r __ns:=/your_robot')
         self.topic = 'oakd/rgb/image_raw/compressed'
         self.output_topic = 'fire_extinguisher/detections/compressed'
-        self.frontal_min_size = int(self.get_parameter('frontal_min_size').value)
-        self.frontal_min_axis_ratio = float(self.get_parameter('frontal_min_axis_ratio').value)
-        if self.frontal_min_size < 1 or not 0 < self.frontal_min_axis_ratio <= 1:
-            raise ValueError('frontal_min_size must be positive and axis ratio must be in (0, 1]')
         self.conf = float(self.get_parameter("conf").value)
         self.iou = float(self.get_parameter("iou").value)
         self.imgsz = int(self.get_parameter("imgsz").value)
         self.max_fps = float(self.get_parameter("max_fps").value)
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
         self.show = bool(self.get_parameter("show").value)
-        self.window_name = "Fire Extinguisher Gauge Detection"
+        self.window_name = "YOLO and Rack Detection"
         if self.show and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
             self.get_logger().warning("No desktop display available; disabling show")
             self.show = False
@@ -181,6 +175,8 @@ class ScvDetectionManager(Node):
         )
 
         self.get_logger().info(f"weights: {self.model.ckpt_path}" if self.model else 'weights: unused (YOLO disabled)')
+        if self.model is not None:
+            self.get_logger().info(f"YOLO classes: {self.model.names}")
         self.get_logger().info(f"device: {self.device}")
         self.get_logger().info(f"input: {self.subscription.topic_name}")
         self.get_logger().info(f"output: {self.publisher.topic_name}")
@@ -341,7 +337,7 @@ class ScvDetectionManager(Node):
             assessments = []
             if result is not None:
                 from scv_detection.detection_render import assess_detections, annotate_detections
-                assessments = assess_detections(result, self.frontal_min_size, self.frontal_min_axis_ratio)
+                assessments = assess_detections(result)
             annotated = annotate_detections(result, assessments) if result is not None else frame.copy()
             if roi_box is not None:
                 x1, y1, x2, y2 = roi_box
@@ -375,7 +371,9 @@ class ScvDetectionManager(Node):
                     assessments,
                 ):
                     if assessment['verdict'] == InspectionResult.UNCONFIRMED:
-                        detections.append(f"UNCONFIRMED ({assessment['reason']})")
+                        detections.append(
+                            f"{result.names[class_id]}:{confidence:.2f} "
+                            f"verdict=UNCONFIRMED ({assessment['reason']})")
                     else:
                         state = 'NORMAL' if assessment['verdict'] == InspectionResult.NORMAL else 'ABNORMAL'
                         detections.append(f"{result.names[class_id]}:{confidence:.2f} verdict={state}")

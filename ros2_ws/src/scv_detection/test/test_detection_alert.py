@@ -12,7 +12,8 @@ import torch
 from ultralytics.engine.results import Results
 
 from scv_detection import scv_detection_manager as module
-from scv_detection import detection_render, pressure_gauge, exit_sign
+from scv_detection import detection_render
+import ultralytics
 
 
 @pytest.fixture
@@ -29,8 +30,8 @@ def make_node(ros, tmp_path, monkeypatch):
     """시험용 모델을 사용해 검출 노드를 만들고 시험이 끝나면 정리한다."""
     weights = tmp_path / 'test.pt'
     weights.touch()
-    monkeypatch.setattr(module, 'YOLO', Mock())
-    monkeypatch.setattr(module.torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(ultralytics, 'YOLO', Mock())
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     nodes = []
 
     def create(namespace='robot3', **overrides):
@@ -132,76 +133,53 @@ def test_detection_colors(name, color):
     original = frame.copy()
     result = Results(frame, path='test.jpg', names={0: name},
                      boxes=torch.tensor([[60, 60, 200, 145, 0.8, 0]]))
-    annotated = module.annotate_detections(result)
+    annotated = detection_render.annotate_detections(result)
     assert tuple(annotated[145, 130]) == color
     assert np.array_equal(frame, original)
 
 
-@pytest.mark.parametrize('axes,expected', [((60, 60), True), ((60, 32), False)])
-def test_frontality_geometry(axes, expected):
-    """원을 정면, 찌그러진 타원을 비정면으로 구분하는 기본 동작을 확인한다."""
-    frame = np.zeros((180, 180, 3), dtype=np.uint8)
-    cv2.ellipse(frame, (90, 90), axes, 25, 0, 360, (255, 255, 255), 3)
-    frontal, _ = pressure_gauge.check_pressure_frontality(frame, [10, 10, 170, 170])
-    assert frontal is expected
-
-
-@pytest.mark.parametrize('box', [[10, 10, 35, 35], [10, 10, 170, 170]])
-def test_unclear_frontality_holds_verdict(box):
-    """너무 작거나 테두리가 없는 압력계는 정상·이상 대신 판정 보류로 표시하는지 확인한다."""
-    frame = np.zeros((180, 180, 3), dtype=np.uint8)
-    result = Results(frame, path='test.jpg', names={0: 'Normal'},
-                     boxes=torch.tensor([[*box, 0.9, 0]]))
-    assessment = module.assess_detections(result)[0]
-    assert assessment['frontal'] is None
-    assert assessment['verdict'] == module.InspectionResult.UNCONFIRMED
-    output = module.annotate_detections(result, [assessment])
-    assert tuple(output[box[3], (box[0] + box[2]) // 2]) == (192, 192, 192)
-
-
-@pytest.mark.parametrize('name', ['Normal', 'Abnormal_left', 'Abnormal_right'])
-def test_nonfrontal_pressure_not_judged(name):
-    """비정면 압력계에서는 모델이 상태를 예측해도 정상·이상 판정을 내보내지 않는다."""
-    assert pressure_gauge.class_to_verdict(name, False) == module.InspectionResult.UNCONFIRMED
-    assert pressure_gauge.class_to_verdict(name, None) == module.InspectionResult.UNCONFIRMED
-
-
 @pytest.mark.parametrize('name,verdict', [('Normal', 'NORMAL'), ('Abnormal_left', 'ABNORMAL'),
                                         ('Abnormal_right', 'ABNORMAL'), ('Exit_sign_on', 'NORMAL'),
-                                        ('Exit_sign_off', 'ABNORMAL')])
+                                        ('Exit_sign_off', 'ABNORMAL'), ('Fire_extinguisher', 'UNCONFIRMED')])
 def test_interface_verdict_mapping(name, verdict):
-    """모델 클래스가 공동 메시지의 정상·이상 상수에 올바르게 연결되는지 확인한다."""
-    assert detection_render.class_to_verdict(name, True) == getattr(module.InspectionResult, verdict)
+    """학습 라벨의 상태를 연결하고 전체샷은 정상·이상으로 단정하지 않는지 확인한다."""
+    assert detection_render.class_to_verdict(name) == getattr(module.InspectionResult, verdict)
 
 
-@pytest.mark.parametrize('name,expected', [('Exit_sign_on', 'NORMAL'),
-                                         ('Exit_sign_off', 'ABNORMAL'), ('unknown', 'UNCONFIRMED')])
-def test_exit_module_without_pressure_geometry(name, expected):
-    """비상구 판정 함수는 압력계 테두리 검사 없이 점등·소등을 판단하는지 확인한다."""
-    assessment = exit_sign.assess(name, np.zeros((1, 1, 3), np.uint8), [0, 0, 1, 1])
-    assert assessment['verdict'] == getattr(module.InspectionResult, expected)
-    assert assessment['frontal'] is None
+@pytest.mark.parametrize('short_assessments', [False, True])
+def test_all_six_classes_keep_labels(monkeypatch, short_assessments):
+    """전체샷을 포함한 여섯 라벨과 신뢰도가 모두 표시되고 상태 목록이 짧아도 빠지지 않는지 확인한다."""
+    names = dict(enumerate(['Fire_extinguisher', 'Normal', 'Abnormal_left',
+                            'Abnormal_right', 'Exit_sign_on', 'Exit_sign_off']))
+    frame = np.zeros((480, 640, 3), np.uint8)
+    original = frame.copy()
+    boxes = torch.tensor([[20 + i * 50, 50, 60 + i * 50, 150, 0.9, i] for i in names])
+    result = Results(frame, path='six.jpg', names=names, boxes=boxes)
+    annotator = Mock()
+    annotator.result.return_value = frame.copy()
+    monkeypatch.setattr(detection_render, 'Annotator', Mock(return_value=annotator))
+    assessments = [] if short_assessments else None
+    detection_render.annotate_detections(result, assessments)
+    labels = {call.args[1]: call.kwargs['color'] for call in annotator.box_label.call_args_list}
+    assert labels == {
+        'Fire_extinguisher 0.90': (192, 192, 192),
+        'Normal 0.90': (0, 255, 0),
+        'Abnormal_left 0.90': (0, 0, 255),
+        'Abnormal_right 0.90': (0, 0, 255),
+        'Exit_sign_on 0.90': (0, 255, 0),
+        'Exit_sign_off 0.90': (0, 0, 255),
+    }
+    assert np.array_equal(frame, original)
 
 
-def test_dispatch_to_facility_modules(monkeypatch):
-    """압력계와 비상구가 함께 검출되면 각 담당 함수로 나누어 호출하는지 확인한다."""
-    pressure = Mock(return_value={'verdict': module.InspectionResult.NORMAL,
-                                 'frontal': True, 'reason': 'pressure test'})
-    exit_light = Mock(return_value={'verdict': module.InspectionResult.ABNORMAL,
-                                   'frontal': None, 'reason': 'exit test'})
-    monkeypatch.setattr(pressure_gauge, 'assess', pressure)
-    monkeypatch.setattr(exit_sign, 'assess', exit_light)
-    frame = np.zeros((180, 280, 3), np.uint8)
-    result = Results(frame, path='test.jpg', names={0: 'Normal', 1: 'Exit_sign_off'},
-                     boxes=torch.tensor([[60, 60, 150, 145, 0.8, 0],
-                                         [160, 60, 260, 145, 0.9, 1]]))
-    assessments = module.assess_detections(result, 50, 0.92)
-    assert [item['reason'] for item in assessments] == ['pressure test', 'exit test']
-    pressure.assert_called_once()
-    exit_light.assert_called_once()
-    assert pressure.call_args.args[0] == 'Normal'
-    assert pressure.call_args.args[3:] == (50, 0.92)
-    assert exit_light.call_args.args[0] == 'Exit_sign_off'
+def test_future_class_is_visible(monkeypatch):
+    """새로 학습한 임의의 라벨도 코드 등록 없이 원래 이름으로 표시하는지 확인한다."""
+    result = Results(np.zeros((100, 100, 3), np.uint8), path='new.jpg',
+                     names={0: 'New_object'}, boxes=torch.tensor([[10, 10, 80, 80, 0.8, 0]]))
+    annotator = Mock()
+    monkeypatch.setattr(detection_render, 'Annotator', Mock(return_value=annotator))
+    detection_render.annotate_detections(result)
+    assert annotator.box_label.call_args.args[1] == 'New_object 0.80'
 
 
 def test_rack_only_without_weights(make_node):
