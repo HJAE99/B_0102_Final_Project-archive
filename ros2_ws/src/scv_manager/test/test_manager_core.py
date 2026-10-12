@@ -1,5 +1,6 @@
 from scv_manager.manager_core import (
     ManagerCore,
+    PatrolPhase,
     RobotStatusSnapshot,
     RunState,
     TaskState,
@@ -66,7 +67,7 @@ def test_task_failure_flow():
     assert task.reason == "BLOCKED"
 
 
-def test_tasks_are_dispatched_in_creation_order_one_at_a_time():
+def test_two_robots_can_receive_tasks_concurrently():
     core = ManagerCore(["robot4", "robot3"])
     run_id = core.start_run()
 
@@ -79,34 +80,53 @@ def test_tasks_are_dispatched_in_creation_order_one_at_a_time():
         preferred_robot_id="robot4",
     )
     core.create_task(
-        task_id="facility",
+        task_id="robot3-survey",
         run_id=run_id,
-        task_type=1,
+        task_type=0,
         priority=1,
-        target_ref="EXT-01",
+        target_ref="Z2",
         preferred_robot_id="robot3",
+        allowed_robot_ids=("robot3",),
     )
     core.create_task(
-        task_id="reinspection",
+        task_id="robot4-dock",
         run_id=run_id,
-        task_type=2,
-        priority=10,
-        target_ref="cell-1",
+        task_type=3,
+        priority=1,
+        target_ref="dock",
         preferred_robot_id="robot4",
+        allowed_robot_ids=("robot4",),
     )
 
-    assert core.next_pending_task().task_id == "survey"
+    assert core.next_pending_task("robot4").task_id == "survey"
     core.assign_task("survey", "robot4")
-    assert core.next_pending_task() is None
-
     core.start_task("survey")
-    core.finish_task("survey", ok=True, reason="")
-    assert core.next_pending_task().task_id == "facility"
 
-    core.assign_task("facility", "robot3")
-    core.start_task("facility")
-    core.finish_task("facility", ok=True, reason="")
-    assert core.next_pending_task().task_id == "reinspection"
+    assert core.next_pending_task("robot4") is None
+    assert core.next_pending_task("robot3").task_id == "robot3-survey"
+
+    core.assign_task("robot3-survey", "robot3")
+    core.start_task("robot3-survey")
+    core.finish_task("survey", ok=True, reason="")
+    assert core.next_pending_task("robot4").task_id == "robot4-dock"
+    assert core.next_pending_task("robot3") is None
+
+
+def test_robot_cannot_take_task_for_another_robot():
+    core = ManagerCore(["robot4", "robot3"])
+    run_id = core.start_run()
+    core.create_task(
+        task_id="robot4-only",
+        run_id=run_id,
+        task_type=0,
+        priority=1,
+        target_ref="Z1",
+        preferred_robot_id="robot4",
+        allowed_robot_ids=("robot4",),
+    )
+
+    assert core.next_pending_task("robot3") is None
+    assert core.next_pending_task("robot4").task_id == "robot4-only"
 
 
 def test_estop_and_resume_requeue_active_task():
@@ -191,6 +211,7 @@ def test_timestamp_based_run_id():
 
     assert first_run_id == 1_700_000_000
     assert second_run_id == 1_700_000_001
+    assert core.patrol_phase == PatrolPhase.SURVEY
 
 
 def test_robot_goes_offline_at_timeout_and_recovers():
@@ -223,3 +244,47 @@ def test_robot_goes_offline_at_timeout_and_recovers():
 
     assert core.robots["robot4"].online is True
     assert core.robots["robot4"].last_seen == 131.0
+
+
+def test_offline_robot_active_task_is_failed():
+    core = ManagerCore(["robot4"])
+    run_id = core.start_run()
+    core.create_task(
+        task_id="survey",
+        run_id=run_id,
+        task_type=0,
+        priority=1,
+        target_ref="Z1",
+        preferred_robot_id="robot4",
+    )
+    core.assign_task("survey", "robot4")
+    core.start_task("survey")
+
+    failed = core.fail_active_tasks_for_robot(
+        "robot4",
+        reason="OFFLINE",
+    )
+
+    assert failed == ["survey"]
+    assert core.tasks["survey"].state == TaskState.FAILED
+    assert core.tasks["survey"].reason == "OFFLINE"
+
+
+def test_blocked_reason_with_details_is_blocked():
+    core = ManagerCore(["robot4"])
+    run_id = core.start_run()
+    core.create_task(
+        task_id="survey",
+        run_id=run_id,
+        task_type=0,
+        priority=1,
+        target_ref="Z1",
+    )
+
+    core.finish_task(
+        "survey",
+        ok=False,
+        reason="BLOCKED skipped=2",
+    )
+
+    assert core.tasks["survey"].state == TaskState.BLOCKED

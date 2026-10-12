@@ -13,7 +13,7 @@ uint8 VIS_ABNORMAL=14           # 압력·소등·적치
 
 builtin_interfaces/Time stamp
 string  candidate_id
-string  robot_id                # 후보를 만든 측정·관측을 한 로봇. 음영 후보의 재측정은 로봇 A 에 배정 (10/11)
+string  robot_id                # 후보를 만든 로봇. 음영 후보는 같은 로봇이 자기 섹터에서 재측정 (10/12)
 uint32  run_id
 uint8   source
 uint8   kind
