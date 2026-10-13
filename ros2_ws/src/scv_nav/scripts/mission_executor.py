@@ -54,6 +54,7 @@ class MissionExecutor(Node):
         self.busy = False
         self.state = S.STATE_IDLE
         self.task = None   # 수행 중인 ExecuteTask.Goal
+        self.run_id = 0    # 마지막으로 받은 작업의 회차 (RobotStatus.msg: 작업 사이에도 유지)
         self.progress = 0.0
         self.warning = ''
         self.battery = 100.0
@@ -89,8 +90,9 @@ class MissionExecutor(Node):
         m = RobotStatus(robot_id=self.robot_id, state=self.state, battery_percent=self.battery,
                         accepting_tasks=self.battery > 30.0, progress=self.progress, warning=self.warning)
         m.stamp = self.get_clock().now().to_msg()
+        m.run_id = self.run_id
         if self.task:
-            m.task_id, m.run_id, m.task_type = self.task.task_id, self.task.run_id, self.task.type
+            m.task_id, m.task_type = self.task.task_id, self.task.type
         if self.pose:
             m.x, m.y, m.yaw = self.pose[:3]
             m.pose_ok = self.pose[3] <= self.pose_std_max
@@ -106,7 +108,8 @@ class MissionExecutor(Node):
 
     def execute(self, gh):
         g = gh.request
-        self.task, self.progress, self.warning = g, 0.0, ''
+        self.task, self.run_id, self.progress, self.warning = g, g.run_id, 0.0, ''
+        measured = None   # REINSPECTION 의 PreciseMeasure 결과 (interfaces v0.2.10)
         if self.state == S.STATE_DOCKED and g.type != T.DOCK:
             self.nav.undock()
             localize(self.nav, self.home)   # 시작할 때와 같은 이유 (Dock 에서는 lidar 꺼짐)
@@ -123,7 +126,7 @@ class MissionExecutor(Node):
             elif g.type == T.REINSPECTION:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
                 if ok:
-                    ok, reason = self.measure(gh)
+                    ok, reason, measured = self.measure(gh)
             elif g.type == T.DOCK:
                 ok, reason = self.go_dock(gh, g.waypoints)
             else:
@@ -141,7 +144,10 @@ class MissionExecutor(Node):
             gh.succeed()
         else:
             gh.abort()
-        return ExecuteTask.Result(ok=ok, reason=reason)
+        r = ExecuteTask.Result(ok=ok, reason=reason)
+        if measured:
+            r.rssi_median, r.rssi_iqr, r.n_samples = measured.rssi_median, measured.rssi_iqr, measured.n_samples
+        return r
 
     def follow(self, gh, waypoints, precise=False):
         if not waypoints:
@@ -223,7 +229,7 @@ class MissionExecutor(Node):
     def inspect(self, gh, g):
         adjust = []   # 피드백 콜백은 executor 스레드라서 nav 호출은 이 스레드에서 한다
         kind = KIND.get(g.target_ref[:3], 0)
-        goal = InspectFacility.Goal(task_id=g.task_id, facility_id=g.target_ref, kind=kind)
+        goal = InspectFacility.Goal(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
         res, reason = self.call_action(self.inspect_cli, goal, gh, lambda m: adjust.append(m.feedback),
                                        lambda: self.do_adjust(adjust))
         if res is None:
@@ -244,8 +250,8 @@ class MissionExecutor(Node):
     def measure(self, gh):
         res, reason = self.call_action(self.precise_cli, PreciseMeasure.Goal(duration_s=30), gh)
         if res is None:
-            return False, reason
-        return True, f'median={res.rssi_median:.1f} iqr={res.rssi_iqr:.1f} n={res.n_samples}'
+            return False, reason, None
+        return True, f'median={res.rssi_median:.1f} iqr={res.rssi_iqr:.1f} n={res.n_samples}', res
 
     def call_action(self, client, goal, gh, on_fb=None, each=None):
         # 다른 노드의 액션을 보내고 결과를 기다림. 작업이 취소되면 그 액션도 취소

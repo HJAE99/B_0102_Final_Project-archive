@@ -36,7 +36,7 @@ class FakeServers(Node):
 
     def inspect(self, gh):
         g = gh.request
-        self.get_logger().info(f'inspect_facility {g.facility_id} kind={g.kind}')
+        self.get_logger().info(f'inspect_facility {g.facility_id} kind={g.kind} run_id={g.run_id}')
         gh.publish_feedback(InspectFacility.Feedback(attempt=1, adjust_yaw=0.1, adjust_forward_m=0.05,
                                                      note='fake: 조금 돌고 앞으로'))
         time.sleep(2.0)
