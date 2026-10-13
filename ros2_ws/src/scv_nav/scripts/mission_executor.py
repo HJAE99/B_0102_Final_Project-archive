@@ -39,7 +39,7 @@ NORMAL_TOL = (0.05, 0.087)   # nav2_rpp.yaml general_goal_checker 와 같은 값
 PRECISE_TOL = (0.03, 0.052)  # 설비 점검 지점 3 cm, 3° (PLAN 0-1 목표 5 cm, 5° 안쪽으로)
 # shortcut: facilities.yaml id 앞 세 글자로 종류를 정함, 관제가 kind 를 보내 주면 그 값으로 바꿈
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
-        'EXL': InspectionResult.KIND_EXIT_LIGHT}
+        'EXL': InspectionResult.KIND_EXIT_LIGHT, 'RCK': InspectionResult.KIND_RACK}
 # undock 직후 위치 (x m, y m, yaw 도). pose_check 3회 평균 — robot3 10/12 재측정(좌우 spin 으로 AMCL 수렴 뒤, yaw 범위 2.1°), robot4 10/11 (docs/driving/data/2026-10-1{1,2}_pose_check.csv)
 DOCK_BACKOFF = 0.3   # dock 명령 내리는 자리: undock 위치보다 dock 에서 이만큼 더 먼 곳 (m, 10/12 hhj 요청)
 DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
@@ -233,21 +233,21 @@ class MissionExecutor(Node):
         kind = KIND.get(g.target_ref[:3], 0)
         goal = InspectFacility.Goal(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
         res, reason = self.call_action(self.inspect_cli, goal, gh, lambda m: adjust.append(m.feedback),
-                                       lambda: self.do_adjust(adjust))
+                                       lambda: self.do_adjust(adjust, gh))
         if res is None:
             return False, reason
         return res.verdict != InspectionResult.UNCONFIRMED, f'verdict={res.verdict} {res.detail}'
 
-    def do_adjust(self, adjust):
-        while adjust:
+    def do_adjust(self, adjust, gh):
+        while adjust and not gh.is_cancel_requested:
             f = adjust.pop(0)
             self.get_logger().info(f'자세 보정 {f.attempt}: yaw={f.adjust_yaw:.2f} rad forward={f.adjust_forward_m:.2f} m')
             if f.adjust_yaw:
                 self.nav.spin(f.adjust_yaw)
-                self.wait_nav()
-            if f.adjust_forward_m > 0:   # 후진은 하지 않음 (뒤에 센서 없음)
+                self.wait_nav(gh)
+            if f.adjust_forward_m > 0 and not gh.is_cancel_requested:   # 후진은 하지 않음 (뒤에 센서 없음)
                 self.nav.driveOnHeading(f.adjust_forward_m)
-                self.wait_nav()
+                self.wait_nav(gh)
 
     def measure(self, gh):
         res, reason = self.call_action(self.precise_cli, PreciseMeasure.Goal(duration_s=30), gh)
@@ -315,8 +315,12 @@ class MissionExecutor(Node):
         self.get_logger().info(f'goal 허용 오차 xy={xy} yaw={yaw} ok={ok}')
         return ok
 
-    def wait_nav(self):
+    def wait_nav(self, gh=None):
         while not self.nav.isTaskComplete():
+            if gh and gh.is_cancel_requested:   # 작업 취소(E7)면 보정 동작도 바로 멈춤
+                self.nav.cancelTask()
+                self.stop()
+                return
             time.sleep(0.1)
 
     def stop(self):
