@@ -88,9 +88,13 @@ CREATE TABLE IF NOT EXISTS aps (
     x               REAL,
     y               REAL,
     is_active       BOOLEAN      NOT NULL DEFAULT false,      -- client·로봇이 이 AP 값을 보내 줄 때만 true
+    is_target       BOOLEAN      NOT NULL DEFAULT false,      -- 측정 AP (3-3차) — 지도마다 하나, 순찰이 이 SSID만 측정
     CONSTRAINT aps_map_ssid_key UNIQUE (map_id, ssid),
     CONSTRAINT aps_xy_pair CHECK ((x IS NULL) = (y IS NULL))
 );
+-- ⑨ 업그레이드 — 이전 판 aps에 측정 AP 칼럼 (새 DB는 위에서 이미 있음). 이전 AP는 모두 측정 AP 아님
+ALTER TABLE aps ADD COLUMN IF NOT EXISTS is_target BOOLEAN NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX IF NOT EXISTS aps_one_target_per_map ON aps (map_id) WHERE is_target;   -- 지도마다 측정 AP 하나
 
 CREATE TABLE IF NOT EXISTS grid_cells (
     cell_id         SERIAL       PRIMARY KEY,
@@ -175,10 +179,14 @@ CREATE TABLE IF NOT EXISTS net_samples (
     rssi_dbm        SMALLINT     NOT NULL CHECK (rssi_dbm BETWEEN -127 AND 0),
     cell_id         INT          REFERENCES grid_cells (cell_id),
     received_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    task_id         VARCHAR(40)  REFERENCES tasks (task_id),  -- 3-3차: 표본을 모은 측정 task (이력 「자세히」)
     PRIMARY KEY (robot_id, run_id, seq)
 );
+-- ⑩ 업그레이드 — 이전 판 net_samples에 task 칼럼 (새 DB는 위에서 이미 있음). 이전 표본 채우기는 파일 끝 ⑩
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS task_id VARCHAR(40) REFERENCES tasks (task_id);
 CREATE INDEX IF NOT EXISTS net_samples_run_cell_idx   ON net_samples (run_id, cell_id);
 CREATE INDEX IF NOT EXISTS net_samples_robot_stamp_idx ON net_samples (robot_id, stamp);
+CREATE INDEX IF NOT EXISTS net_samples_task_idx       ON net_samples (task_id, cell_id);
 
 CREATE TABLE IF NOT EXISTS precise_measures (
     measure_id      BIGSERIAL    PRIMARY KEY,
@@ -462,6 +470,14 @@ BEGIN
     IF t.robot_id <> NEW.robot_id THEN
         RAISE EXCEPTION '%: robot_id(%)가 task %의 로봇(%)과 다름', TG_TABLE_NAME, NEW.robot_id, NEW.task_id, t.robot_id;
     END IF;
+    IF TG_TABLE_NAME = 'net_samples' THEN                     -- 3-3차: 표본은 그 run의 측정 task에서만
+        IF t.type <> 'SURVEY_SEGMENT' THEN
+            RAISE EXCEPTION 'net_samples: task %는 SURVEY_SEGMENT가 아님(type=%)', NEW.task_id, t.type;
+        END IF;
+        IF t.run_id <> NEW.run_id THEN
+            RAISE EXCEPTION 'net_samples: run_id(%)가 task %의 run(%)과 다름', NEW.run_id, NEW.task_id, t.run_id;
+        END IF;
+    END IF;
     IF TG_TABLE_NAME = 'precise_measures' AND t.type <> 'REINSPECTION' THEN
         RAISE EXCEPTION 'precise_measures: task %는 REINSPECTION이 아님(type=%)', NEW.task_id, t.type;
     END IF;
@@ -487,6 +503,11 @@ CREATE TRIGGER trg_precise_measures_check
 DROP TRIGGER IF EXISTS trg_inspections_check ON inspections;
 CREATE TRIGGER trg_inspections_check
     BEFORE INSERT OR UPDATE ON inspections
+    FOR EACH ROW EXECUTE FUNCTION scv_check_task_robot();
+
+DROP TRIGGER IF EXISTS trg_net_samples_check ON net_samples;
+CREATE TRIGGER trg_net_samples_check
+    BEFORE INSERT OR UPDATE OF task_id ON net_samples
     FOR EACH ROW EXECUTE FUNCTION scv_check_task_robot();
 
 DROP TRIGGER IF EXISTS trg_robot_events_check ON robot_events;
@@ -617,7 +638,10 @@ END $$;
 --   ⑥ 3차: grid_cells.sector (이미 있는 칸은 격자 생성 때와 같은 규칙으로 채움)
 --   ⑦ 3차: maps.dock_poses(로봇별 도크 접근 자세)
 --   ⑧ 3차: aps · facilities가 지도에 속함 — aps (map_id, ssid) 유일 · facilities 키 (map_id, facility_id)
+--   ⑨ 3-3차: aps.is_target(측정 AP, 지도마다 하나) — aps 테이블 정의 바로 아래에서 추가
 --          · inspections.map_id + 외래키 (map_id, facility_id)
+--   ⑩ 3-3차: net_samples.task_id(표본을 모은 측정 task) — net_samples 정의 바로 아래에서 추가,
+--          이전 표본은 같은 로봇 · run의 측정 task 수행 시간(assigned_at ~ ended_at)으로 채움
 -- =====================================================================
 -- ⑧ 준비 — 트리거 scv_check_task_robot이 inspections.map_id를 읽으므로 다른 갱신보다 먼저 추가 (채우기는 아래 ⑧)
 ALTER TABLE inspections ADD COLUMN IF NOT EXISTS map_id INT;
@@ -757,6 +781,12 @@ ALTER TABLE aps ALTER COLUMN is_active SET DEFAULT false;
 -- ② settings.description (이전 DB에서는 맨 끝 컬럼으로 추가됨 — 이름으로 읽으므로 동작은 같음)
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS description TEXT;
 
+-- ⑩ 3-3차 — 이전 표본의 task_id. 측정 시각(stamp)이 그 로봇 측정 task의 수행 시간 안이면 그 task (없으면 NULL로 둠)
+UPDATE net_samples n SET task_id = t.task_id
+  FROM tasks t
+ WHERE n.task_id IS NULL AND t.run_id = n.run_id AND t.robot_id = n.robot_id AND t.type = 'SURVEY_SEGMENT'
+   AND t.assigned_at IS NOT NULL AND n.stamp >= t.assigned_at AND n.stamp <= COALESCE(t.ended_at, 'infinity');
+
 -- ③ users — 옛 CHECK(admin | viewer)가 남아 있을 때 한 번만 실행
 --   admin 외 계정은 모두 user로, admin 비밀번호는 'admin'으로 초기화 (pgcrypto 필요)
 DO $$
@@ -815,6 +845,7 @@ COMMENT ON COLUMN aps.note IS '메모. 예: ''핫스팟 A — 사물함 뒤 설�
 COMMENT ON COLUMN aps.x IS 'AP 설치 위치 x(m, map 좌표). server page에서 입력. 모니터 AP 표시 · 히트맵 해석용. 측정값이 아니라 설치 정보';
 COMMENT ON COLUMN aps.y IS 'AP 설치 위치 y(m)';
 COMMENT ON COLUMN aps.is_active IS 'client·로봇이 이 AP의 값을 보내 줄 때만 true(현재 지도의 그 SSID 행). 값이 오지 않으면 false이며 server page에서는 바꾸지 않음. 등록만 된 AP는 비활성';
+COMMENT ON COLUMN aps.is_target IS '측정 AP(3-3차). 지도마다 하나 — server page 정보 탭에서 활성 AP 중 골라 지정(지도의 「현재 지도로」와 같은 방식, 순찰 중인 지도는 잠금). 순찰은 이 SSID만 측정(run_config). 순찰 시작 조건: 현재 지도의 측정 AP가 있고 활성';
 
 COMMENT ON TABLE maps IS '저장 지도 (SLAM 1회) — SLAM으로 한 번 만든 저장 지도의 버전 관리. 좌표가 들어간 모든 데이터는 이 지도 기준입니다.';
 COMMENT ON COLUMN maps.map_id IS '지도 번호';
@@ -886,6 +917,7 @@ COMMENT ON COLUMN net_samples.ap_id IS '측정 대상 AP. 관제 PC api가 NetSa
 COMMENT ON COLUMN net_samples.rssi_dbm IS '수신 신호 세기(dBm). 대상 AP가 안 보이면 −100';
 COMMENT ON COLUMN net_samples.cell_id IS 'x, y가 속한 격자 칸. pose_ok가 false이거나 격자 밖이면 NULL';
 COMMENT ON COLUMN net_samples.received_at IS '관제 PC가 받은 시각. stamp와 크게 차이 나면 재연결 뒤 늦게 받은 표본';
+COMMENT ON COLUMN net_samples.task_id IS '표본을 모은 측정 task(SURVEY_SEGMENT, 3-3차). 제어 PC가 표본마다 붙임. 이력 「자세히」에서 task가 거친 칸 · 칸별 측정값을 이것으로 조회. 3-3차 이전 표본은 수행 시간으로 채움(못 찾으면 NULL)';
 
 COMMENT ON TABLE precise_measures IS '정지 정밀 측정 (30 s) — 그 섹터 로봇이 후보 칸에 멈춰 30초 동안 잰 RSSI 요약(정밀측정)입니다. 네트워크 후보의 확정·해제 근거입니다.';
 COMMENT ON COLUMN precise_measures.measure_id IS '측정 번호';

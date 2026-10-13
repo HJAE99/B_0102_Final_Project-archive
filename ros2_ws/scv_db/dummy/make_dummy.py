@@ -6,19 +6,23 @@ SCV 운영 DB 더미 데이터 생성 (3차)
   기준 테이블은 50행 안팎, 나머지는 DB 규칙(트리거·CHECK)을 지키는 범위에서 그 데이터에 맞춰 생깁니다.
 
   사용 (관제 PC):
-    python make_dummy.py --media ../../scv_app/scv_media            # 비어 있는 DB에 생성
-    python make_dummy.py --media ../../scv_app/scv_media --reset    # 기존 데이터를 지우고 다시 생성
+    python make_dummy.py              # 비어 있는 DB에 생성 (--media 기본 ../../scv_app/scv_media)
+    python make_dummy.py --reset      # 기존 데이터를 지우고 다시 생성
 
   옵션 · 환경 변수
     --dsn     DB 접속 문자열 (기본 SCV_DB_DSN 또는 postgresql://rokey:rokey@localhost:5432/robotdb4_postgresql)
-    --media   파일 저장 위치 = server_page.py의 SCV_MEDIA_DIR (기본 SCV_MEDIA_DIR 또는 ./scv_media)
-              지도 PNG · 사진 · 보고서 PDF를 이 아래에 실제 파일로 만듦
+    --media   파일 저장 위치 = server_page.py의 SCV_MEDIA_DIR
+              (기본: 이 스크립트 기준 ../../scv_app/scv_media — server_page.py 기본 위치, 실행한 폴더와 상관없음.
+               환경 변수 SCV_MEDIA_DIR이 있으면 그 값 — server_page.py와 같은 변수)
+              지도 PNG · 사진 · 보고서 PDF를 이 아래에 실제 파일로 만듦. server와 다른 곳이면 지도 · 사진이 화면에 안 보임
     --n       기준 개수 (기본 50) — users · aps · facilities · runs
     --seed    난수 시드 (기본 2026) — 같은 시드면 같은 데이터
     --reset   robots · settings · 수퍼 계정 admin만 남기고 모두 지운 뒤 생성 (지운 행이 가리키던 파일도 삭제)
     --map-dir 실제 지도 폴더 (기본 REAL_MAP_DIR). 이 폴더의 yaml + pgm 하나를 더미 지도 중 하나로 등록
     --map-yaml 그 폴더에서 쓸 yaml 파일 이름 (기본: 이름순 첫 번째 *.yaml)
     --no-real-map  실제 지도 대신 합성 지도(dummy_floor_b)를 씀
+    --map-out 더미 지도 파일(yaml + pgm)을 쓸 폴더 (기본: 이 스크립트 옆 maps/)
+              server page 정보 › 지도 › 지도 등록으로 다시 올릴 수 있는 파일 (3-3차)
 
   필요 패키지: psycopg[binary] · numpy · pillow · pyyaml (server_page.py와 같음)
 
@@ -35,6 +39,13 @@ SCV 운영 DB 더미 데이터 생성 (3차)
     partial = 주 로봇의 섹터만 실패(다른 로봇은 끝까지) · aborted = 혼자 운행한 회차의 실패
 
   활성 여부: robots · aps는 client(제어 PC)·로봇이 값을 보내 줄 때만 활성이므로 더미에서는 모두 비활성
+  측정 AP(aps.is_target, 3-3차): 지도마다 SCV_AP_01 하나 (화면에서는 활성 AP만 고를 수 있지만 더미는 보고가 없어 비활성 상태로 지정)
+  3-3차 기록 모양(이력 「자세히」가 보여 줄 수 있게)
+    측정 경로   섹터 칸 중심을 지그재그로(server plan_survey와 같은 순서) 20점씩 — seg:a-b
+    표본        모든 측정 task가 경로를 따라 칸마다 3 ~ 4개, 측정 AP 하나, task_id. 네트워크 후보 칸은 그 task가 지난 칸
+    정밀측정    측정 AP 하나
+    status 기록 모든 task 동안 경로를 따라 위치 · 배터리 · task_id (task마다 최대 40점)
+    DOCK        경로점 = 그 로봇의 도크 접근 자세
 """
 from __future__ import annotations
 
@@ -56,7 +67,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 DEFAULT_DSN = "postgresql://rokey:rokey@localhost:5432/robotdb4_postgresql"
-REAL_MAP_DIR = "/home/rokey/ws_cobot_pjt/B_0102_Final_Project/docs/daily/SubsWay/etc/maps"
+REAL_MAP_DIR = "/home/rokey/ws_cobot_pjt/5-4_Project_04/maps"
 
 # server_page.py와 같은 흰 부분(빈 공간) 판정 (yaml 기본 free 임계값, negate = 0)
 FREE_THRESH = 0.25
@@ -67,6 +78,8 @@ FREE_PIXEL, WALL_PIXEL = 254, 0
 SECTOR_ROBOTS = {"1": "robot3", "2": "robot4"}
 MODEL_VERSION = "yolov8n-scv-1.2"
 RSSI_SUSPECT = -72
+SEGMENT_POINTS = 20                    # settings.segment_points 기본값 — 측정 task 하나의 경로점 수
+STATUS_POINTS = 40                     # 더미 status 기록 — task마다 최대 점 수
 
 # 운영 데이터 표 — 지우는 순서(참조하는 쪽 먼저)
 DATA_TABLES = ["reports", "robot_status_log", "robot_events", "findings", "candidates", "media", "inspections",
@@ -255,30 +268,34 @@ class Dummy:
             note = f"{'측정 대상' if measured else '예비'} — {places[(i - 1) % len(places)]}"
             x = round(0.8 + (w - 1.6) * (i - 1) / 4, 2) if measured else None
             y = (h - 0.8 if i % 2 == 0 else 0.8 + h / 2) if measured else None
-            ap_id = self.q("INSERT INTO aps (map_id, ssid, note, x, y, is_active) VALUES (%s, %s, %s, %s, %s, false) "
-                           "RETURNING ap_id", (self.map_id, f"SCV_AP_{i:02d}", note, x, y)).fetchone()["ap_id"]
+            ap_id = self.q("INSERT INTO aps (map_id, ssid, note, x, y, is_active, is_target) VALUES (%s, %s, %s, %s, %s, false, %s) "
+                           "RETURNING ap_id", (self.map_id, f"SCV_AP_{i:02d}", note, x, y, i == 1)).fetchone()["ap_id"]
             self.ap_ids.append(ap_id)
             if measured:
                 self.active_aps.append(ap_id)
+            if i == 1:                                     # 측정 AP (3-3차) — 측정 표본 · 정밀측정은 이 AP만
+                self.target_ap, self.target_xy = ap_id, (x, y)
         n_other = 0
         for name, mid in self.map_ids.items():
             if mid == self.map_id:
                 continue
             for i in range(1, 6):
-                self.q("INSERT INTO aps (map_id, ssid, note) VALUES (%s, %s, %s)",
-                       (mid, f"SCV_AP_{i:02d}", f"{name} — 같은 SSID를 이 지도에도 등록"))
+                self.q("INSERT INTO aps (map_id, ssid, note, is_target) VALUES (%s, %s, %s, %s)",
+                       (mid, f"SCV_AP_{i:02d}", f"{name} — 같은 SSID를 이 지도에도 등록", i == 1))
                 n_other += 1
         self.q("UPDATE robots SET is_active = false WHERE is_active")    # 로봇도 보고 전이므로 비활성
         self.count("aps", n_cur + n_other)
 
     def maps(self):
         self.map_ids = {}
+        self.map_files: dict[str, bytes] = {}             # 파일 이름 → 내용 (--map-out 폴더)
         for idx, (name, w, h, walls, active) in enumerate(MAPS):
             created = self.day0 - timedelta(days=40 - idx)
             if name == REAL_MAP_SLOT and self.real_map:      # 실제 SLAM 지도 (현재 지도 아님 → 격자 없음)
                 rm = self.real_map
                 key = "maps/dummy_real_" + "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in rm["name"]) + ".png"
                 self.files[key] = png_bytes(rm["raw"])        # pgm을 크기 그대로 PNG로 (server page 등록과 같음)
+                self.map_files.update(map_file_pair(rm["name"], rm["raw"], rm["res"], rm["ox"], rm["oy"]))
                 real_id = self.q(
                     "INSERT INTO maps (name, robot_map_path, image_key, resolution_m, origin_x, origin_y, grid_size_m, "
                     "dock_poses, is_active, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false, %s) RETURNING map_id",
@@ -290,6 +307,7 @@ class Dummy:
             ox, oy = -1.0, -1.0                            # 방 왼쪽 아래 모서리 = map (0, 0)
             key = f"maps/{name}.png"
             self.files[key] = png_bytes(raw)
+            self.map_files.update(map_file_pair(name, raw, RES, ox, oy))   # 다시 등록할 수 있는 yaml + pgm
             # 도크 접근 자세(server page에서 입력하는 값) — robot3는 왼쪽 아래(섹터 1), robot4는 오른쪽 아래(섹터 2)
             docks = {"robot3": {"x": 1.0, "y": 0.6, "yaw": 1.5708}, "robot4": {"x": w - 1.0, "y": 0.6, "yaw": 1.5708}}
             map_id = self.q(
@@ -300,6 +318,7 @@ class Dummy:
             self.map_ids[name] = map_id
             if active:
                 self.map_id = map_id
+                self.dock_poses = docks
                 cells = grid_from_image(raw, RES, ox, oy, GRID)
                 sectors = split_sectors(cells)
                 self.cells = []                            # [(cell_id, ix, iy, cx, cy, sector)]
@@ -314,12 +333,24 @@ class Dummy:
                 self.room = (w, h)
                 self.origin = (ox, oy)
                 self.cell_sector = {(c[1], c[2]): c[5] for c in self.cells}
-                # 섹터별 x 범위(방 좌표, m) — 측정 경로를 자기 섹터 안에 둠
-                self.sector_x = {}
+                self.cell_by_ixiy = {(c[1], c[2]): c for c in self.cells}
+                # 섹터별 측정 경로(3-3차) — server_page.plan_survey처럼 칸마다 한 점, ix 열마다 iy 방향을 번갈아(지그재그).
+                #   더미 지도는 합성이라 벽 여유는 계산하지 않고 칸 중심을 씀
+                self.survey_path = {}
                 for sec in (1, 2):
-                    xs = [c[3] for c in self.cells if c[5] == sec]
-                    if xs:
-                        self.sector_x[sec] = (max(0.0, min(xs) - GRID / 2), min(w, max(xs) + GRID / 2))
+                    cols: dict[int, list] = {}
+                    for c in self.cells:
+                        if c[5] == sec:
+                            cols.setdefault(c[1], []).append(c)
+                    pts = []
+                    for j, ix in enumerate(sorted(cols)):
+                        for c in sorted(cols[ix], key=lambda c: c[2], reverse=bool(j % 2)):
+                            pts.append({"x": round(c[3], 3), "y": round(c[4], 3), "yaw": 0.0})
+                    for j in range(len(pts)):              # 방향 = 다음 점 쪽 (마지막은 앞 점과 같음)
+                        nxt = pts[j + 1] if j + 1 < len(pts) else None
+                        pts[j]["yaw"] = round(math.atan2(nxt["y"] - pts[j]["y"], nxt["x"] - pts[j]["x"]), 4) if nxt \
+                            else (pts[j - 1]["yaw"] if j else 0.0)
+                    self.survey_path[sec] = pts
         self.count("maps", len(MAPS))
 
     def facilities(self):
@@ -365,6 +396,9 @@ class Dummy:
     # ---------------- 순찰·작업 ----------------
     def task(self, task_id, run, robot, ttype, target, waypoints, status, start, end, progress=None, reason=None):
         done = status in ("DONE", "FAILED", "CANCELED")
+        self.task_list.append(dict(task_id=task_id, run=run, robot=robot, type=ttype, wp=waypoints, status=status,
+                                   start=None if status in ("PENDING", "CANCELED") else start, end=end if done else None,
+                                   progress=progress if progress is not None else (1.0 if status == "DONE" else 0.0)))
         self.q("INSERT INTO tasks (task_id, run_id, robot_id, type, target_ref, waypoints, status, progress, "
                "result_ok, reason, assigned_at, ended_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                (task_id, run["run_id"], robot, ttype, target, Jsonb(waypoints), status,
@@ -379,16 +413,16 @@ class Dummy:
         return f"r{run['run_id']}-t{run['n_task']:03d}"
 
     def survey_waypoints(self, k, sector):
-        x0, x1 = self.sector_x[sector]
-        y = 0.5 + (k % 3) * 2.0                            # path_spacing_m 2.0 왕복
-        xs = np.linspace(x0 + 0.5, x1 - 0.5, 20)           # 자기 섹터 안 (표본 흔들림 ±0.15 m도 섹터 안)
-        if k % 2:
-            xs = xs[::-1]
-        return [{"x": round(float(x), 2), "y": y, "yaw": 0.0 if k % 2 == 0 else 3.142} for x in xs]
+        """섹터 측정 경로의 k번째 구간(20점, segment_points) → (target_ref "seg:a-b", 경로점). a~b = 섹터 경로의 점 번호"""
+        pts = self.survey_path[sector]
+        nseg = max(1, math.ceil(len(pts) / SEGMENT_POINTS))
+        a = (k % nseg) * SEGMENT_POINTS
+        part = pts[a:a + SEGMENT_POINTS]
+        return f"seg:{a}-{a + len(part) - 1}", part
 
     def runs(self):
         reasons = ["BLOCKED", "BATTERY_LOW", "NO_RESPONSE", "ESTOP"]
-        self.run_list = []
+        self.run_list, self.task_list = [], []
         for k in range(1, self.n + 1):
             start = self.day0 + timedelta(days=k - 1, minutes=self.r.randint(0, 40))
             rtype = "remeasure" if k % 10 == 0 else "demo" if k % 7 == 0 else "patrol"
@@ -412,15 +446,16 @@ class Dummy:
             t_start, t_end = start + timedelta(minutes=1), end - timedelta(minutes=2)
             fac_here = [f for f in self.active_fac if self.fac[f]["sector"] == sec]
             if k % 2 or not fac_here:
-                wp = self.survey_waypoints(k, sec)
-                run.update(ptype="SURVEY_SEGMENT", target=f"seg:{(k % 3) * 20}-{(k % 3) * 20 + 19}", wp=wp)
+                ref, wp = self.survey_waypoints(k, sec)
+                run.update(ptype="SURVEY_SEGMENT", target=ref, wp=wp)
             else:
                 fid = fac_here[(k // 2) % len(fac_here)]
                 run.update(ptype="FACILITY_CHECK", target=fid, wp=[self.fac[fid]["view_pose"]])
             run["t1"], run["t1_start"], run["t1_end"] = t1, t_start, t_end
             if failed:
+                run["t1_progress"] = round(self.r.uniform(0.2, 0.7), 2)
                 self.task(t1, run, robot, run["ptype"], run["target"], run["wp"], "FAILED", t_start, end,
-                          progress=round(self.r.uniform(0.2, 0.7), 2), reason=run["reason"])
+                          progress=run["t1_progress"], reason=run["reason"])
             else:
                 self.task(t1, run, robot, run["ptype"], run["target"], run["wp"], "DONE", t_start, t_end)
             # 다른 로봇 — 자기 섹터 측정 1구간 (같은 시각에 동시 운행)
@@ -430,7 +465,8 @@ class Dummy:
                     continue
                 o_sec = int(s_key)
                 o_tid = self.tid(run)
-                self.task(o_tid, run, other, "SURVEY_SEGMENT", "seg:0-19", self.survey_waypoints(k + 1, o_sec),
+                o_ref, o_wp = self.survey_waypoints(k + 1, o_sec)
+                self.task(o_tid, run, other, "SURVEY_SEGMENT", o_ref, o_wp,
                           "DONE", t_start, t_start + timedelta(minutes=self.r.randint(15, 25)))
                 run["others"].append((other, o_tid))
             self.run_list.append(run)
@@ -443,7 +479,9 @@ class Dummy:
             for i, robot in enumerate(robots):
                 t = self.tid(run)
                 end = run["end"] - timedelta(seconds=20 * i)
-                self.task(t, run, robot, "DOCK", None, [], "DONE", end - timedelta(minutes=1, seconds=30), end)
+                dock = self.dock_poses.get(robot)          # 3-3차 — DOCK 경로점 = 그 로봇의 도크 접근 자세
+                self.task(t, run, robot, "DOCK", None, [dock] if dock else [], "DONE",
+                          end - timedelta(minutes=1, seconds=30), end)
 
     # ---------------- 이상 후보 → 재검증 → 확정 ----------------
     def candidates(self):
@@ -456,8 +494,12 @@ class Dummy:
             cid = f"r{run['run_id']}-c01"
             det_at = run["t1_start"] + timedelta(minutes=self.r.randint(3, 10))
             if run["ptype"] == "SURVEY_SEGMENT":
-                cell = self.r.choice([x for x in self.cells if x[5] == run["sector"]])      # 주 로봇 섹터의 칸
-                c = dict(source="NETWORK", kind="NET_COVERAGE", ref=str(cell[0]), tx=cell[3], ty=cell[4],
+                # 3-3차 — 그 측정 task가 지난 칸 중 하나(경로점의 칸). 지점 = 그 칸에서 마지막으로 잰 위치(net_samples가 맞춤)
+                reached = run["wp"][:max(1, math.ceil(len(run["wp"]) * run.get("t1_progress", 1.0)))]   # 실패면 간 데까지
+                p = self.r.choice(reached[2:] or reached)
+                cell = self.cell_of(p["x"], p["y"])
+                tx, ty = round(p["x"] + self.r.uniform(-0.12, 0.12), 3), round(p["y"] + self.r.uniform(-0.12, 0.12), 3)
+                c = dict(source="NETWORK", kind="NET_COVERAGE", ref=str(cell[0]), tx=tx, ty=ty,
                          score=float(self.r.randint(-84, -74)), cell=cell)
             else:
                 fac = self.fac[run["target"]]
@@ -520,32 +562,62 @@ class Dummy:
         self.count("findings", n)
 
     # ---------------- 통신 인프라 ----------------
+    def cell_of(self, x, y):
+        """map 좌표 → 칸 (cell_id, ix, iy, cx, cy, sector) 또는 None — server_page.cell_at과 같은 규칙"""
+        ox, oy = self.origin
+        return self.cell_by_ixiy.get((math.floor((x - ox) / GRID), math.floor((y - oy) / GRID)))
+
+    def rssi(self, x, y):
+        """측정 AP까지 거리로 정한 RSSI (dBm, 잡음 포함) — 더미 값"""
+        tx, ty = self.target_xy
+        d = max(0.5, math.hypot(x - tx, y - ty))
+        return int(round(max(-95, min(-30, -35 - 22 * math.log10(d) + self.r.gauss(0, 2.0)))))
+
     def net_samples(self):
-        runs = [r for r in self.run_list if r["ptype"] == "SURVEY_SEGMENT" and not r["aborted"]][:5]
-        by_ixiy = {(c[1], c[2]): c[0] for c in self.cells}
-        per = max(1, self.n // max(1, len(runs)))
-        total = 0
-        for run in runs:
-            for seq in range(per):
-                p = run["wp"][seq % len(run["wp"])]
-                x, y = p["x"] + self.r.uniform(-0.15, 0.15), p["y"] + self.r.uniform(-0.15, 0.15)
-                pose_ok = self.r.random() > 0.1
-                cell = by_ixiy.get((math.floor(x + 1.0), math.floor(y + 1.0))) if pose_ok else None
-                stamp = run["t1_start"] + timedelta(seconds=2 * seq)
-                self.q("INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, "
-                       "cell_id, received_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                       (run["robot"], run["run_id"], seq, stamp, x, y, p["yaw"], pose_ok,
-                        self.active_aps[seq % len(self.active_aps)], self.r.randint(-86, -45), cell,
-                        stamp + timedelta(milliseconds=self.r.randint(80, 600))))
-                total += 1
-        self.count("net_samples", total)
+        """3-3차 — 모든 측정 task(SURVEY_SEGMENT)가 경로를 따라 칸마다 3~4개(rssi 1 Hz 가정), 측정 AP 하나, task_id.
+        실패한 task는 진행률만큼. 네트워크 후보 칸은 기준(−72) 미만 값, 마지막 표본 위치 = 후보 지점"""
+        cand = {c["run"]["run_id"]: c for c in self.cands if c["source"] == "NETWORK"}
+        seq: dict[tuple, int] = {}
+        rows = []
+        for t in self.task_list:
+            if t["type"] != "SURVEY_SEGMENT" or t["start"] is None:
+                continue
+            run = t["run"]
+            c = cand.get(run["run_id"]) if t["task_id"] == run.get("t1") else None
+            wps = t["wp"][:max(1, math.ceil(len(t["wp"]) * t["progress"]))]
+            span = ((t["end"] or run["end"]) - t["start"]).total_seconds()
+            cand_cell = c["cell"][0] if c else None
+            per = [4 if (cc := self.cell_of(p["x"], p["y"])) and cc[0] == cand_cell else self.r.randint(3, 4) for p in wps]
+            total, k = sum(per), 0
+            for p, n in zip(wps, per):
+                cell = self.cell_of(p["x"], p["y"])
+                low = c is not None and cell is not None and cell[0] == c["cell"][0]
+                for j in range(n):
+                    stamp = t["start"] + timedelta(seconds=span * (k + 0.5) / total)
+                    k += 1
+                    if low and j == n - 1:                 # 후보 칸의 마지막 표본 = 후보 지점
+                        x, y = c["tx"], c["ty"]
+                    else:
+                        x, y = p["x"] + self.r.uniform(-0.15, 0.15), p["y"] + self.r.uniform(-0.15, 0.15)
+                    pose_ok = low or self.r.random() > 0.05     # 후보 칸 표본은 모두 위치 확실(min_samples 이상)
+                    sc = self.cell_of(x, y) if pose_ok else None
+                    v = int(round(c["score"] + self.r.gauss(0, 1.5))) if low else self.rssi(x, y)
+                    key = (t["robot"], run["run_id"])
+                    seq[key] = seq.get(key, -1) + 1
+                    rows.append((t["robot"], run["run_id"], seq[key], stamp, x, y, p["yaw"], pose_ok, self.target_ap,
+                                 max(-127, min(0, v)), sc and sc[0],
+                                 stamp + timedelta(milliseconds=self.r.randint(80, 600)), t["task_id"]))
+        with self.c.cursor() as cur:
+            cur.executemany("INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, "
+                            "cell_id, received_at, task_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", rows)
+        self.count("net_samples", len(rows))
 
     def precise_measures(self):
         n = 0
         for c in self.cands:
             if c["source"] != "NETWORK" or c["outcome"] is None:
                 continue
-            for ap in self.active_aps[:4]:
+            for ap in (self.target_ap,):                   # 3-3차 — 측정 AP 하나
                 if c["outcome"] == "CONFIRMED":
                     med, iqr = self.r.uniform(-84, -75), self.r.uniform(1, 4)
                 elif c["outcome"] == "CLEARED":
@@ -684,20 +756,44 @@ class Dummy:
                        run["end"] - timedelta(seconds=5), source="control" if ctrl else "robot")
 
     def robot_status_log(self):
-        run = next(c["run"] for c in reversed(self.cands) if c["outcome"])
-        cand = next(c for c in self.cands if c["run"] is run)
-        per = max(1, self.n // 2)
-        for leg, (robot, task_id, start, state) in enumerate(((run["robot"], run["t1"], run["t1_start"], "NAVIGATING"),
-                                             (run["precise"], cand["t2"], cand["t2_start"], "MEASURING"))):
-            battery = self.r.uniform(70, 95)
-            for s in range(per):
-                p = run["wp"][s % len(run["wp"])] if leg == 0 else {"x": cand["tx"], "y": cand["ty"], "yaw": 0.0}
-                self.q("INSERT INTO robot_status_log (robot_id, ts, run_id, task_id, x, y, yaw, battery_pct, nav_state, "
-                       "progress) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                       (robot, start + timedelta(seconds=s), run["run_id"], task_id,
-                        p["x"] + self.r.uniform(-0.05, 0.05), p["y"] + self.r.uniform(-0.05, 0.05), p["yaw"],
-                        round(battery - s * 0.02, 1), state, round(s / per, 2)))
-        self.count("robot_status_log", per * 2)
+        """3-3차 — 모든 task(측정 · 정밀측정 · 탐지 · 복귀) 동안 경로를 따라 위치 · 배터리 · task_id.
+        실제는 1초마다지만 더미 task는 수십 분이라 task마다 최대 STATUS_POINTS점(같은 간격)"""
+        state = {"SURVEY_SEGMENT": "NAVIGATING", "REINSPECTION": "MEASURING", "FACILITY_CHECK": "INSPECTING",
+                 "DOCK": "DOCKING"}
+        last: dict[tuple, tuple] = {}                      # (robot, run) → 마지막 위치 (처음은 도크)
+        battery: dict[tuple, float] = {}
+        rows = []
+        for t in sorted((t for t in self.task_list if t["start"] is not None and t["end"] is not None),
+                        key=lambda t: (t["run"]["run_id"], t["robot"], t["start"])):
+            key = (t["robot"], t["run"]["run_id"])
+            dock = self.dock_poses.get(t["robot"], {"x": 1.0, "y": 0.6})
+            here = last.get(key, (dock["x"], dock["y"]))
+            bat = battery.setdefault(key, self.r.uniform(82, 97))
+            wps = t["wp"][:max(1, math.ceil(len(t["wp"]) * t["progress"]))] if t["wp"] else []
+            path = [here] + [(p["x"], p["y"]) for p in wps]
+            segs = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(path, path[1:])]
+            length = sum(segs)
+            span = (t["end"] - t["start"]).total_seconds()
+            n = int(max(2, min(STATUS_POINTS, span)))
+            move = 1.0 if t["type"] == "SURVEY_SEGMENT" else 0.6   # 그 밖은 앞 60 % 시간에 도착하고 멈춰 있음
+            for i in range(n):
+                f = i / (n - 1)
+                d = length * min(1.0, f / move)
+                x, y = path[-1]
+                for (a, b), sl in zip(zip(path, path[1:]), segs):   # 경로 위 d 지점
+                    if d <= sl and sl > 0:
+                        x, y = a[0] + (b[0] - a[0]) * d / sl, a[1] + (b[1] - a[1]) * d / sl
+                        break
+                    d -= sl
+                bat -= 0.05 * span / n / 60                # 1분에 0.05 %씩 (더미)
+                rows.append((t["robot"], t["start"] + timedelta(seconds=span * f), t["run"]["run_id"], t["task_id"],
+                             round(x + self.r.uniform(-0.03, 0.03), 3), round(y + self.r.uniform(-0.03, 0.03), 3),
+                             0.0, round(max(5.0, bat), 1), state[t["type"]], round(f * t["progress"], 2)))
+            last[key], battery[key] = path[-1], bat
+        with self.c.cursor() as cur:
+            cur.executemany("INSERT INTO robot_status_log (robot_id, ts, run_id, task_id, x, y, yaw, battery_pct, nav_state, "
+                            "progress) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", rows)
+        self.count("robot_status_log", len(rows))
 
     def reports(self):
         done = [r for r in self.run_list if not r["aborted"]][-max(1, self.n // 2):]
@@ -735,6 +831,15 @@ def media_path(media: Path, key: str) -> Path | None:
     return p if media in p.parents else None
 
 
+def map_file_pair(name: str, raw: np.ndarray, res: float, ox: float, oy: float) -> dict[str, bytes]:
+    """server page 「지도 등록」으로 올릴 수 있는 ROS map_server 형식 — <name>.pgm(P5) + <name>.yaml"""
+    buf = io.BytesIO()
+    Image.fromarray(np.asarray(raw, dtype=np.uint8), mode="L").save(buf, format="PPM")   # L 모드 → P5 pgm
+    meta = (f"image: {name}.pgm\nmode: trinary\nresolution: {res}\norigin: [{ox}, {oy}, 0.0]\n"
+            f"negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n")
+    return {f"{name}.pgm": buf.getvalue(), f"{name}.yaml": meta.encode()}
+
+
 def reset(conn, media: Path) -> list[Path]:
     """robots · settings · admin만 남기고 지움. 지운 행이 가리키던 파일 경로를 돌려줌(커밋 뒤 삭제)."""
     keys = [r["k"] for r in conn.execute(
@@ -746,16 +851,26 @@ def reset(conn, media: Path) -> list[Path]:
     return [p for k in keys if (p := media_path(media, k))]
 
 
+DEFAULT_MEDIA = "../../scv_app/scv_media"            # 이 스크립트(dummy/) 기준 — scv_db와 나란히 있는 scv_app의 scv_media
+
+
+def default_media() -> str:
+    """--media 기본값 — 이 스크립트 기준 ../../scv_app/scv_media (server_page.py 기본 SCV_MEDIA_DIR).
+    실행한 폴더와 상관없이 같은 곳. scv_app 폴더가 없으면 그 경로를 새로 만드니 server의 SCV_MEDIA_DIR과 같은지 확인"""
+    return str((Path(__file__).resolve().parent / DEFAULT_MEDIA).resolve())
+
+
 def main():
     ap = argparse.ArgumentParser(description="SCV 운영 DB 더미 데이터 생성")
     ap.add_argument("--dsn", default=os.environ.get("SCV_DB_DSN", DEFAULT_DSN))
-    ap.add_argument("--media", default=os.environ.get("SCV_MEDIA_DIR", "scv_media"))
+    ap.add_argument("--media", default=os.environ.get("SCV_MEDIA_DIR") or default_media())
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--map-dir", default=REAL_MAP_DIR)
     ap.add_argument("--map-yaml", default=None)
     ap.add_argument("--no-real-map", action="store_true")
+    ap.add_argument("--map-out", default=str(Path(__file__).resolve().parent / "maps"))
     a = ap.parse_args()
     if a.n < 12:
         sys.exit("--n은 12 이상이어야 합니다 (기준선·후보 데이터를 만들 회차가 부족)")
@@ -797,6 +912,11 @@ def main():
         p = media_path(media, key)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
+    out = Path(a.map_out).resolve()                    # 더미 지도 yaml + pgm (server page 지도 등록용)
+    out.mkdir(parents=True, exist_ok=True)
+    for fn, data in d.map_files.items():
+        (out / fn).write_bytes(data)
+    print(f"지도 파일 {len(d.map_files)}개 → {out} (server page 정보 › 지도 › 지도 등록으로 올릴 수 있음)")
     conn.close()
 
     print(f"더미 데이터 생성 완료 — 파일 {len(d.files)}개를 {media} 아래에 저장")

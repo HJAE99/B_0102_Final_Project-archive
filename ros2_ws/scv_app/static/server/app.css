@@ -245,3 +245,83 @@ h2 { font-size: 18px; margin: 0 0 4px; }
 .docks { display: flex; flex-direction: column; gap: 4px; }
 .docks .rid { min-width: 52px; font-size: 12px; color: var(--muted); align-self: center; }
 .lockmsg { color: #b45309; font-size: 13px; font-weight: 600; }
+
+/* 3-3차 — 작업 탭 */
+.runbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
+.runbar select { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: #fff; }
+.runbar .sp, .tools .sp { flex: 1; }
+.runbar span { font-size: 13px; }
+.workgrid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; margin-bottom: 16px; }
+.workgrid .side { display: flex; flex-direction: column; gap: 16px; }
+.workgrid .side .panel h3 { font-size: 14px; margin: 0 0 8px; }
+.workgrid #map { height: 52vh; }
+.mapbox .head i.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 3px; }
+.legend i.hm { width: 11px; height: 11px; border: 0; opacity: .6; }
+select.mini { font-size: 12px; padding: 1px 4px; border: 1px solid var(--line); border-radius: 4px; }
+.cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.panel .ttl .filters { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; }
+.panel > .grid { margin-top: 10px; }
+.grid td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+.cand { display: inline-block; padding: 1px 8px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 600; }
+img.thumb { height: 36px; border-radius: 4px; border: 1px solid var(--line); vertical-align: middle; margin-right: 4px; }
+.evlist { list-style: none; margin: 0; padding: 0; font-size: 12px; max-height: 330px; overflow: auto; }
+.evlist li { display: grid; grid-template-columns: 62px 96px 1fr; gap: 2px 8px; padding: 4px 0; border-top: 1px solid #eef1f3; }
+.evlist li:first-child { border-top: 0; }
+.evlist .t { color: #8a969e; font-family: var(--mono); }
+.evlist small { grid-column: 2 / 4; color: var(--muted); overflow-wrap: anywhere; }
+.evlist .lv-warn b { color: #b45309; }
+.evlist .lv-error b { color: var(--warn); }
+.modal.narrow { width: min(640px, 100%); }
+.modal .body select { border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+i.sec { display: inline-block; width: 10px; height: 10px; border-radius: 2px; opacity: .7; }
+.later > .panel { border-style: solid; }
+@media (max-width: 1000px) { .workgrid, .cols2 { grid-template-columns: 1fr; } }
+/* 3-3차 — 모니터 순찰 시작 · 측정 AP */
+.rpanel h3 .btn { margin-left: 8px; }
+.rpanel .startwhy { font-size: 12px; color: #b45309; margin: 0 0 6px; }
+.map-tip.ap.target { color: #b91c1c; font-weight: 700; }
+/* 3-3차 — 지도 전체 보기 · 이미지 없음 알림 · 이력 task 「자세히」 */
+.leaflet-bar.map-fit { display: block; width: 30px; height: 30px; line-height: 30px; text-align: center; font-size: 17px;
+  background: #fff; color: #333; text-decoration: none; }
+.leaflet-bar.map-fit:hover { background: #f4f4f4; }
+.map-note { background: rgba(255, 255, 255, .92); border: 1px solid #f59e0b; color: #92400e; border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; }
+.modal.taskd { width: min(1280px, 100%); }
+.modal.taskd .body { padding-top: 14px; }
+.modal.taskd h4 { margin: 18px 0 8px; font-size: 14px; }
+.modal.taskd h4 .no { font-weight: 400; font-size: 12px; margin-left: 6px; }
+.tdtop { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.tdtop .tdsum h4 { margin-top: 12px; }
+.map-mini { height: 380px; background: #e9edf0; border-radius: 8px; border: 1px solid var(--line); }
+.tdmap .empty { border: 1px dashed var(--line); border-radius: 8px; }
+dl.kv { display: grid; grid-template-columns: 96px 1fr; gap: 4px 12px; margin: 0; font-size: 13px; align-content: start; }
+dl.kv.wide { grid-template-columns: 130px 1fr; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; overflow-wrap: anywhere; }
+.dbm { font-weight: 700; font-variant-numeric: tabular-nums; }
+.apv { margin-right: 12px; }
+.insp { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; display: grid; align-items: start;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.insp .photos { display: flex; flex-wrap: wrap; gap: 10px; }
+.insp figure { margin: 0; }
+.insp figure img { max-width: 100%; width: 320px; border-radius: 6px; border: 1px solid var(--line); cursor: zoom-in; display: block; }
+.insp figcaption { font-size: 11px; color: var(--muted); margin-top: 3px; }
+.photobig { position: fixed; inset: 0; background: rgba(0, 0, 0, .82); z-index: 3000; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; cursor: zoom-out; }
+.photobig img { max-width: 92vw; max-height: 86vh; border-radius: 6px; }
+.photobig span { color: #ddd; font-size: 12px; font-family: var(--mono); }
+@media (max-width: 1000px) { .tdtop, .insp { grid-template-columns: 1fr; } }
+/* 3-3차 — 「자세히」 칸 순서 (계획 · 실제) · 경로점 번호 */
+.wp-num b { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; border: 1.5px solid; font-size: 9px; font-weight: 700; line-height: 1; }
+.seq { display: grid; grid-template-columns: 36px 1fr; gap: 6px; align-items: start; margin: 4px 0; }
+.seq .sl { font-size: 12px; color: var(--muted); padding-top: 3px; }
+.seq .sv { display: flex; flex-wrap: wrap; gap: 4px; }
+.cc { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px; font-size: 11px;
+  font-family: var(--mono); background: #eef2f4; border: 1px solid #d5dde2; color: #334; }
+.cc i { font-style: normal; font-size: 9px; color: var(--muted); }
+.cc.plan { background: #f4f7fb; }
+.cc.extra { background: #fff4e5; border-color: #f59e0b; color: #92400e; }
+.cc.revisit { background: #ede9fe; border-color: #8b5cf6; color: #5b21b6; }
+.cc.missed { background: #fee2e2; border-color: #ef4444; color: #991b1b; }
+.cc.nolog { background: #f1f5f9; border-color: #cbd5e1; color: #64748b; }

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-SCV server page — 관제 PC (3-2차)
+SCV server page — 관제 PC (3-3차)
 
   범위: PostgreSQL 기준 정보 7개 표(robots · users · settings · aps · maps · grid_cells · facilities)
   화면: /server/login → /server/monitor (현재 지도) · /server/master (정보 탭 — 세로 탭으로 표 선택 + 목록 창)
   제어 PC(client page) 연결: POST /api/client/login (계정 확인) · WebSocket /ws/agent (hello → 로봇 활성, status 1 Hz)
   실시간 상태(3-2차 — Redis 대신 이 프로세스 메모리): 로그인 세션(8 h) · 로봇별 최신 status
                1초마다 점검 — settings.status_timeout_s(30 s) 동안 status가 없으면 E3 기록 후 상태 삭제
-  화면 실시간: WebSocket /ws/ui (모니터 — 로봇 위치·상태 1초마다)
+  화면 실시간: WebSocket /ws/ui (모니터 — 로봇 위치·상태 1초마다 · 최근 이벤트)
+  순찰(3-3차): 모니터 「로봇 상태」에서 순찰 시작(섹터 배정 — 정상 · 도킹 로봇만, 현재 지도 · 격자 · 활성 측정 AP 필요) · 중단.
+               이력 탭에서 현재 지도의 지난 순찰 결과를 봄. inspection_manager가 로봇마다
+               측정(SURVEY_SEGMENT) → 후보 칸 정밀측정(REINSPECTION) → 설비 판정 1회(FACILITY_CHECK) → 복귀(DOCK)를 차례로 보냄
+               제어 PC 기록은 REST /api/agent/*(아웃박스): samples · events · precise-measures · inspections · media · tasks/{id}/result
   섹터(3-2차): 격자를 만들 때 칸을 섹터 1 · 2로 나눔(split_sectors — 임시 규칙, 바꿔 끼울 수 있음).
                모니터에 섹터를 색으로 표시, 순찰(run) 진행 중에는 그 지도의 격자 다시 생성·삭제와 현재 지도 바꾸기 금지
   실행: python3 server_page.py           (기본 http://0.0.0.0:8000)
@@ -64,7 +68,7 @@ PORT = int(os.environ.get("SCV_PORT", "8000"))
 
 SESSION_COOKIE = "scv_session"
 SESSION_TTL_S = 8 * 3600                     # 로그인 세션 8 h (요청마다 연장)
-PAGES = {"login", "monitor", "master"}
+PAGES = {"login", "monitor", "history", "master"}
 
 # 지도 빈 공간(흰 부분) 판정 — map_server(yaml) 기본 free 임계값 (제안설명서 4.2절)
 FREE_THRESH = 0.25
@@ -88,13 +92,14 @@ async def lifespan(_app: FastAPI):
     global MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
     reset_reported_active()
+    restore_memory()                                   # 진행 중 run · 최근 이벤트 · 순찰 중 로봇 대기 상태 (3-3차)
     watchdog = asyncio.create_task(state_watchdog())
     yield
     watchdog.cancel()
     pool.close()
 
 
-app = FastAPI(title="SCV server page", version="3-2", lifespan=lifespan)
+app = FastAPI(title="SCV server page", version="3-3", lifespan=lifespan)
 MAIN_LOOP: asyncio.AbstractEventLoop | None = None       # 동기 API에서 제어 PC로 config를 밀어 보낼 때 씀
 
 # ---------------------------------------------------------------------------
@@ -236,8 +241,8 @@ TABLES: dict[str, dict[str, Any]] = {
         "order": "updated_at DESC, key",
     },
     "aps": {
-        "title": "측정 대상 AP", "desc": "지도마다 등록 — 목록 위에서 지도를 고르고(처음은 현재 지도) 그 지도에 추가. rssi_scanner가 측정할 핫스팟 SSID와 설치 위치. 활성은 client·로봇이 그 AP 값을 보내 줄 때만 — 받지 못하면 비활성",
-        "pk": "ap_id", "ops": ["add", "edit", "delete"], "map_scoped": True,
+        "title": "측정 대상 AP", "desc": "지도마다 등록 — 목록 위에서 지도를 고르고(처음은 현재 지도) 그 지도에 추가. rssi_scanner가 측정할 핫스팟 SSID와 설치 위치. 활성은 client가 그 SSID 값을 받을 때만(실시간) — 받지 못하면 비활성. 활성 AP 중 하나를 「측정 AP로」 지정하면 순찰이 그 SSID만 측정",
+        "pk": "ap_id", "ops": ["add", "edit", "delete", "target"], "map_scoped": True,
         "columns": [
             C("ap_id", "번호", "int"),
             C("map_id", "지도", "int", hide=True),
@@ -246,6 +251,7 @@ TABLES: dict[str, dict[str, Any]] = {
             C("x", "설치 x(m)", "real", add=True, edit=True, help_="x · y 함께 입력 또는 둘 다 비움"),
             C("y", "설치 y(m)", "real", add=True, edit=True),
             C("is_active", "활성 (client·로봇 보고)", "bool"),
+            C("is_target", "측정 AP", "bool"),
         ],
         "list_sql": "SELECT * FROM aps",
         "order": "ap_id DESC",
@@ -462,15 +468,12 @@ def summary_card(conn, t: str, page: int | None = None) -> dict[str, Any]:
                     "items": [["현재 지도", "없음"]], "page": 1, "pages": 1}
         count = conn.execute(sql.SQL("SELECT count(*) AS n FROM {} WHERE map_id = %s").format(sql.Identifier(t)),
                              (cur["map_id"],)).fetchone()["n"]
-        others = conn.execute(sql.SQL("SELECT count(*) AS n FROM {} WHERE map_id <> %s").format(sql.Identifier(t)),
-                              (cur["map_id"],)).fetchone()["n"]
-        items.append(["현재 지도", cur["name"], f"다른 지도 {others}행"])
         if t == "aps":
             pg = page_rows(conn, "SELECT * FROM aps WHERE map_id = %s", meta["order"], page, (cur["map_id"],))
             p, pages = pg["page"], pg["pages"]
             for r in pg["rows"]:
                 pos = f" · ({r['x']:g}, {r['y']:g})" if r["x"] is not None else " · 위치 없음"
-                items.append([r["ssid"], ("활성" if r["is_active"] else "비활성") + pos])
+                items.append([r["ssid"], ("측정 AP · " if r["is_target"] else "") + ("활성" if r["is_active"] else "비활성") + pos])
         else:
             for r in conn.execute("SELECT facility_type, count(*) AS n, count(*) FILTER (WHERE is_active) AS a "
                                   "FROM facilities WHERE map_id = %s GROUP BY facility_type ORDER BY facility_type",
@@ -864,6 +867,7 @@ def generate_cells(conn, m: dict[str, Any]) -> int:
     iy = np.floor((y - oy) / g).astype(np.int64)
     cells = np.unique(np.stack([ix, iy], axis=1), axis=0)
     sector = split_sectors(cells)
+    GRID_CACHE.pop(m["map_id"], None)
     with conn.cursor().copy("COPY grid_cells (map_id, ix, iy, center_x, center_y, sector) FROM STDIN") as cp:
         for cx, cy in cells:
             cp.write_row((m["map_id"], int(cx), int(cy), ox + (cx + 0.5) * g, oy + (cy + 0.5) * g,
@@ -876,6 +880,26 @@ def get_map(conn, map_id: int) -> dict[str, Any]:
     if not m:
         raise HTTPException(404, "지도가 없습니다")
     return m
+
+
+@app.post("/api/aps/{ap_id}/target")
+def set_target_ap(ap_id: int, request: Request):
+    """측정 AP 지정 (3-3차) — 지도마다 하나, 활성 AP만. 순찰 중인 지도는 잠금"""
+    current_user(request)
+    try:
+        with pool.connection() as conn:
+            with conn.transaction():
+                a = conn.execute("SELECT ap_id, map_id, ssid, is_active FROM aps WHERE ap_id = %s", (ap_id,)).fetchone()
+                if not a:
+                    raise HTTPException(404, "AP가 없습니다")
+                if not a["is_active"]:
+                    raise HTTPException(400, f"「{a['ssid']}」은 비활성입니다 — client가 이 SSID 값을 받고 있을 때(활성)만 측정 AP로 고를 수 있습니다")
+                ensure_no_running_run(conn, a["map_id"], "측정 AP를")
+                conn.execute("UPDATE aps SET is_target = false WHERE map_id = %s AND is_target", (a["map_id"],))
+                conn.execute("UPDATE aps SET is_target = true WHERE ap_id = %s", (ap_id,))
+    except psycopg.Error as e:
+        raise db_error(e)
+    return {"ok": True, "ssid": a["ssid"]}
 
 
 @app.post("/api/maps/{map_id}/activate")
@@ -933,6 +957,7 @@ def delete_grid(map_id: int, request: Request):
             get_map(conn, map_id)
             ensure_no_running_run(conn, map_id)
             n = conn.execute("DELETE FROM grid_cells WHERE map_id = %s", (map_id,)).rowcount
+            GRID_CACHE.pop(map_id, None)
     except psycopg.Error as e:
         raise db_error(e)
     return {"ok": True, "deleted": n}
@@ -945,6 +970,7 @@ def delete_map(conn, map_id: int):
         for t in ("facilities", "aps", "grid_cells"):
             conn.execute(sql.SQL("DELETE FROM {} WHERE map_id = %s").format(sql.Identifier(t)), (map_id,))
         conn.execute("DELETE FROM maps WHERE map_id = %s", (map_id,))
+    GRID_CACHE.pop(map_id, None)
     (MEDIA_DIR / m["image_key"]).unlink(missing_ok=True)
     return {"ok": True}
 
@@ -973,9 +999,9 @@ def active_map(request: Request):
     m["sectors"] = [{"sector": s_, "cells": sum(1 for c in m["cells"] if c[3] == s_),
                      "robot": DEFAULT_SECTOR_ROBOTS.get(str(s_))} for s_ in SECTORS]
     m["running_run"] = run["run_id"] if run else None          # 진행 중이면 격자 다시 생성 금지 (화면 안내용)
-    # 지도 위 표시 (3차) — 도크(maps.dock_poses) · AP 설치 위치 · 점검 설비. 음영은 측정 결과로만(3-4차 히트맵)
+    # 지도 위 표시 (3차) — 도크(maps.dock_poses) · AP 설치 위치 · 점검 설비. 음영은 측정 결과로만(작업 탭 히트맵)
     with pool.connection() as conn:
-        m["aps"] = conn.execute("SELECT ap_id, ssid, x, y, is_active FROM aps WHERE map_id = %s AND x IS NOT NULL "
+        m["aps"] = conn.execute("SELECT ap_id, ssid, x, y, is_active, is_target FROM aps WHERE map_id = %s AND x IS NOT NULL "
                                 "ORDER BY ssid", (m["map_id"],)).fetchall()
         m["facilities"] = conn.execute(
             "SELECT facility_id, facility_type, has_gauge, expected_x, expected_y, view_pose, is_active "
@@ -1081,20 +1107,34 @@ async def ws_agent(ws: WebSocket):
             except Exception:
                 pass
         print(f"[agent] {robot_id} 연결 · hello {body} → 활성", flush=True)
+        def _welcome():
+            with pool.connection() as conn:
+                return run_of_robot(conn, robot_id)
+        run, active = await run_in_threadpool(_welcome)
         await ws.send_json(envelope("welcome", {
             "server_time": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "run": None, "active_task_id": None}))
+            "run": run and run["run_id"], "active_task_id": active}))
         await ws.send_json(envelope("config", await run_in_threadpool(agent_config, robot_id)))
+        for t, b in await run_in_threadpool(agent_resync, robot_id, body):   # 순찰 중 재접속 — run_config · task 다시
+            await ws.send_json(envelope(t, b))
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")
-            if kind == "status":                       # 1 Hz — 메모리 최신값 + robot_status_log
-                try:
-                    await run_in_threadpool(store_status, robot_id, msg.get("body") or {}, msg.get("ts"))
-                except (psycopg.Error, TypeError, ValueError) as e:
-                    print(f"[agent] {robot_id} status 처리 실패: {e}", flush=True)
-            else:
-                print(f"[agent] {robot_id} ← {kind} (아직 처리하지 않는 메시지)", flush=True)
+            b = msg.get("body") or {}
+            try:
+                if kind == "status":                   # 1 Hz — 메모리 최신값 + robot_status_log · 받은 SSID → AP 활성
+                    await run_in_threadpool(store_status, robot_id, b, msg.get("ts"))
+                    await run_in_threadpool(mark_aps_seen, robot_id, b.get("ssids") or [])
+                elif kind == "task_progress":
+                    await run_in_threadpool(on_task_progress, robot_id, b)
+                elif kind == "task_accepted":
+                    print(f"[agent] {robot_id} task 받음 {b.get('task_id')}", flush=True)
+                elif kind == "task_rejected":          # 실행 못 함(MAP_MISMATCH 등) → 실패와 같게
+                    await run_in_threadpool(on_task_result, robot_id, str(b.get("task_id")), False, b.get("reason") or "REJECTED")
+                else:
+                    print(f"[agent] {robot_id} ← {kind} (처리하지 않는 메시지)", flush=True)
+            except (psycopg.Error, TypeError, ValueError, KeyError) as e:
+                print(f"[agent] {robot_id} {kind} 처리 실패: {e}", flush=True)
     except WebSocketDisconnect:
         pass
     finally:
@@ -1158,13 +1198,19 @@ def record_e3(robot_id: str):
     detail = {"reason": "NO_STATUS", "timeout_s": status_timeout(), "agent_connected": robot_id in AGENTS}
     try:
         with pool.connection() as conn:
-            conn.execute("INSERT INTO robot_events (event_uid, robot_id, code, source, level, detail, ts) "
-                         "VALUES (%s, %s, 'E3', 'control', 'warn', %s, %s)",
-                         (f"control-{uuid.uuid4()}", robot_id, Jsonb(detail), ts))
+            run, task = run_of_robot(conn, robot_id)
+            add_event(conn, robot_id, {"event_uid": f"control-{uuid.uuid4()}", "run_id": run and run["run_id"],
+                                       "task_id": task, "code": "E3", "source": "control", "level": "warn",
+                                       "detail": detail, "ts": ts})
         LAST_E3[robot_id] = ts.isoformat()
         print(f"[E3] {robot_id} 응답 없음 — {detail['timeout_s']}초 동안 status 없음", flush=True)
     except psycopg.Error as e:
         print(f"[E3] {robot_id} 기록 실패: {e.diag.message_primary}", flush=True)
+        return
+    try:
+        on_robot_lost(robot_id)                        # 순찰 중이면 그 로봇 task 실패 → 그 섹터만 중단
+    except psycopg.Error as e:
+        print(f"[E3] {robot_id} task 실패 처리 실패: {e.diag.message_primary}", flush=True)
 
 
 async def state_watchdog():
@@ -1182,6 +1228,7 @@ async def state_watchdog():
                     SESSIONS.pop(t, None)
             for rid in gone:
                 await run_in_threadpool(record_e3, rid)
+            await run_in_threadpool(expire_aps, limit)     # SSID 값이 끊긴 AP는 비활성
         except asyncio.CancelledError:
             raise
         except Exception as e:                         # 점검은 멈추지 않음
@@ -1212,6 +1259,938 @@ def robots_snapshot() -> list[dict[str, Any]]:
     return out
 
 
+# ===========================================================================
+# inspection_manager (3-3차) — 순찰(run) · 로봇별 단계 task · 후보 → 정밀측정 → 확정 · 설비 점검 · 복귀
+#   로봇마다 단계: SURVEY_SEGMENT(측정) → REINSPECTION(후보 칸 정밀측정) → FACILITY_CHECK(설비 판정 1회) → DOCK
+#   그 로봇의 한 단계 task가 모두 끝나면 다음 단계를 만듦. 로봇마다 ACTIVE task 하나(task_id 순서대로 보냄)
+#   실패 → scv_fail_task(그 로봇의 남은 task만 취소) + 복귀 DOCK. 남은 task가 없으면 scv_close_run
+#   3차는 로봇 1대 = 섹터 1개. 경로 · 섹터 · 후보 규칙은 임시(함수 하나씩, 4차에 교체)
+# ===========================================================================
+import collections
+
+IM_LOCK = threading.Lock()                             # task 번호 · 단계 생성이 겹치지 않게 (inspection_manager 전체)
+CURRENT_RUN: dict[str, Any] = {"run_id": None}         # 메모리 — 진행 중 run_id (시작할 때 runs에서 복원)
+RECENT_EVENTS: collections.deque = collections.deque(maxlen=1000)   # 메모리 — 최근 이벤트 (시작할 때 robot_events에서)
+LIVE_CELLS: dict[int, dict[int, dict[int, list[float]]]] = {}       # 메모리 — run → cell → ap → [n, sum, sumsq, last]
+AP_SEEN: dict[int, float] = {}                         # ap_id → 그 SSID 값을 마지막으로 받은 시각(monotonic)
+GRID_CACHE: dict[int, dict[str, Any]] = {}             # map_id → {"cells": {(ix, iy): (cell_id, sector)}, "g": …}
+PHASES = ("SURVEY_SEGMENT", "REINSPECTION", "FACILITY_CHECK", "DOCK")
+RUN_TYPES = ("patrol",)                 # 순찰 종류 — 순찰 하나 (task: 측정 → 필요하면 정밀측정 → 탐지 → 복귀)
+RUN_SETTINGS = ("rssi_suspect_dbm", "min_samples", "precise_duration_s", "max_pose_retry", "battery_return_pct")
+
+
+def settings_values(conn) -> dict[str, str]:
+    return {r["key"]: r["value"] for r in conn.execute("SELECT key, value FROM settings")}
+
+
+def fset(st: dict[str, str], key: str, default: float) -> float:
+    try:
+        return float(st.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def grid_of(conn, map_id: int) -> dict[str, Any]:
+    """지도의 격자 (칸 번호 · 섹터) — 칸은 순찰 중 바뀌지 않으므로 메모리에 둠 (격자를 다시 만들면 비움)"""
+    g = GRID_CACHE.get(map_id)
+    if g is None:
+        m = conn.execute("SELECT origin_x, origin_y, grid_size_m FROM maps WHERE map_id = %s", (map_id,)).fetchone()
+        cells = {(c["ix"], c["iy"]): (c["cell_id"], c["sector"]) for c in conn.execute(
+            "SELECT cell_id, ix, iy, sector FROM grid_cells WHERE map_id = %s", (map_id,))}
+        g = GRID_CACHE[map_id] = {"cells": cells, "ox": float(m["origin_x"]), "oy": float(m["origin_y"]),
+                                  "g": float(m["grid_size_m"])}
+    return g
+
+
+def cell_at(grid: dict[str, Any], x: float, y: float) -> tuple[int, int] | None:
+    """좌표 → (cell_id, sector). 격자 밖이면 None"""
+    k = (math.floor((x - grid["ox"]) / grid["g"]), math.floor((y - grid["oy"]) / grid["g"]))
+    return grid["cells"].get(k)
+
+
+# ---------------------------------------------------------------- 경로 (임시 — 함수 하나, 4차에 교체)
+def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
+    if r <= 0:
+        return mask.copy()
+    h, w = mask.shape
+    pad = np.pad(mask, r, constant_values=True)
+    out = mask.copy()
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if dx * dx + dy * dy <= r * r:
+                out |= pad[r + dy:r + dy + h, r + dx:r + dx + w]
+    return out
+
+
+def zigzag(cells: list[tuple[int, int, int]]) -> list[tuple[int, int, int]]:
+    """(cell_id, ix, iy) → ix 열마다 iy 방향을 번갈아 (지그재그)"""
+    cols: dict[int, list] = {}
+    for c in cells:
+        cols.setdefault(c[1], []).append(c)
+    out = []
+    for i, ix in enumerate(sorted(cols)):
+        out += sorted(cols[ix], key=lambda c: c[2], reverse=bool(i % 2))
+    return out
+
+
+def plan_survey(m: dict[str, Any], cells: list[tuple[int, int, int]], margin_m: float) -> tuple[list[dict], int]:
+    """섹터 칸을 지그재그 순서로 — 칸 안에서 벽 여유(margin_m)를 만족하는 점 중 칸 중심에 가장 가까운 점.
+    그런 점이 없는 칸은 건너뜀. 반환: (경로점 [{x, y, yaw}], 건너뛴 칸 수)"""
+    raw = np.asarray(Image.open(MEDIA_DIR / m["image_key"]).convert("L"))
+    h = raw.shape[0]
+    res, ox, oy, g = float(m["resolution_m"]), float(m["origin_x"]), float(m["origin_y"]), float(m["grid_size_m"])
+    free = ((1.0 - raw.astype(np.float32) / 255.0) < FREE_THRESH) & (raw != UNKNOWN_PIXEL)
+    safe = ~_dilate(~free, int(math.ceil(margin_m / res)))
+    pts, skipped = [], 0
+    for _cid, ix, iy in zigzag(cells):
+        x0, y0 = ox + ix * g, oy + iy * g
+        c0, c1 = max(0, int(math.floor((x0 - ox) / res))), min(raw.shape[1], int(math.ceil((x0 + g - ox) / res)))
+        r0, r1 = max(0, h - int(math.ceil((y0 + g - oy) / res))), min(h, h - int(math.floor((y0 - oy) / res)))
+        rr, cc = np.nonzero(safe[r0:r1, c0:c1])
+        if rr.size == 0:
+            skipped += 1
+            continue
+        px = ox + (cc + c0 + 0.5) * res
+        py = oy + (h - (rr + r0) - 0.5) * res
+        k = int(np.argmin((px - (x0 + g / 2)) ** 2 + (py - (y0 + g / 2)) ** 2))
+        pts.append({"x": round(float(px[k]), 3), "y": round(float(py[k]), 3), "yaw": 0.0})
+    for i in range(len(pts)):                          # 방향 = 다음 점 쪽 (마지막은 앞 점과 같음)
+        j = i + 1 if i + 1 < len(pts) else i
+        if j != i:
+            pts[i]["yaw"] = round(math.atan2(pts[j]["y"] - pts[i]["y"], pts[j]["x"] - pts[i]["x"]), 4)
+        elif i > 0:
+            pts[i]["yaw"] = pts[i - 1]["yaw"]
+    return pts, skipped
+
+
+# ---------------------------------------------------------------- 제어 PC로 보내기 (동기 코드에서 불러도 됨)
+SEND_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _send_many(rid: str, msgs: list[dict[str, Any]]):
+    ws = AGENTS.get(rid)
+    if ws is None:
+        return
+    lock = SEND_LOCKS.setdefault(rid, asyncio.Lock())
+    async with lock:                                   # 한 로봇으로 가는 메시지 순서 유지
+        for m in msgs:
+            try:
+                await ws.send_json(m)
+            except Exception as e:
+                print(f"[agent] {rid} {m['type']} 보내기 실패: {e}", flush=True)
+                return
+
+
+def send_agent(rid: str, *msgs: tuple[str, dict[str, Any]]):
+    if MAIN_LOOP is None or rid not in AGENTS:
+        return
+    envs = [envelope(t, b) for t, b in msgs]
+    try:
+        asyncio.get_running_loop()
+        asyncio.ensure_future(_send_many(rid, envs))      # 이벤트 루프 안에서 부른 경우
+    except RuntimeError:
+        asyncio.run_coroutine_threadsafe(_send_many(rid, envs), MAIN_LOOP)
+
+
+# ---------------------------------------------------------------- run · task 조회 도우미
+def running_run(conn) -> dict[str, Any] | None:
+    return conn.execute("SELECT * FROM runs WHERE status = 'running'").fetchone()
+
+
+def run_config(conn, run: dict[str, Any], rid: str) -> dict[str, Any]:
+    """WS run_config — 그 로봇이 판단에 쓰는 값: 기준값 · 격자 · 자기 섹터 칸 · 측정 대상 SSID · 도크"""
+    m = conn.execute("SELECT * FROM maps WHERE map_id = %s", (run["map_id"],)).fetchone()
+    sectors = [int(s) for s, r in run["sector_robots"].items() if r == rid]
+    cells = [[c["cell_id"], c["ix"], c["iy"]] for c in conn.execute(
+        "SELECT cell_id, ix, iy FROM grid_cells WHERE map_id = %s AND sector = ANY(%s) ORDER BY cell_id",
+        (run["map_id"], sectors))]
+    st = settings_values(conn)
+    target = conn.execute("SELECT ssid, x, y FROM aps WHERE map_id = %s AND is_target", (m["map_id"],)).fetchall()
+    grid = grid_of(conn, m["map_id"])
+    facs = []                                          # 그 로봇 섹터의 설비 (client 지도에 순찰 동안 표시)
+    for f in conn.execute("SELECT facility_id, facility_type, expected_x, expected_y, view_pose FROM facilities "
+                          "WHERE map_id = %s AND is_active ORDER BY facility_id", (m["map_id"],)):
+        v = f["view_pose"] or {}
+        c = cell_at(grid, float(v.get("x", 0)), float(v.get("y", 0)))
+        if c and c[1] in sectors:
+            facs.append(f)
+    return {"run_id": run["run_id"], "map": {"map_id": m["map_id"], "name": m["name"], "robot_map_path": m["robot_map_path"]},
+            "grid": {"origin_x": m["origin_x"], "origin_y": m["origin_y"], "size": m["grid_size_m"]},
+            "sectors": sectors, "sector_cells": cells,
+            "ssids": [a["ssid"] for a in target],              # 측정 AP 하나 (3-3차) — 이 SSID 표본만
+            "target_ap": target[0] if target else None,
+            "facilities": facs,
+            "settings": {k: st.get(k) for k in RUN_SETTINGS},
+            "dock_pose": (m["dock_poses"] or {}).get(rid)}
+
+
+def task_message(conn, t: dict[str, Any]) -> dict[str, Any]:
+    """WS task_assign 본문 — 설비 점검은 설비 정보, 정밀측정은 후보 정보를 함께"""
+    run = conn.execute("SELECT r.map_id, m.robot_map_path FROM runs r JOIN maps m USING (map_id) WHERE r.run_id = %s",
+                       (t["run_id"],)).fetchone()
+    body = {"run_id": t["run_id"], "task_id": t["task_id"], "type": t["type"], "target_ref": t["target_ref"],
+            "waypoints": t["waypoints"], "map_path": run["robot_map_path"]}
+    if t["type"] == "FACILITY_CHECK":
+        f = conn.execute("SELECT facility_id, facility_type, has_gauge, expected_x, expected_y, view_pose FROM facilities "
+                         "WHERE map_id = %s AND facility_id = %s", (run["map_id"], t["target_ref"])).fetchone()
+        body["facility"] = f
+    elif t["type"] == "REINSPECTION":
+        c = conn.execute("SELECT candidate_id, source, kind, ref, target_x, target_y, score FROM candidates "
+                         "WHERE candidate_id = %s", (t["target_ref"],)).fetchone()
+        body["candidate"] = c
+    return body
+
+
+def new_task(conn, run_id: int, rid: str, type_: str, target_ref: str | None, waypoints: list[dict],
+             reason: str | None = None) -> str:
+    n = conn.execute("SELECT count(*) AS n FROM tasks WHERE run_id = %s", (run_id,)).fetchone()["n"]
+    tid = f"r{run_id}-t{n + 1:03d}"
+    conn.execute("INSERT INTO tasks (task_id, run_id, robot_id, type, target_ref, waypoints, status, reason) "
+                 "VALUES (%s, %s, %s, %s, %s, %s, 'PENDING', %s)",
+                 (tid, run_id, rid, type_, target_ref, Jsonb(waypoints), reason))
+    return tid
+
+
+def robot_sectors(run: dict[str, Any], rid: str) -> list[int]:
+    return [int(s) for s, r in run["sector_robots"].items() if r == rid]
+
+
+def create_phase(conn, run: dict[str, Any], rid: str, phase: str) -> int:
+    """그 로봇의 한 단계 task를 만듦 → 만든 개수"""
+    m = conn.execute("SELECT * FROM maps WHERE map_id = %s", (run["map_id"],)).fetchone()
+    sectors = robot_sectors(run, rid)
+    if phase == "SURVEY_SEGMENT":
+        cells = [(c["cell_id"], c["ix"], c["iy"]) for c in conn.execute(
+            "SELECT cell_id, ix, iy FROM grid_cells WHERE map_id = %s AND sector = ANY(%s)", (m["map_id"], sectors))]
+        st = settings_values(conn)
+        pts, skipped = plan_survey(m, cells, fset(st, "wall_margin_m", 0.3))
+        seg = max(1, int(fset(st, "segment_points", 20)))
+        for k in range(0, len(pts), seg):
+            part = pts[k:k + seg]
+            new_task(conn, run["run_id"], rid, phase, f"seg:{k}-{k + len(part) - 1}", part,
+                     f"SKIPPED_CELLS:{skipped}" if k == 0 and skipped else None)
+        return math.ceil(len(pts) / seg)
+    if phase == "REINSPECTION":                        # 그 로봇이 낸 열린 후보마다 — 같은 로봇이 정밀측정
+        cands = conn.execute("SELECT candidate_id, target_x, target_y FROM candidates WHERE run_id = %s AND detected_by = %s "
+                             "AND status = 'OPEN' ORDER BY candidate_id", (run["run_id"], rid)).fetchall()
+        for c in cands:
+            tid = new_task(conn, run["run_id"], rid, phase, c["candidate_id"],
+                           [{"x": c["target_x"], "y": c["target_y"], "yaw": 0.0}])
+            conn.execute("UPDATE candidates SET reinspect_task_id = %s, status = 'REINSPECTING' WHERE candidate_id = %s",
+                         (tid, c["candidate_id"]))
+        return len(cands)
+    if phase == "FACILITY_CHECK":                      # 섹터 안 설비(관측 자세가 속한 칸 기준)마다 판정 1회
+        grid = grid_of(conn, m["map_id"])
+        order = {c[0]: i for i, c in enumerate(zigzag([(cid, ix, iy) for (ix, iy), (cid, _s) in grid["cells"].items()]))}
+        fac = []
+        for f in conn.execute("SELECT facility_id, view_pose FROM facilities WHERE map_id = %s AND is_active", (m["map_id"],)):
+            v = f["view_pose"] or {}
+            c = cell_at(grid, float(v.get("x", 0)), float(v.get("y", 0)))
+            if c and c[1] in sectors:
+                fac.append((order.get(c[0], 0), f["facility_id"], v))
+        for _o, fid, v in sorted(fac):
+            new_task(conn, run["run_id"], rid, phase, fid, [{"x": v["x"], "y": v["y"], "yaw": v.get("yaw", 0.0)}])
+        return len(fac)
+    if phase == "DOCK":
+        dock = (m["dock_poses"] or {}).get(rid)
+        new_task(conn, run["run_id"], rid, phase, None, [dock] if dock else [])
+        return 1
+    return 0
+
+
+def advance(conn, run: dict[str, Any], rid: str, after: str | None):
+    """after 단계 다음부터 task가 생기는 단계까지 만듦 (예: 후보가 없으면 정밀측정을 건너뛰고 설비 점검)"""
+    start = 0 if after is None else PHASES.index(after) + 1
+    for ph in PHASES[start:]:
+        if create_phase(conn, run, rid, ph):
+            return ph
+    return None
+
+
+def assign_next(conn, run_id: int, rid: str) -> dict[str, Any] | None:
+    """그 로봇에 ACTIVE가 없으면 다음 PENDING(task_id 순)을 ACTIVE로 → 보낼 task"""
+    if conn.execute("SELECT 1 FROM tasks WHERE run_id = %s AND robot_id = %s AND status = 'ACTIVE'", (run_id, rid)).fetchone():
+        return None
+    t = conn.execute("SELECT * FROM tasks WHERE run_id = %s AND robot_id = %s AND status = 'PENDING' "
+                     "ORDER BY task_id LIMIT 1", (run_id, rid)).fetchone()
+    if not t:
+        return None
+    conn.execute("UPDATE tasks SET status = 'ACTIVE', assigned_at = now() WHERE task_id = %s", (t["task_id"],))
+    return task_message(conn, t)
+
+
+def close_if_done(conn, run_id: int) -> str | None:
+    """남은 task(PENDING · ACTIVE)가 없으면 scv_close_run → done · partial · aborted"""
+    st = conn.execute("SELECT scv_close_run(%s) AS s", (run_id,)).fetchone()["s"]
+    if st:
+        CURRENT_RUN["run_id"] = None
+        sr = conn.execute("SELECT sector_robots FROM runs WHERE run_id = %s", (run_id,)).fetchone()["sector_robots"]
+        for rid in dict.fromkeys(sr.values()):         # 제어 PC — 순찰 표시(지도 · 정보)를 끝냄
+            send_agent(rid, ("run_end", {"run_id": run_id, "status": st}))
+        ok = mark_baseline(conn, run_id) if st == "done" else False
+        print(f"[run] run {run_id} 종료 — {st}" + (" · 기준선 재료" if ok else ""), flush=True)
+    return st
+
+
+def mark_baseline(conn, run_id: int) -> bool:
+    """기준선 재료 회차 표시 (runs.is_baseline_ok) — done · 정기 순찰(patrol) · RSSI 확정 이상 없음이면 true.
+    partial · aborted는 scv_close_run · scv_abort_run이 false로 둠. 기준선 계산은 보고서 차수(3-5)"""
+    return bool(conn.execute(
+        "UPDATE runs r SET is_baseline_ok = true WHERE r.run_id = %s AND r.status = 'done' AND r.run_type = 'patrol' "
+        "AND NOT EXISTS (SELECT 1 FROM findings f JOIN candidates c USING (candidate_id) "
+        "WHERE c.run_id = r.run_id AND c.source = 'NETWORK') RETURNING r.run_id", (run_id,)).fetchone())
+
+
+# ---------------------------------------------------------------- 순찰 시작 · 중단
+def robot_ready(rid: str) -> tuple[bool, bool]:
+    """(정상, 도킹) — 정상 = 제어 PC 연결 + status를 받고 있음, 도킹 = 마지막 status의 is_docked"""
+    with MEM_LOCK:
+        st = ROBOT_STATE.get(rid)
+        f = dict(st["fields"]) if st else {}
+    ok = rid in AGENTS and bool(f.get("ts"))
+    return ok, f.get("is_docked") == "true"
+
+
+def start_form(conn) -> dict[str, Any]:
+    """순찰 시작 조건 (3-3차) — 현재 지도 · 격자 · 활성 측정 AP, 로봇마다 정상 · 도킹 · 도크 접근 자세"""
+    m = conn.execute("SELECT map_id, name, dock_poses FROM maps WHERE is_active").fetchone()
+    robots = conn.execute("SELECT robot_id FROM robots ORDER BY robot_id").fetchall()
+    sectors = [] if not m else [{"sector": r["sector"], "cells": r["n"]} for r in conn.execute(
+        "SELECT sector, count(*) AS n FROM grid_cells WHERE map_id = %s GROUP BY sector ORDER BY sector", (m["map_id"],))]
+    target = m and conn.execute("SELECT ap_id, ssid, is_active FROM aps WHERE map_id = %s AND is_target", (m["map_id"],)).fetchone()
+    problems = []                                      # 순찰 전체를 막는 것
+    if not m:
+        problems.append("현재 지도 없음")
+    elif not sectors:
+        problems.append("현재 지도에 격자 없음")
+    if m and not target:
+        problems.append("측정 AP 없음 (정보 › 측정 대상 AP에서 지정)")
+    elif target and not target["is_active"]:
+        problems.append(f"측정 AP {target['ssid']} 비활성 (client가 그 SSID 값을 받지 못함)")
+    out = []
+    for r in robots:
+        rid = r["robot_id"]
+        ok, docked = robot_ready(rid)
+        why = []
+        if not ok:
+            why.append("비정상 (제어 PC 연결 · 상태 없음)")
+        elif not docked:
+            why.append("도킹 아님")
+        if not (m and (m["dock_poses"] or {}).get(rid)):
+            why.append("도크 접근 자세 없음")
+        out.append({"robot_id": rid, "ready": not why and not problems, "why": why})
+    ready = [x["robot_id"] for x in out if x["ready"]]
+    default = {str(sc["sector"]): (DEFAULT_SECTOR_ROBOTS.get(str(sc["sector"])) if DEFAULT_SECTOR_ROBOTS.get(str(sc["sector"])) in ready
+                                   else None) for sc in sectors}
+    run = running_run(conn)
+    return {"map": m and {"map_id": m["map_id"], "name": m["name"]}, "sectors": sectors, "robots": out,
+            "target_ap": target and {"ssid": target["ssid"], "active": target["is_active"]}, "problems": problems,
+            "can_start": bool(ready) and not run, "default": default, "run_types": RUN_TYPES, "running": run and run["run_id"]}
+
+
+def start_run(user: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+    req = {str(k): (str(v) if v else None) for k, v in (body.get("sector_robots") or {}).items()}
+    run_type = str(body.get("run_type") or "patrol")
+    if run_type not in RUN_TYPES:
+        raise HTTPException(400, "순찰 종류는 순찰(patrol) 하나입니다")
+    sends: list[tuple[str, dict, dict | None]] = []
+    with IM_LOCK, pool.connection() as conn:
+        with conn.transaction():
+            r = running_run(conn)
+            if r:
+                raise HTTPException(409, f"순찰(run {r['run_id']})이 이미 진행 중입니다")
+            form = start_form(conn)
+            if not form["map"]:
+                raise HTTPException(400, "현재 지도가 없습니다")
+            if form["problems"]:
+                raise HTTPException(400, "순찰을 시작할 수 없습니다 — " + " · ".join(form["problems"]))
+            sec_ok = {str(s["sector"]) for s in form["sectors"] if s["cells"]}
+            robots = {x["robot_id"]: x for x in form["robots"]}
+            sr = {}
+            for s, rid in req.items():
+                if not rid:
+                    continue
+                if s not in sec_ok:
+                    raise HTTPException(400, f"섹터 {s}에 격자 칸이 없습니다")
+                if rid not in robots:
+                    raise HTTPException(400, f"{rid}는 등록된 로봇이 아닙니다")
+                if not robots[rid]["ready"]:
+                    raise HTTPException(400, f"{rid}로 순찰을 시작할 수 없습니다 — " + " · ".join(robots[rid]["why"]))
+                if rid in sr.values():
+                    raise HTTPException(400, f"{rid}에 섹터가 둘 배정되었습니다 — 로봇 1대 = 섹터 1개")
+                sr[s] = rid
+            if not sr:
+                raise HTTPException(400, "활성 로봇을 배정한 섹터가 없습니다")
+            run = conn.execute("INSERT INTO runs (map_id, run_type, sector_robots, status, started_by, started_at) "
+                               "VALUES (%s, %s, %s, 'running', %s, now()) RETURNING *",
+                               (form["map"]["map_id"], run_type, Jsonb(sr), user["user_id"])).fetchone()
+            for rid in dict.fromkeys(sr.values()):
+                advance(conn, run, rid, None)
+                cfg = run_config(conn, run, rid)
+                sends.append((rid, cfg, assign_next(conn, run["run_id"], rid)))
+    CURRENT_RUN["run_id"] = run["run_id"]
+    for rid, cfg, t in sends:
+        send_agent(rid, ("run_config", cfg), *([("task_assign", t)] if t else []))
+    print(f"[run] run {run['run_id']} 시작 — {sr}", flush=True)
+    return {"ok": True, "run_id": run["run_id"]}
+
+
+def abort_run(run_id: int, reason: str) -> dict[str, Any]:
+    with IM_LOCK, pool.connection() as conn:
+        with conn.transaction():
+            run = conn.execute("SELECT * FROM runs WHERE run_id = %s", (run_id,)).fetchone()
+            if not run or run["status"] != "running":
+                raise HTTPException(409, "진행 중인 순찰이 아닙니다")
+            n = conn.execute("SELECT scv_abort_run(%s, %s) AS n", (run_id, reason)).fetchone()["n"]
+    CURRENT_RUN["run_id"] = None
+    for rid in dict.fromkeys(run["sector_robots"].values()):   # 제어 PC는 하던 task를 멈추고 도크로 복귀
+        send_agent(rid, ("run_cancel", {"run_id": run_id, "reason": reason, "go_dock": True}))
+    print(f"[run] run {run_id} 중단 — task {n}개 취소 ({reason})", flush=True)
+    return {"ok": True, "canceled": n}
+
+
+# ---------------------------------------------------------------- task 진행 · 결과
+def on_task_progress(rid: str, body: dict[str, Any]):
+    with pool.connection() as conn:
+        conn.execute("UPDATE tasks SET progress = %s WHERE task_id = %s AND robot_id = %s AND status = 'ACTIVE'",
+                     (max(0.0, min(1.0, float(body.get("progress") or 0))), body.get("task_id"), rid))
+
+
+def on_task_result(rid: str, task_id: str, ok: bool, reason: str | None) -> dict[str, Any]:
+    nxt, closed = None, None
+    with IM_LOCK, pool.connection() as conn:
+        with conn.transaction():
+            t = conn.execute("SELECT t.*, r.status AS run_status FROM tasks t JOIN runs r USING (run_id) "
+                             "WHERE t.task_id = %s FOR UPDATE OF t", (task_id,)).fetchone()
+            if not t or t["robot_id"] != rid or t["status"] != "ACTIVE":
+                return {"ok": True, "ignored": "ACTIVE task가 아님 (이미 끝났거나 취소됨)"}
+            run = conn.execute("SELECT * FROM runs WHERE run_id = %s", (t["run_id"],)).fetchone()
+            if ok:
+                conn.execute("UPDATE tasks SET status = 'DONE', result_ok = true, progress = 1, ended_at = now(), "
+                             "reason = COALESCE(%s, reason) WHERE task_id = %s", (reason, task_id))
+                if not conn.execute("SELECT 1 FROM tasks WHERE run_id = %s AND robot_id = %s AND status = 'PENDING'",
+                                    (t["run_id"], rid)).fetchone():
+                    advance(conn, run, rid, t["type"])
+            else:
+                conn.execute("SELECT scv_fail_task(%s, %s)", (task_id, (reason or "FAILED")[:200]))
+                if t["type"] != "DOCK":                # 실패한 로봇은 복귀 (그 섹터만 중단)
+                    create_phase(conn, run, rid, "DOCK")
+            nxt = assign_next(conn, t["run_id"], rid)
+            if nxt is None:
+                closed = close_if_done(conn, t["run_id"])
+    if nxt:
+        send_agent(rid, ("task_assign", nxt))
+    print(f"[task] {rid} {task_id} {'DONE' if ok else 'FAILED ' + str(reason)}"
+          + (f" → 다음 {nxt['task_id']} {nxt['type']}" if nxt else "") + (f" · run {closed}" if closed else ""), flush=True)
+    return {"ok": True, "next": nxt and nxt["task_id"], "run_status": closed}
+
+
+def on_robot_lost(rid: str):
+    """E3 — 순찰 중이면 그 로봇의 task 실패(NO_RESPONSE) → 그 섹터만 중단. 연결이 없으므로 복귀 task는 만들지 않음"""
+    with IM_LOCK, pool.connection() as conn:
+        with conn.transaction():
+            run = running_run(conn)
+            if not run:
+                return
+            t = conn.execute("SELECT task_id FROM tasks WHERE run_id = %s AND robot_id = %s AND status IN ('ACTIVE', 'PENDING') "
+                             "ORDER BY (status = 'ACTIVE') DESC, task_id LIMIT 1", (run["run_id"], rid)).fetchone()
+            if not t:
+                return
+            conn.execute("SELECT scv_fail_task(%s, 'NO_RESPONSE')", (t["task_id"],))
+            closed = close_if_done(conn, run["run_id"])
+    print(f"[task] {rid} 응답 없음 → {t['task_id']} FAILED(NO_RESPONSE)" + (f" · run {closed}" if closed else ""), flush=True)
+
+
+def agent_resync(rid: str, hello: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """제어 PC가 다시 연결했을 때 — 진행 중 run이면 run_config, ACTIVE task가 다르면 다시 보내거나 취소"""
+    out = []
+    with pool.connection() as conn:
+        run = running_run(conn)
+        db_active = None
+        if run and rid in run["sector_robots"].values():
+            out.append(("run_config", run_config(conn, run, rid)))
+            t = conn.execute("SELECT * FROM tasks WHERE run_id = %s AND robot_id = %s AND status = 'ACTIVE'",
+                             (run["run_id"], rid)).fetchone()
+            db_active = t and t["task_id"]
+            if t and hello.get("active_task_id") != t["task_id"]:
+                out.append(("task_assign", task_message(conn, t)))
+        mine = hello.get("active_task_id")
+        if mine and mine != db_active:
+            out.insert(0, ("task_cancel", {"task_id": mine, "reason": "NOT_ACTIVE", "go_dock": db_active is None}))
+    return out
+
+
+def run_of_robot(conn, rid: str) -> tuple[dict | None, str | None]:
+    """그 로봇이 배정된 진행 중 run과 그 로봇의 ACTIVE task — 배정되지 않았으면 (None, None)"""
+    run = running_run(conn)
+    if not run or rid not in run["sector_robots"].values():
+        return None, None
+    t = conn.execute("SELECT task_id FROM tasks WHERE run_id = %s AND robot_id = %s AND status = 'ACTIVE'",
+                     (run["run_id"], rid)).fetchone()
+    return run, t and t["task_id"]
+
+
+# ---------------------------------------------------------------- 제어 PC 기록 (REST — 아웃박스에서 옴)
+def add_event(conn, rid: str, ev: dict[str, Any]) -> dict[str, Any] | None:
+    """robot_events INSERT (event_uid로 중복 무시) → 새로 들어간 이벤트"""
+    row = conn.execute(
+        "INSERT INTO robot_events (event_uid, robot_id, run_id, task_id, code, source, level, detail, ts) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (event_uid) DO NOTHING "
+        "RETURNING event_id, event_uid, robot_id, run_id, task_id, code, source, level, detail, ts",
+        (ev["event_uid"], rid, ev.get("run_id"), ev.get("task_id"), str(ev["code"])[:16], ev.get("source", "robot"),
+         ev.get("level", "info"), Jsonb(ev.get("detail")) if ev.get("detail") is not None else None,
+         ev.get("ts") or datetime.now(timezone.utc))).fetchone()
+    if row:
+        remember_event(row)
+    return row
+
+
+def remember_event(row: dict[str, Any]):
+    e = dict(row)
+    e["ts"] = e["ts"].isoformat() if hasattr(e["ts"], "isoformat") else e["ts"]
+    with MEM_LOCK:
+        RECENT_EVENTS.append(e)
+
+
+def on_events(rid: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+    done, rejected = 0, []
+    for ev in events:
+        try:
+            with IM_LOCK, pool.connection() as conn:
+                with conn.transaction():
+                    row = add_event(conn, rid, ev)
+                    if row:
+                        handle_event(conn, rid, row, ev.get("detail") or {})
+            done += 1
+        except psycopg.Error as e:                     # 규칙 위반 등 — 다시 보내도 같으므로 받은 것으로 하고 넘김
+            rejected.append({"event_uid": ev.get("event_uid"), "error": e.diag.message_primary})
+            print(f"[event] {rid} {ev.get('code')} 거부: {e.diag.message_primary}", flush=True)
+    return {"ok": True, "stored": done, "rejected": rejected}
+
+
+def handle_event(conn, rid: str, ev: dict[str, Any], d: dict[str, Any]):
+    """이상 알림 이벤트 → candidates · findings (inspection_manager)"""
+    code = ev["code"]
+    if code == "CANDIDATE":
+        tgt = d.get("target") or [None, None]
+        conn.execute(
+            "INSERT INTO candidates (candidate_id, run_id, source, kind, ref, target_x, target_y, score, detect_task_id, "
+            "detected_by, status, detected_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s) "
+            "ON CONFLICT DO NOTHING",
+            (d["candidate_id"], ev["run_id"], d.get("source", "NETWORK"), d.get("kind", "NET_COVERAGE"), str(d["ref"]),
+             tgt[0], tgt[1], d.get("score"), ev["task_id"], rid, ev["ts"]))
+    elif code in ("CONFIRMED", "CLEARED", "UNCONFIRMED"):
+        c = conn.execute("UPDATE candidates SET outcome = %s, decided_at = %s, status = 'CLOSED' "
+                         "WHERE candidate_id = %s AND outcome IS NULL RETURNING candidate_id, source, reinspect_task_id",
+                         (code, ev["ts"], d.get("candidate_id"))).fetchone()
+        if c and code == "CONFIRMED":
+            conn.execute("INSERT INTO findings (candidate_id, task_id, category, status, confirmed_at) "
+                         "VALUES (%s, %s, %s, 'open', %s) ON CONFLICT (candidate_id) DO NOTHING",
+                         (c["candidate_id"], c["reinspect_task_id"], "coverage" if c["source"] == "NETWORK" else "facility",
+                          ev["ts"]))
+
+
+def on_samples(rid: str, run_id: int, samples: list[dict[str, Any]]) -> dict[str, Any]:
+    with pool.connection() as conn:
+        run = conn.execute("SELECT map_id FROM runs WHERE run_id = %s", (run_id,)).fetchone()
+        if not run:
+            return {"ok": True, "stored": 0, "dropped": len(samples), "reason": "없는 run"}
+        aps = {a["ssid"]: a["ap_id"] for a in conn.execute("SELECT ap_id, ssid FROM aps WHERE map_id = %s", (run["map_id"],))}
+        grid = grid_of(conn, run["map_id"])
+        # 표본의 측정 task — 이 로봇 · run의 SURVEY_SEGMENT만 (DB 트리거와 같은 조건. 아니면 비워서 묶음 전체가 거부되지 않게)
+        survey = {t["task_id"] for t in conn.execute("SELECT task_id FROM tasks WHERE run_id = %s AND robot_id = %s "
+                                                     "AND type = 'SURVEY_SEGMENT'", (run_id, rid))}
+        stored, dropped, inc = 0, 0, []
+        with conn.transaction():
+            for s in samples:
+                ap = aps.get(s.get("ssid"))
+                if ap is None:                         # 등록되지 않은 SSID — 저장하지 않음
+                    dropped += 1
+                    continue
+                c = cell_at(grid, float(s["x"]), float(s["y"])) if s.get("pose_ok") else None
+                tid = s.get("task_id") if s.get("task_id") in survey else None
+                row = conn.execute(
+                    "INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, cell_id, task_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING seq",
+                    (rid, run_id, int(s["seq"]), s["stamp"], s["x"], s["y"], s["yaw"], bool(s.get("pose_ok")), ap,
+                     int(s["rssi_dbm"]), c and c[0], tid)).fetchone()
+                if row:
+                    stored += 1
+                    if c:
+                        inc.append((c[0], ap, float(s["rssi_dbm"])))
+    with MEM_LOCK:                                     # 실시간 히트맵 누적 (이미 만든 run만 — 없으면 처음 볼 때 DB에서)
+        live = LIVE_CELLS.get(run_id)
+        if live is not None:
+            for cid, ap, v in inc:
+                a = live.setdefault(cid, {}).setdefault(ap, [0, 0.0, 0.0, v])
+                a[0] += 1; a[1] += v; a[2] += v * v; a[3] = v
+    return {"ok": True, "stored": stored, "dropped": dropped}
+
+
+def live_cells(conn, run_id: int) -> dict[int, dict[int, list[float]]]:
+    with MEM_LOCK:
+        live = LIVE_CELLS.get(run_id)
+    if live is None:                                   # 처음이거나 server_page 재시작 — net_samples에서 다시 집계
+        live = {}
+        for r in conn.execute("SELECT cell_id, ap_id, count(*) AS n, sum(rssi_dbm) AS s, sum(rssi_dbm * rssi_dbm) AS q "
+                              "FROM net_samples WHERE run_id = %s AND pose_ok AND cell_id IS NOT NULL "
+                              "GROUP BY cell_id, ap_id", (run_id,)):
+            live.setdefault(r["cell_id"], {})[r["ap_id"]] = [int(r["n"]), float(r["s"]), float(r["q"]), None]
+        with MEM_LOCK:
+            live = LIVE_CELLS.setdefault(run_id, live)
+            for old in [k for k in LIVE_CELLS if k != run_id and k != CURRENT_RUN["run_id"]][:-3]:
+                LIVE_CELLS.pop(old, None)              # 지난 run은 몇 개만 남김
+    return live
+
+
+def on_precise(rid: str, body: dict[str, Any]) -> dict[str, Any]:
+    with pool.connection() as conn:
+        t = conn.execute("SELECT t.run_id, r.map_id FROM tasks t JOIN runs r USING (run_id) WHERE t.task_id = %s",
+                         (body.get("task_id"),)).fetchone()
+        if not t:
+            return {"ok": True, "stored": 0, "reason": "없는 task"}
+        aps = {a["ssid"]: a["ap_id"] for a in conn.execute("SELECT ap_id, ssid FROM aps WHERE map_id = %s", (t["map_id"],))}
+        n = 0
+        with conn.transaction():
+            for m_ in body.get("measures") or []:
+                ap = aps.get(m_.get("ssid"))
+                if ap is None:
+                    continue
+                n += conn.execute(
+                    "INSERT INTO precise_measures (task_id, robot_id, ap_id, cell_id, duration_s, n_samples, rssi_median, "
+                    "rssi_iqr, measured_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                    (body["task_id"], rid, ap, int(body["cell_id"]), int(m_["duration_s"]), int(m_["n_samples"]),
+                     float(m_["rssi_median"]), float(m_["rssi_iqr"]), m_["measured_at"])).rowcount
+    return {"ok": True, "stored": n}
+
+
+def on_inspection(rid: str, b: dict[str, Any]) -> dict[str, Any]:
+    with pool.connection() as conn:
+        t = conn.execute("SELECT t.run_id, r.map_id FROM tasks t JOIN runs r USING (run_id) WHERE t.task_id = %s",
+                         (b.get("task_id"),)).fetchone()
+        if not t:
+            return {"ok": True, "stored": 0, "reason": "없는 task"}
+        row = conn.execute(
+            "INSERT INTO inspections (inspection_uid, task_id, run_id, robot_id, map_id, facility_id, detail, final, frontal, "
+            "pose_retry, gauge_state, confidence, bbox, model_version, inspected_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING inspection_id",
+            (b["inspection_uid"], b["task_id"], t["run_id"], rid, t["map_id"], b["facility_id"], b["detail"], b["final"],
+             bool(b["frontal"]), int(b.get("pose_retry", 0)), b.get("gauge_state"), b.get("confidence"),
+             Jsonb(b["bbox"]) if b.get("bbox") is not None else None, str(b.get("model_version", "unknown"))[:32],
+             b["inspected_at"])).fetchone()
+    return {"ok": True, "inspection_id": row and row["inspection_id"]}
+
+
+async def on_media(rid: str, meta: dict[str, Any], data: bytes) -> dict[str, Any]:
+    import hashlib
+
+    def work():
+        with pool.connection() as conn:
+            ins = conn.execute("SELECT inspection_id, run_id, facility_id, inspected_at FROM inspections WHERE inspection_uid = %s",
+                               (meta.get("inspection_uid"),)).fetchone()
+            if not ins:
+                return {"ok": False, "retry": True, "reason": "판정이 아직 없음"}
+            d = ins["inspected_at"]
+            key = (f"inspections/{d:%Y/%m/%d}/r{ins['run_id']}/{ins['facility_id']}_"
+                   f"{str(meta['inspection_uid'])[:8]}_{int(meta.get('index', 1))}.jpg")
+            path = MEDIA_DIR / key
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            conn.execute("INSERT INTO media (inspection_id, robot_id, kind, object_key, sha256, size_bytes, captured_at) "
+                         "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (object_key) DO NOTHING",
+                         (ins["inspection_id"], rid, meta.get("kind", "rgb"), key, hashlib.sha256(data).hexdigest(),
+                          len(data), meta.get("captured_at") or datetime.now(timezone.utc)))
+            return {"ok": True, "object_key": key}
+    r = await run_in_threadpool(work)
+    if not r["ok"]:
+        raise HTTPException(409, r["reason"])          # 판정보다 사진이 먼저 오면 제어 PC가 다시 보냄
+    return r
+
+
+def mark_aps_seen(rid: str, ssids: list[str]):
+    """status의 ssids — client가 최근에 받은 SSID → 현재 지도의 그 AP 활성 (값이 끊기면 1초 점검이 비활성)"""
+    if not ssids:
+        return
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT a.ap_id, a.is_active FROM aps a JOIN maps m USING (map_id) WHERE m.is_active "
+                            "AND a.ssid = ANY(%s)", (list(ssids),)).fetchall()
+        off = [r["ap_id"] for r in rows if not r["is_active"]]
+        if off:
+            conn.execute("UPDATE aps SET is_active = true WHERE ap_id = ANY(%s)", (off,))
+    now = time.monotonic()
+    with MEM_LOCK:
+        for r in rows:
+            AP_SEEN[r["ap_id"]] = now
+
+
+def expire_aps(limit: float):
+    now = time.monotonic()
+    with MEM_LOCK:
+        gone = [a for a, t in AP_SEEN.items() if now - t > limit]
+        for a in gone:
+            AP_SEEN.pop(a, None)
+    if gone:
+        with pool.connection() as conn:
+            conn.execute("UPDATE aps SET is_active = false WHERE ap_id = ANY(%s)", (gone,))
+
+
+def restore_memory():
+    """server_page 시작 때 — CURRENT_RUN · 최근 이벤트 복원, 순찰 중 로봇은 「방금 받은 것」으로 두어 E3가 빠지지 않게"""
+    with pool.connection() as conn:
+        run = running_run(conn)
+        CURRENT_RUN["run_id"] = run and run["run_id"]
+        for e in reversed(conn.execute("SELECT event_id, event_uid, robot_id, run_id, task_id, code, source, level, detail, ts "
+                                       "FROM robot_events ORDER BY event_id DESC LIMIT 1000").fetchall()):
+            remember_event(e)
+        busy = [] if not run else [r["robot_id"] for r in conn.execute(
+            "SELECT DISTINCT robot_id FROM tasks WHERE run_id = %s AND status IN ('PENDING', 'ACTIVE')", (run["run_id"],))]
+    now = time.monotonic()
+    with MEM_LOCK:
+        for rid in busy:
+            ROBOT_STATE.setdefault(rid, {"fields": {"note": "server_page 재시작 — status 기다림 (순찰 중 로봇)"}, "rx": now})
+    if run:
+        print(f"[run] 진행 중 run {run['run_id']} 복원 — 대기 로봇 {busy or '없음'}", flush=True)
+
+
+# ---------------------------------------------------------------- REST — 제어 PC (scv_agent 아웃박스)
+@app.post("/api/agent/tasks/{task_id}/result")
+async def api_task_result(task_id: str, request: Request):
+    b = await request.json()
+    return await run_in_threadpool(on_task_result, str(b["robot_id"]), task_id, bool(b.get("ok")), b.get("reason"))
+
+
+@app.get("/api/agent/last-seq")
+def api_last_seq(robot_id: str, run_id: int):
+    with pool.connection() as conn:
+        r = conn.execute("SELECT max(seq) AS s FROM net_samples WHERE robot_id = %s AND run_id = %s", (robot_id, run_id)).fetchone()
+    return {"last_seq": r["s"] or 0}
+
+
+@app.post("/api/agent/samples")
+async def api_samples(request: Request):
+    b = await request.json()
+    return await run_in_threadpool(on_samples, str(b["robot_id"]), int(b["run_id"]), b.get("samples") or [])
+
+
+@app.post("/api/agent/events")
+async def api_events(request: Request):
+    b = await request.json()
+    return await run_in_threadpool(on_events, str(b["robot_id"]), b.get("events") or [])
+
+
+@app.post("/api/agent/precise-measures")
+async def api_precise(request: Request):
+    b = await request.json()
+    return await run_in_threadpool(on_precise, str(b["robot_id"]), b)
+
+
+@app.post("/api/agent/inspections")
+async def api_inspections(request: Request):
+    b = await request.json()
+    return await run_in_threadpool(on_inspection, str(b["robot_id"]), b)
+
+
+@app.post("/api/agent/media")
+async def api_media(meta: str = Form(...), file: UploadFile = File(...)):
+    m = json.loads(meta)
+    return await on_media(str(m["robot_id"]), m, await file.read())
+
+
+# ---------------------------------------------------------------- REST — server page 작업 탭
+@app.get("/api/runs/form")
+def api_run_form(request: Request):
+    current_user(request)
+    with pool.connection() as conn:
+        return start_form(conn)
+
+
+@app.post("/api/runs")
+async def api_run_start(request: Request):
+    user = current_user(request)
+    body = await request.json()
+    return await run_in_threadpool(start_run, user, body)
+
+
+@app.post("/api/runs/{run_id}/abort")
+def api_run_abort(run_id: int, request: Request):
+    current_user(request)
+    return abort_run(run_id, "ADMIN_STOP")
+
+
+@app.get("/api/runs")
+def api_runs(request: Request):
+    """이력 탭 — 현재 지도에서 돈 순찰 (최근 50회)"""
+    current_user(request)
+    with pool.connection() as conn:
+        m = conn.execute("SELECT map_id, name FROM maps WHERE is_active").fetchone()
+        rows = [] if not m else conn.execute(
+            "SELECT r.run_id, r.status, r.run_type, r.sector_robots, r.started_at, r.ended_at, r.is_baseline_ok, "
+            "m.name AS map_name FROM runs r JOIN maps m USING (map_id) WHERE r.map_id = %s "
+            "ORDER BY r.run_id DESC LIMIT 50", (m["map_id"],)).fetchall()
+    return {"runs": rows, "current": CURRENT_RUN["run_id"], "map": m}
+
+
+@app.get("/api/runs/{run_id}/events")
+def api_run_events(run_id: int, request: Request):
+    current_user(request)
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT event_id, event_uid, robot_id, run_id, task_id, code, source, level, detail, ts "
+                            "FROM robot_events WHERE run_id = %s ORDER BY event_id", (run_id,)).fetchall()
+    return {"events": rows}
+
+
+@app.get("/api/runs/{run_id}")
+def api_run_detail(run_id: int, request: Request):
+    current_user(request)
+    with pool.connection() as conn:
+        run = conn.execute("SELECT r.*, m.name AS map_name, u.username AS started_by_name FROM runs r JOIN maps m USING (map_id) "
+                           "LEFT JOIN users u ON u.user_id = r.started_by WHERE r.run_id = %s", (run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, "없는 순찰입니다")
+        tasks = conn.execute("SELECT task_id, robot_id, type, target_ref, waypoints, status, progress, result_ok, reason, "
+                             "assigned_at, ended_at FROM tasks WHERE run_id = %s ORDER BY task_id", (run_id,)).fetchall()
+        cands = conn.execute(
+            "SELECT c.*, g.ix, g.iy, (SELECT max(p.rssi_median) FROM precise_measures p WHERE p.task_id = c.reinspect_task_id) "
+            "AS precise_best, f.finding_id FROM candidates c LEFT JOIN grid_cells g ON g.cell_id::text = c.ref "
+            "LEFT JOIN findings f USING (candidate_id) WHERE c.run_id = %s ORDER BY c.candidate_id", (run_id,)).fetchall()
+        ins = conn.execute(
+            "SELECT i.inspection_id, i.task_id, i.robot_id, i.facility_id, i.detail, i.final, i.frontal, i.pose_retry, "
+            "i.gauge_state, i.confidence, i.inspected_at, f.expected_x, f.expected_y, f.facility_type, "
+            "(SELECT array_agg(md.object_key ORDER BY md.media_id) FROM media md WHERE md.inspection_id = i.inspection_id) AS photos "
+            "FROM inspections i JOIN facilities f ON f.map_id = i.map_id AND f.facility_id = i.facility_id "
+            "WHERE i.run_id = %s ORDER BY i.inspection_id", (run_id,)).fetchall()
+        aps = conn.execute("SELECT ap_id, ssid FROM aps WHERE map_id = %s ORDER BY ssid", (run["map_id"],)).fetchall()
+        live = live_cells(conn, run_id)
+        n_samples = conn.execute("SELECT count(*) AS n FROM net_samples WHERE run_id = %s", (run_id,)).fetchone()["n"]
+        thr = fset(settings_values(conn), "rssi_suspect_dbm", -72)
+    with MEM_LOCK:
+        heat = {cid: {ap: [round(v[1] / v[0], 1), int(v[0])] for ap, v in d.items() if v[0]} for cid, d in live.items()}
+    return {"run": run, "tasks": tasks, "candidates": cands, "inspections": ins, "aps": aps, "heat": heat,
+            "samples": n_samples, "thr": thr, "current": CURRENT_RUN["run_id"]}
+
+
+def cell_key(grid: dict[str, Any], x: float, y: float) -> dict[str, Any] | None:
+    """좌표 → {cell_id, ix, iy} (격자 밖이면 None)"""
+    ix, iy = math.floor((x - grid["ox"]) / grid["g"]), math.floor((y - grid["oy"]) / grid["g"])
+    c = grid["cells"].get((ix, iy))
+    return {"cell_id": c[0], "ix": ix, "iy": iy} if c else None
+
+
+def cell_visits(points) -> list[dict[str, Any]]:
+    """시각순 (시각, 칸) → 칸이 바뀔 때마다 끊은 실제 순서 [{cell_id, ix, iy, enter, leave, n}]. 다시 지나면 따로 남음"""
+    out: list[dict[str, Any]] = []
+    for ts, c in points:
+        if c is None:
+            continue
+        if out and out[-1]["cell_id"] == c["cell_id"]:
+            out[-1]["leave"], out[-1]["n"] = ts, out[-1]["n"] + 1
+        else:
+            out.append({**c, "enter": ts, "leave": ts, "n": 1})
+    return out
+
+
+@app.get("/api/tasks/{task_id}")
+def api_task_detail(task_id: str, request: Request):
+    """이력 탭 task 「자세히」 — 측정: 거친 칸 · 칸별 측정값 · 이 구간 후보 / 정밀측정: 후보 · 정밀측정 · 결론 /
+    탐지: 설비 · 판정 · 사진 / 공통: 경로점 · 실제로 지나간 길 · 배터리(robot_status_log) · 이 task의 이벤트
+    칸 순서: plan_cells = 경로점마다 칸(계획 순서), visits = 실제로 지난 칸 순서(측정은 표본, 그 밖은 status 1 Hz)"""
+    current_user(request)
+    with pool.connection() as conn:
+        t = conn.execute("SELECT t.*, r.map_id, r.status AS run_status FROM tasks t JOIN runs r USING (run_id) "
+                         "WHERE t.task_id = %s", (task_id,)).fetchone()
+        if not t:
+            raise HTTPException(404, "없는 task입니다")
+        aps = conn.execute("SELECT ap_id, ssid, is_target FROM aps WHERE map_id = %s ORDER BY ssid", (t["map_id"],)).fetchall()
+        events = conn.execute("SELECT event_id, code, source, level, detail, ts FROM robot_events WHERE task_id = %s "
+                              "ORDER BY ts, event_id", (task_id,)).fetchall()
+        # 실제로 지나간 길 — 제어 PC status(1 Hz, robot_status_log)의 그 task 동안 위치 · 배터리
+        track = conn.execute("SELECT ts, x, y, battery_pct, nav_state FROM robot_status_log WHERE robot_id = %s "
+                             "AND task_id = %s ORDER BY ts", (t["robot_id"], task_id)).fetchall()
+        grid = grid_of(conn, t["map_id"])
+        m_ = re.match(r"seg:(\d+)-", t["target_ref"] or "")
+        plan = []
+        for i, w in enumerate(t["waypoints"] or []):   # 계획 순서 — 경로점 i(이 task 안 1부터)가 속한 칸
+            c = cell_key(grid, float(w["x"]), float(w["y"]))
+            plan.append({"i": i + 1, "path_i": (int(m_.group(1)) + i) if m_ else None, **(c or {"cell_id": None})})
+        out: dict[str, Any] = {"task": t, "aps": aps, "events": events, "track": track, "plan_cells": plan,
+                               "visits": [], "visits_source": None,
+                               "thr": fset(settings_values(conn), "rssi_suspect_dbm", -72)}
+        cell_cols = "g.ix, g.iy, g.sector, g.center_x, g.center_y"
+        if t["type"] == "SURVEY_SEGMENT":
+            # 표본 — net_samples.task_id(3-3차). 그 전 표본은 같은 로봇 · run에서 이 task 수행 시간 안의 것
+            where, args, basis = "n.task_id = %s", [task_id], "task_id"
+            if not conn.execute("SELECT 1 FROM net_samples WHERE task_id = %s LIMIT 1", (task_id,)).fetchone() \
+                    and t["assigned_at"]:
+                where = "n.robot_id = %s AND n.run_id = %s AND n.stamp >= %s AND n.stamp <= COALESCE(%s, now())"
+                args, basis = [t["robot_id"], t["run_id"], t["assigned_at"], t["ended_at"]], "time"
+            tot = conn.execute(f"SELECT count(*) AS n, count(*) FILTER (WHERE NOT n.pose_ok) AS pose_bad, "
+                               f"count(*) FILTER (WHERE n.pose_ok AND n.cell_id IS NULL) AS off_grid, "
+                               f"min(n.stamp) AS first, max(n.stamp) AS last FROM net_samples n WHERE {where}", args).fetchone()
+            if not tot["n"]:                           # 수행 시간으로 찾아도 없음 — 표본이 없는 task
+                basis = "none"
+            rows = conn.execute(
+                f"SELECT n.cell_id, {cell_cols}, n.ap_id, count(*) AS n, min(n.stamp) AS first, "
+                f"percentile_cont(0.5) WITHIN GROUP (ORDER BY n.rssi_dbm)::float8 AS median, "
+                f"round(avg(n.rssi_dbm), 1)::float8 AS mean, min(n.rssi_dbm) AS min, max(n.rssi_dbm) AS max "
+                f"FROM net_samples n JOIN grid_cells g USING (cell_id) WHERE {where} AND n.pose_ok "
+                f"GROUP BY n.cell_id, {cell_cols}, n.ap_id ORDER BY min(n.stamp)", args).fetchall()
+            cells: dict[int, dict[str, Any]] = {}
+            for r in rows:                             # 칸마다 AP별 값 · 처음 지난 시각 순서
+                c = cells.setdefault(r["cell_id"], {k: r[k] for k in ("cell_id", "ix", "iy", "sector", "center_x", "center_y")}
+                                     | {"first": r["first"], "by_ap": {}})
+                c["first"] = min(c["first"], r["first"])
+                c["by_ap"][r["ap_id"]] = {k: r[k] for k in ("n", "median", "mean", "min", "max")}
+            out["survey"] = {"basis": basis, "totals": tot, "cells": sorted(cells.values(), key=lambda c: c["first"])}
+            # 실제 순서 — 표본(rssi 주기)을 시각순으로. 같은 시각의 여러 AP 표본은 한 번으로 셈
+            pts = conn.execute(f"SELECT DISTINCT n.stamp, n.cell_id, g.ix, g.iy FROM net_samples n JOIN grid_cells g USING (cell_id) "
+                               f"WHERE {where} AND n.pose_ok ORDER BY n.stamp", args).fetchall()
+            out["visits"] = cell_visits((r["stamp"], {k: r[k] for k in ("cell_id", "ix", "iy")}) for r in pts)
+            out["visits_source"] = "samples" if out["visits"] else None
+            out["candidates"] = conn.execute(
+                f"SELECT c.candidate_id, c.ref, c.score, c.status, c.outcome, c.reinspect_task_id, c.target_x, c.target_y, "
+                f"f.finding_id, {cell_cols} FROM candidates c LEFT JOIN grid_cells g ON g.cell_id::text = c.ref "
+                f"LEFT JOIN findings f USING (candidate_id) WHERE c.detect_task_id = %s ORDER BY c.candidate_id",
+                (task_id,)).fetchall()
+        elif t["type"] == "REINSPECTION":
+            c = conn.execute(
+                f"SELECT c.*, f.finding_id, f.status AS finding_status, {cell_cols} FROM candidates c "
+                f"LEFT JOIN grid_cells g ON g.cell_id::text = c.ref LEFT JOIN findings f USING (candidate_id) "
+                f"WHERE c.candidate_id = %s", (t["target_ref"],)).fetchone()
+            out["candidate"] = c
+            out["precise"] = conn.execute(
+                "SELECT p.ap_id, a.ssid, p.duration_s, p.n_samples, p.rssi_median, p.rssi_iqr, p.measured_at "
+                "FROM precise_measures p JOIN aps a USING (ap_id) WHERE p.task_id = %s ORDER BY a.ssid", (task_id,)).fetchall()
+            out["survey_cell"] = conn.execute(           # 후보가 된 측정 때 그 칸의 값 (비교용)
+                "SELECT n.ap_id, count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY n.rssi_dbm)::float8 AS median "
+                "FROM net_samples n WHERE n.run_id = %s AND n.cell_id::text = %s AND n.pose_ok GROUP BY n.ap_id",
+                (t["run_id"], c["ref"])).fetchall() if c and c["source"] == "NETWORK" else []
+        elif t["type"] == "FACILITY_CHECK":
+            out["facility"] = conn.execute(
+                "SELECT facility_id, facility_type, has_gauge, expected_x, expected_y, view_pose, is_active "
+                "FROM facilities WHERE map_id = %s AND facility_id = %s", (t["map_id"], t["target_ref"])).fetchone()
+            ins = conn.execute(
+                "SELECT inspection_id, detail, final, frontal, pose_retry, gauge_state, confidence, bbox, model_version, "
+                "inspected_at FROM inspections WHERE task_id = %s ORDER BY inspection_id", (task_id,)).fetchall()
+            for i in ins:
+                i["media"] = conn.execute("SELECT object_key, kind, size_bytes, captured_at FROM media "
+                                          "WHERE inspection_id = %s ORDER BY media_id", (i["inspection_id"],)).fetchall()
+            out["inspections"] = ins
+        if not out["visits"] and track:                # 측정 표본이 없거나 측정이 아닌 task — status(1 Hz) 위치로
+            out["visits"] = cell_visits((p["ts"], cell_key(grid, float(p["x"]), float(p["y"]))) for p in track)
+            out["visits_source"] = "status" if out["visits"] else None
+    return out
+
+
+def ui_extra() -> dict[str, Any]:
+    """/ws/ui에 함께 — 현재 지도 AP 활성 · 측정 AP(정보 탭 실시간), 순찰 시작 조건(모니터 버튼)"""
+    with pool.connection() as conn:
+        aps = conn.execute("SELECT a.ap_id, a.ssid, a.is_active, a.is_target FROM aps a JOIN maps m USING (map_id) "
+                           "WHERE m.is_active ORDER BY a.ap_id").fetchall()
+        f = start_form(conn)
+    return {"aps": aps, "start": {k: f[k] for k in ("can_start", "problems", "running", "target_ap")}
+            | {"robots": f["robots"]}}
+
+
 @app.websocket("/ws/ui")
 async def ws_ui(ws: WebSocket):
     """server page 모니터 — 1초마다 로봇 위치·상태를 보냄 (로그인 세션 쿠키로 확인)."""
@@ -1222,8 +2201,13 @@ async def ws_ui(ws: WebSocket):
     try:
         while True:
             snap = await run_in_threadpool(robots_snapshot)
+            extra = await run_in_threadpool(ui_extra)
+            cur = CURRENT_RUN["run_id"]
+            with MEM_LOCK:                             # 진행 중 순찰의 이벤트만 (순찰이 없으면 비움)
+                events = [e for e in RECENT_EVENTS if cur and e.get("run_id") == cur][-30:]
             await ws.send_json({"type": "robots", "ts": datetime.now(timezone.utc).isoformat(),
-                                "timeout_s": status_timeout(), "robots": snap})
+                                "timeout_s": status_timeout(), "robots": snap, "run_id": cur,
+                                "events": json.loads(json.dumps(events, default=str)), **extra})
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, RuntimeError):
         pass

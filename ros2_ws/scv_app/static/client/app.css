@@ -48,3 +48,14 @@ h2 .rid { font-family: var(--mono); font-size: 13px; color: var(--muted); font-w
 .screen .waiting {
   position: absolute; inset: 0; display: grid; place-items: center; color: #c7d2d9; font-size: 14px; text-align: center; padding: 20px;
 }
+
+/* 카메라 탭 (3-3차) — 영상 · 지도 · 이번 순찰 */
+.camgrid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.cmap { height: 420px; background: #e9edf0; }
+.camgrid .screen { min-height: 420px; }
+.cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.panel .grid { margin-top: 10px; }
+.cand { display: inline-block; padding: 1px 8px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 600; }
+img.thumb { height: 36px; border-radius: 4px; border: 1px solid var(--line); vertical-align: middle; }
+.mono { font-family: var(--mono); font-size: 12px; }
+@media (max-width: 1000px) { .camgrid, .cols2 { grid-template-columns: 1fr; } }

@@ -136,6 +136,12 @@ SELECT pg_temp.expect_fail('1-28 같은 지도에 같은 SSID 거부',
     $q$INSERT INTO aps (map_id, ssid) VALUES (900001, 'VERIFY_AP')$q$);
 SELECT pg_temp.expect_ok  ('1-29 다른 지도에는 같은 SSID 허용',
     $q$INSERT INTO aps (map_id, ssid) VALUES (900002, 'VERIFY_AP')$q$);
+SELECT pg_temp.expect_ok  ('1-34 측정 AP 지정 (3-3차 aps.is_target)',
+    $q$UPDATE aps SET is_target = true WHERE ap_id = 9001$q$);
+SELECT pg_temp.expect_fail('1-35 같은 지도에 측정 AP 두 개 거부 (aps_one_target_per_map)',
+    $q$INSERT INTO aps (map_id, ssid, is_target) VALUES (900001, 'VERIFY_AP_T', true)$q$);
+SELECT pg_temp.expect_ok  ('1-36 다른 지도에는 측정 AP 따로 허용',
+    $q$UPDATE aps SET is_target = true WHERE map_id = 900002 AND ssid = 'VERIFY_AP'$q$);
 SELECT pg_temp.expect_fail('1-30 같은 지도에 같은 설비 ID 거부',
     $q$INSERT INTO facilities (facility_id, map_id, facility_type, expected_x, expected_y, view_pose)
        VALUES ('v-ext-01', 900001, 'extinguisher', 1, 1, '{"x": 1, "y": 1.8, "yaw": 1.57}')$q$);
@@ -148,6 +154,19 @@ SELECT pg_temp.expect_fail('1-32 run 지도와 다른 지도의 설비 판정 �
 SELECT pg_temp.expect_fail('1-33 지도에 없는 설비의 판정 거부 (외래키 (map_id, facility_id))',
     $q$INSERT INTO inspections (inspection_uid, task_id, run_id, robot_id, map_id, facility_id, detail, final, frontal, model_version, inspected_at)
        VALUES (gen_random_uuid(), 'v-t002', 900001, 'robot4', 900001, 'v-ext-99', 'NORMAL', 'normal', true, 'yolo-v1', now())$q$);
+-- 3-3차 — 표본을 모은 측정 task (net_samples.task_id, 이력 「자세히」). 표본 수 확인(3-1)이 있으므로 넣고 바로 지움
+SELECT pg_temp.expect_ok  ('1-37 표본에 측정 task 연결 (net_samples.task_id)',
+    $q$DO $d$ BEGIN
+         INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, cell_id, task_id)
+         VALUES ('robot3', 900001, 10, now(), 3.5, 7.5, 0, true, 9001, -77, 900001, 'v-t001');
+         DELETE FROM net_samples WHERE run_id = 900001 AND seq = 10;
+       END $d$$q$);
+SELECT pg_temp.expect_fail('1-38 다른 로봇의 측정 task로 표본 저장 거부',
+    $q$INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, task_id)
+       VALUES ('robot4', 900001, 10, now(), 4.5, 7.5, 0, true, 9001, -70, 'v-t001')$q$);
+SELECT pg_temp.expect_fail('1-39 측정(SURVEY_SEGMENT)이 아닌 task로 표본 저장 거부',
+    $q$INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, task_id)
+       VALUES ('robot3', 900001, 11, now(), 3.5, 7.5, 0, true, 9001, -70, 'v-t003')$q$);
 
 -- ---------------------------------------------------------------------
 -- 2. 후보 → 재검증 → 확정 (트리거 규칙)
