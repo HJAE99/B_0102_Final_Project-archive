@@ -346,6 +346,7 @@ def settle(nav):
         nav.spin(yaw)
         while not nav.isTaskComplete():
             time.sleep(0.1)
+        time.sleep(1.0)   # spin 은 목표 각도에서 바로 끝나지만 로봇은 아직 도는 중 → 멈춘 뒤 반대로 (바로 돌면 한쪽으로 치우침, 10/13)
 
 
 def main():
