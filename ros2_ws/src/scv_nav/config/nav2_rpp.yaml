@@ -100,8 +100,8 @@ local_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.45
+        cost_scaling_factor: 10.0        # 원본 4.0. 측정 줄이 벽 inflation 에 걸려 경로가 줄에서 0.3 m 휘어 나감 (2026-10-13)
+        inflation_radius: 0.30           # 원본 0.45. 관제 경로 점의 벽 여유(obstacle_clearance_m 0.30)와 같게
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: true
@@ -171,8 +171,8 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.45
+        cost_scaling_factor: 10.0        # 원본 4.0. 측정 줄이 벽 inflation 에 걸려 경로가 줄에서 0.3 m 휘어 나감 (2026-10-13)
+        inflation_radius: 0.30           # 원본 0.45. 관제 경로 점의 벽 여유(obstacle_clearance_m 0.30)와 같게
       always_send_full_costmap: true
 
 planner_server:

@@ -54,6 +54,7 @@ TurtleBot4 Jazzy 기본 설정에서 **무엇을 왜 바꿨고, 그 값을 어�
 | 파라미터 | 값 | 확인 |
 | --- | --- | --- |
 | costmap `footprint` 반경 0.189 m · `inflation_radius` 0.45 | 기본 그대로 | 3-1 통로 폭 실측 최소 1.98 m → 로봇 0.38 m 빼도 양쪽 약 0.8 m |
+| costmap `inflation_radius` 0.45 → **0.30** · `cost_scaling_factor` 4.0 → **10.0** (global · local, `nav2_rpp.yaml` 만) | 10/13 밤 변경 | 관제 측정 경로(줄 간격 0.5 m, 벽 여유 0.30 m)가 벽 조각 옆에서 inflation 에 걸려 계획 경로가 줄에서 휘어 나감. 플래너 계산으로 비교(robot3, 주행 없이): y 4.5 줄 0.30 → 0.15 m, y 6.0 줄 0.21 → 0.06 m, y 4.0 줄 0.13 → 0.00 m. **주행 시험은 아직 안 함** — 벽에 0.30 m(로봇 가장자리 0.11 m)까지 붙을 수 있음 |
 | planner `tolerance` 0.5 | 기본 그대로 | 4-2: waypoint 하나만 막으면 0.5 m 안 근처를 지나가 막힘이 안 생김 → E1 시험은 통로 전체를 막아야 함 |
 | `controller_frequency` 20 Hz · `transform_tolerance` 0.1 | 기본 그대로 | 1-2 cmd_vel→odom 반응 지연 p95 218 ms (약 4주기). 기준 ≤ 250 ms 안이라 미반영 |
 | 지움 거리 0.35 m 와 waypoint 통과 | — | 4-2: 지나가는 점은 0.35 m 안이면 지난 것으로 봄 (1번 점 0.30 m 까지만 감) → 꼭 찍어야 하는 점은 마지막 점으로 |

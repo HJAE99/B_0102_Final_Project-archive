@@ -33,7 +33,7 @@ from .manager_core import (
     mask_cells,
     remeasure_targets,
 )
-from .route_builder import RouteBuilder
+from .route_builder import RouteBuilder, wall_points
 
 
 STATUS_QOS = QoSProfile(
@@ -97,6 +97,8 @@ class InspectionManager(Node):
         self.declare_parameter("cell_size", 0.5)
         self.declare_parameter("wall_bounds", [0.08, -0.05, 3.18, 6.48])
         self.declare_parameter("wall_clearance_m", 0.45)
+        # 로봇 반경 0.19 m + 벽과의 간격 0.10 m
+        self.declare_parameter("obstacle_clearance_m", 0.30)
         self.declare_parameter("shadow_dbm", -72.0)
         self.declare_parameter("max_remeasure_per_robot", 5)
         self.declare_parameter("include_unmeasured", True)
@@ -147,6 +149,10 @@ class InspectionManager(Node):
                 self.get_parameter("wall_clearance_m").value
             ),
             origin=self.map.origin,
+            walls=wall_points(self.map),
+            obstacle_clearance=float(
+                self.get_parameter("obstacle_clearance_m").value
+            ),
         )
 
         # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는

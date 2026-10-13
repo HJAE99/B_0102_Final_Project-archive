@@ -1,4 +1,5 @@
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,26 @@ class FacilityRoute:
     zone_id: str = ""
 
 
+def wall_points(info, occupied_thresh: float = 0.65) -> list[tuple[float, float]]:
+    """지도(P5 pgm)의 점유 픽셀 중심 [(x, y)] (map 좌표). info 는 read_map_yaml 결과."""
+    raw = Path(info.pgm).read_bytes()
+    head = re.match(rb"P5\s+(\d+)\s+(\d+)\s+(\d+)\s", raw)
+    if head is None:
+        raise ValueError(f"{info.pgm}: P5 pgm 이 아닙니다")
+    width, height, maxval = map(int, head.groups())
+    step = 2 if maxval > 255 else 1     # testbed_v1.pgm 은 16비트
+    data = raw[head.end():]
+    return [
+        (
+            info.origin[0] + (i % width + 0.5) * info.resolution,
+            info.origin[1] + (height - 1 - i // width + 0.5) * info.resolution,
+        )
+        for i in range(width * height)
+        if 1.0 - int.from_bytes(data[i * step:(i + 1) * step], "big") / maxval
+        > occupied_thresh
+    ]
+
+
 class RouteBuilder:
     def __init__(
         self,
@@ -30,6 +51,8 @@ class RouteBuilder:
         wall_bounds: tuple[float, ...] = (),
         wall_clearance: float = 0.0,
         origin: tuple[float, float] = (0.0, 0.0),
+        walls=(),
+        obstacle_clearance: float = 0.0,
     ):
         self.zones_file = Path(zones_file)
         self.facilities_file = Path(facilities_file)
@@ -38,6 +61,10 @@ class RouteBuilder:
         self.wall_bounds = tuple(wall_bounds)
         self.wall_clearance = wall_clearance
         self.origin = origin
+        # 지도의 점유 픽셀. 경로 점과 재측정 칸은 여기서 obstacle_clearance
+        # 이상 떨어뜨린다 (사각형 wall_bounds 는 안쪽 벽 조각을 모른다).
+        self.walls = list(walls)
+        self.obstacle_clearance = obstacle_clearance
         self.skipped_facilities: list[str] = []
 
     def zones(self) -> dict[str, dict]:
@@ -49,12 +76,16 @@ class RouteBuilder:
         c = self.wall_clearance
         return (xmin + c, ymin + c, xmax - c, ymax - c)
 
+    def clear_of_walls(self, x: float, y: float) -> bool:
+        c = self.obstacle_clearance
+        return all(math.hypot(x - wx, y - wy) >= c for wx, wy in self.walls)
+
     def reachable_cells(
         self,
         zone_id: str,
         grid_cells,
     ) -> set[tuple[int, int]]:
-        """중심이 zone 안이고 벽에서 wall_clearance 안쪽인 칸."""
+        """중심이 zone 안이고 벽에서 wall_clearance 안쪽, 점유 픽셀에서 떨어진 칸."""
         polygon = self.zones()[zone_id]["polygon"]
         xmin, ymin, xmax, ymax = self.inner_bounds()
         return {
@@ -63,6 +94,7 @@ class RouteBuilder:
             if in_polygon(cx, cy, polygon)
             and xmin <= cx <= xmax
             and ymin <= cy <= ymax
+            and self.clear_of_walls(cx, cy)
         }
 
     def build_survey_routes(
@@ -85,6 +117,7 @@ class RouteBuilder:
                 bounds=self.inner_bounds() if self.wall_bounds else None,
                 origin_y=self.origin[1],
                 start_x=float(dock["x"]) if dock else None,
+                clear=self.clear_of_walls if self.walls else None,
             )
 
             if not waypoints:
@@ -160,6 +193,7 @@ class RouteBuilder:
         bounds: tuple[float, float, float, float] | None = None,
         origin_y: float = 0.0,
         start_x: float | None = None,
+        clear=None,
     ) -> list[Waypoint]:
         if len(polygon) < 3:
             return []
@@ -234,6 +268,16 @@ class RouteBuilder:
                 if bounds is not None:
                     left_x = max(left_x, bounds[0])
                     right_x = min(right_x, bounds[2])
+                    if left_x >= right_x:
+                        continue
+
+                if clear is not None:
+                    # 줄 끝이 벽에 가까우면 안쪽으로 당긴다 (지도 해상도 5 cm 씩).
+                    # shortcut: 줄 끝만 본다, 줄 가운데를 벽이 가로지르는 지도가 생기면 줄을 나눈다
+                    while left_x < right_x and not clear(left_x, y):
+                        left_x += 0.05
+                    while left_x < right_x and not clear(right_x, y):
+                        right_x -= 0.05
                     if left_x >= right_x:
                         continue
 

@@ -72,7 +72,7 @@ ros2 topic echo /inspection/alerts           # 알림 보기
 # 순서: (1) 의 localization → (2) mission_executor → (1) 의 Nav2.  Dock 에서 Nav2 를 먼저 띄우면 bringup 이 중단된다
 # (1) localization · Nav2 — 저장소 뿌리에서, 반드시 이 launch 로 (params 안의 $(var namespace) 를 이 launch 가 바꿔 준다)
 ros2 launch turtlebot4_navigation localization.launch.py namespace:=/robot4 map:=ros2_ws/src/scv_nav/maps/testbed_v1.yaml params:=ros2_ws/src/scv_nav/config/localization.yaml
-ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 params_file:=ros2_ws/src/scv_nav/config/nav2.yaml
+ros2 launch turtlebot4_navigation nav2.launch.py namespace:=/robot4 params_file:=ros2_ws/src/scv_nav/config/nav2_rpp.yaml
 # (2) 작업 실행
 python3 ros2_ws/src/scv_nav/scripts/mission_executor.py --ros-args -r __ns:=/robot4
 # (3) RSSI 측정 (rssi_scanner · manual_tagger · 미리보기 히트맵)
@@ -100,7 +100,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 | --- | --- |
 | Nav2 를 띄운 뒤 | `ros2 topic info /robot4/keepout_mask -v` — 발행은 `inspection_manager` 하나, 구독은 global·local costmap 둘. costmap 이 `/robot4/global_costmap/keepout_mask` 에 붙어 있으면 설정이 틀린 것 |
 | 시작 | 관제 로그에 두 로봇 `작업 전송` 이 함께 나온다 |
-| 측정 | 섹터당 12점. x 0.53 ↔ 2.73, y 0.5 간격. 2–4분 |
+| 측정 | 섹터당 12점. x 0.53 ↔ 2.73, y 0.5 간격. 2–4분. 지도의 벽에서 0.30 m(`obstacle_clearance_m`) 안에 드는 줄 끝은 안쪽으로 당겨진다 (Z2 첫 점 x 1.68, Z1 6번 x 0.73, Z2 6번 x 1.43) |
 | 칸 확정 | 관제 로그 `칸 맵 확정: Z1: N칸 (음영 a · 미검출 b · low c)` 가 로봇 PC 히트맵과 맞는지 |
 | 재측정 | 로봇마다 최대 5칸(`max_remeasure_per_robot`). 알림 `CLEARED`(해제) · `REMAINS`(남음) |
 | 마스크 | 관제 로그 `회피 칸 N개 [...]`. RViz 의 `/{robot}/global_costmap/costmap` 에 그 칸이 장애물로 보인다 |
@@ -110,6 +110,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 ## 알아 둘 것
 
 - 샘플이 1개뿐인 칸(low)은 음영이어도 마스크에 넣지 않는다. 측정 속도가 빨라 low 가 많으면 음영 칸이 빠질 수 있다.
+- Nav2 설정은 주행 팀의 운영 파일 `nav2_rpp.yaml`(RPP)이다. `robot_pc.launch.py` 의 기본값도 이것이고, `nav2.yaml`(MPPI)은 비교용이다 (`nav2_params:=nav2.yaml`).
 - 마스크 설정(`nav2*.yaml` 의 keepout_layer)은 주행 팀의 것을 그대로 쓴다 (`map_topic: $(var namespace)/keepout_mask`, costmap 단위 `use_maximum: true`).
 - keepout_layer 는 inflation 앞에 있어서 회피 칸 둘레 0.45 m 도 비용이 붙는다. 좁은 곳에서는 길이 막힐 수 있다.
 - 로봇 없이 관제 PC 한 대로 흐름만 보려면 2절 대신
