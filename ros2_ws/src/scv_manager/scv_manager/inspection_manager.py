@@ -20,6 +20,7 @@ from std_srvs.srv import Trigger
 
 from .manager_core import (
     ManagerCore,
+    PatrolPhase,
     RobotStatusSnapshot,
     RunState,
     TaskState,
@@ -55,8 +56,7 @@ class InspectionManager(Node):
         super().__init__("inspection_manager")
 
         self.declare_parameter("robot_ids", ["robot4", "robot3"])
-        self.declare_parameter("survey_robot_id", "robot4")
-        self.declare_parameter("inspection_robot_id", "robot3")
+        self.declare_parameter("zone_ids", ["Z1", "Z2"])
         self.declare_parameter("offline_timeout_sec", 29.0)
         self.declare_parameter("require_robot_ready", True)
 
@@ -71,12 +71,7 @@ class InspectionManager(Node):
         )
 
         robot_ids = list(self.get_parameter("robot_ids").value)
-        self.survey_robot_id = str(
-            self.get_parameter("survey_robot_id").value
-        )
-        self.inspection_robot_id = str(
-            self.get_parameter("inspection_robot_id").value
-        )
+        zone_ids = list(self.get_parameter("zone_ids").value)
         self.offline_timeout_sec = float(
             self.get_parameter("offline_timeout_sec").value
         )
@@ -84,15 +79,17 @@ class InspectionManager(Node):
             self.get_parameter("require_robot_ready").value
         )
 
-        role_robot_ids = {
-            self.survey_robot_id,
-            self.inspection_robot_id,
-        }
-        if not role_robot_ids.issubset(robot_ids):
+        if not robot_ids or len(robot_ids) != len(zone_ids):
             raise ValueError(
-                "survey_robot_id와 inspection_robot_id는 "
-                "robot_ids에 포함되어야 합니다."
+                "robot_ids와 zone_ids는 비어 있지 않고 "
+                "항목 수가 같아야 합니다."
             )
+        if len(set(robot_ids)) != len(robot_ids):
+            raise ValueError("robot_ids에 중복된 로봇이 있습니다.")
+        if len(set(zone_ids)) != len(zone_ids):
+            raise ValueError("zone_ids에 중복된 구역이 있습니다.")
+
+        self.zone_by_robot = dict(zip(robot_ids, zone_ids))
 
         self.core = ManagerCore(
             robot_ids=robot_ids,
@@ -122,6 +119,7 @@ class InspectionManager(Node):
         self.active_goals = {}
         self.canceling_task_ids = set()
         self.seen_candidate_ids = set()
+        self.pending_candidates = {}
         self.seen_inspection_results = set()
         self.unavailable_action_servers = set()
         self.unready_robot_reasons = {}
@@ -144,12 +142,15 @@ class InspectionManager(Node):
             self.on_candidate,
             CANDIDATE_QOS,
         )
-        self.inspection_result_subscription = self.create_subscription(
-            InspectionResult,
-            f"/{self.inspection_robot_id}/inspect/result",
-            self.on_inspection_result,
-            INSPECTION_RESULT_QOS,
-        )
+        self.inspection_result_subscriptions = [
+            self.create_subscription(
+                InspectionResult,
+                f"/{robot_id}/inspect/result",
+                self.on_inspection_result,
+                INSPECTION_RESULT_QOS,
+            )
+            for robot_id in robot_ids
+        ]
 
         self.start_service = self.create_service(
             Trigger,
@@ -183,8 +184,10 @@ class InspectionManager(Node):
 
         self.get_logger().info(
             "inspection_manager 시작: "
-            f"RSSI={self.survey_robot_id}, "
-            f"설비={self.inspection_robot_id}"
+            + ", ".join(
+                f"{robot_id}={zone_id}"
+                for robot_id, zone_id in self.zone_by_robot.items()
+            )
         )
 
     def on_robot_status(self, robot_id: str, msg: RobotStatus) -> None:
@@ -206,6 +209,23 @@ class InspectionManager(Node):
 
     def check_robot_timeouts(self) -> None:
         for robot_id in self.core.check_offline(now=time.monotonic()):
+            failed_task_ids = self.core.fail_active_tasks_for_robot(
+                robot_id,
+                reason="OFFLINE",
+            )
+
+            for task_id in failed_task_ids:
+                goal_handle = self.active_goals.pop(task_id, None)
+
+                if goal_handle is not None:
+                    goal_handle.cancel_goal_async()
+
+                self.publish_task_failure(
+                    robot_id,
+                    task_id,
+                    "로봇이 OFFLINE 되어 작업을 종료했습니다.",
+                )
+
             self.get_logger().error(
                 f"{robot_id}: RobotStatus 수신 중단"
             )
@@ -219,6 +239,8 @@ class InspectionManager(Node):
                 ),
             )
 
+        self.complete_run_if_ready()
+
     def on_start(self, request, response):
         del request
 
@@ -229,44 +251,61 @@ class InspectionManager(Node):
 
         try:
             survey_routes = self.route_builder.build_survey_routes()
-            facility_routes = self.route_builder.build_facility_routes()
         except (OSError, KeyError, TypeError, ValueError) as exc:
             response.success = False
             response.message = f"경로 설정을 읽을 수 없습니다: {exc}"
             self.get_logger().error(response.message)
             return response
 
-        if not survey_routes or not facility_routes:
+        if not survey_routes:
             response.success = False
-            response.message = "zones.yaml과 facilities.yaml에 경로가 필요합니다."
+            response.message = "zones.yaml에 측정 경로가 필요합니다."
+            return response
+
+        routes_by_zone = {
+            route.zone_id: route
+            for route in survey_routes
+        }
+        missing_zone_ids = [
+            zone_id
+            for zone_id in self.zone_by_robot.values()
+            if zone_id not in routes_by_zone
+        ]
+
+        if missing_zone_ids:
+            response.success = False
+            response.message = (
+                "zones.yaml에 다음 구역이 없습니다: "
+                + ", ".join(missing_zone_ids)
+            )
             return response
 
         run_id = self.core.start_run(timestamp_sec=int(time.time()))
         self.seen_candidate_ids.clear()
+        self.pending_candidates.clear()
         self.seen_inspection_results.clear()
 
-        for index, route in enumerate(survey_routes, start=1):
+        for robot_id, zone_id in self.zone_by_robot.items():
+            route = routes_by_zone[zone_id]
             self.core.create_task(
-                task_id=f"run-{run_id}-survey-{index:03d}",
+                task_id=f"run-{run_id}-{robot_id}-survey",
                 run_id=run_id,
                 task_type=ExecuteTask.Goal.SURVEY_SEGMENT,
                 priority=1,
                 target_ref=route.zone_id,
-                preferred_robot_id=self.survey_robot_id,
-                allowed_robot_ids=(self.survey_robot_id,),
+                preferred_robot_id=robot_id,
+                allowed_robot_ids=(robot_id,),
                 waypoints=route.waypoints,
             )
-
-        for index, route in enumerate(facility_routes, start=1):
             self.core.create_task(
-                task_id=f"run-{run_id}-facility-{index:03d}",
+                task_id=f"run-{run_id}-{robot_id}-survey-dock",
                 run_id=run_id,
-                task_type=ExecuteTask.Goal.FACILITY_CHECK,
+                task_type=ExecuteTask.Goal.DOCK,
                 priority=1,
-                target_ref=route.facility_id,
-                preferred_robot_id=self.inspection_robot_id,
-                allowed_robot_ids=(self.inspection_robot_id,),
-                waypoints=route.waypoints,
+                target_ref="dock",
+                preferred_robot_id=robot_id,
+                allowed_robot_ids=(robot_id,),
+                waypoints=(),
             )
 
         task_count = len(self.core.tasks)
@@ -285,37 +324,43 @@ class InspectionManager(Node):
     def dispatch_next_task(self) -> None:
         if self.core.run_state != RunState.RUNNING:
             return
-        if self.active_goals:
+        if self.core.patrol_phase in {
+            PatrolPhase.WAITING_CANDIDATES,
+            PatrolPhase.WAITING_KEEPOUT,
+        }:
             return
 
-        task = self.core.next_pending_task()
-        if task is None:
-            self.complete_run_if_ready()
-            return
+        for robot_id in self.core.robots:
+            task = self.core.next_pending_task(robot_id)
+            if task is None:
+                continue
 
-        robot_id = task.preferred_robot_id
-        ready, reason = self.robot_readiness(robot_id)
-        if not ready:
-            previous_reason = self.unready_robot_reasons.get(robot_id)
+            ready, reason = self.robot_readiness(robot_id)
+            if not ready:
+                previous_reason = self.unready_robot_reasons.get(robot_id)
 
-            if previous_reason != reason:
-                self.get_logger().warning(f"{robot_id}: 작업 배정 대기 - {reason}")
-                self.unready_robot_reasons[robot_id] = reason
-            return
+                if previous_reason != reason:
+                    self.get_logger().warning(
+                        f"{robot_id}: 작업 배정 대기 - {reason}"
+                    )
+                    self.unready_robot_reasons[robot_id] = reason
+                continue
 
-        self.unready_robot_reasons.pop(robot_id, None)
+            self.unready_robot_reasons.pop(robot_id, None)
 
-        client = self.execute_task_clients[robot_id]
-        if not client.server_is_ready():
-            if robot_id not in self.unavailable_action_servers:
-                self.get_logger().warning(
-                    f"{robot_id}: ExecuteTask 액션 서버 대기 중"
-                )
-                self.unavailable_action_servers.add(robot_id)
-            return
+            client = self.execute_task_clients[robot_id]
+            if not client.server_is_ready():
+                if robot_id not in self.unavailable_action_servers:
+                    self.get_logger().warning(
+                        f"{robot_id}: ExecuteTask 액션 서버 대기 중"
+                    )
+                    self.unavailable_action_servers.add(robot_id)
+                continue
 
-        self.unavailable_action_servers.discard(robot_id)
-        self.send_task(task.task_id, robot_id)
+            self.unavailable_action_servers.discard(robot_id)
+            self.send_task(task.task_id, robot_id)
+
+        self.complete_run_if_ready()
 
     def robot_readiness(self, robot_id: str) -> tuple[bool, str]:
         if not self.require_robot_ready:
@@ -398,6 +443,13 @@ class InspectionManager(Node):
             )
             return
 
+        task = self.core.tasks.get(task_id)
+        if task is None or task.state != TaskState.ASSIGNED:
+            if goal_handle.accepted:
+                goal_handle.cancel_goal_async()
+            self.canceling_task_ids.discard(task_id)
+            return
+
         if not goal_handle.accepted:
             if task_id in self.canceling_task_ids:
                 self.canceling_task_ids.discard(task_id)
@@ -467,6 +519,13 @@ class InspectionManager(Node):
             )
             return
 
+        if task.state in {
+            TaskState.SUCCEEDED,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+        }:
+            return
+
         try:
             result = future.result().result
         except Exception as exc:
@@ -507,45 +566,70 @@ class InspectionManager(Node):
         self.complete_run_if_ready()
 
     def complete_run_if_ready(self) -> None:
-        if (
-            self.core.run_state == RunState.RUNNING
-            and self.core.all_tasks_terminal()
-        ):
-            run_id = self.core.run_id
-            self.core.complete_run()
-            self.publish_alert(
-                level=Alert.LEVEL_INFO,
-                code="RUN_COMPLETED",
-                robot_id="",
-                ref=str(run_id),
-                message=f"run_id={run_id}의 모든 작업이 종료되었습니다.",
+        if self.core.run_state != RunState.RUNNING:
+            return
+        if not self.core.all_tasks_terminal():
+            return
+
+        if self.core.patrol_phase == PatrolPhase.SURVEY:
+            self.core.patrol_phase = PatrolPhase.WAITING_CANDIDATES
+            self.get_logger().info(
+                f"run_id={self.core.run_id}: 두 섹터 측정·Dock 종료, "
+                "RSSI 후보 분석 완료 신호 대기"
             )
-            self.get_logger().info(f"run_id={run_id} 순찰 종료")
+            return
+
+        if self.core.patrol_phase == PatrolPhase.REINSPECTION:
+            self.core.patrol_phase = PatrolPhase.WAITING_KEEPOUT
+            self.get_logger().info(
+                f"run_id={self.core.run_id}: 재측정·Dock 종료, "
+                "최종 keepout 준비 신호 대기"
+            )
+            return
+
+        if self.core.patrol_phase != PatrolPhase.FACILITY:
+            return
+
+        run_id = self.core.run_id
+        self.core.complete_run()
+        self.publish_alert(
+            level=Alert.LEVEL_INFO,
+            code="RUN_COMPLETED",
+            robot_id="",
+            ref=str(run_id),
+            message=f"run_id={run_id}의 모든 작업이 종료되었습니다.",
+        )
+        self.get_logger().info(f"run_id={run_id} 순찰 종료")
 
     def on_candidate(self, msg: Candidate) -> None:
         if msg.source != Candidate.SOURCE_NETWORK:
             return
         if msg.run_id != self.core.run_id:
             return
-        if self.core.run_state == RunState.IDLE:
+        if self.core.run_state not in {
+            RunState.RUNNING,
+            RunState.ESTOPPED,
+        }:
             return
         if msg.candidate_id in self.seen_candidate_ids:
             return
+        if msg.robot_id not in self.core.robots:
+            self.get_logger().warning(
+                f"알 수 없는 후보 로봇 ID: {msg.robot_id}"
+            )
+            return
+        if self.core.patrol_phase not in {
+            PatrolPhase.SURVEY,
+            PatrolPhase.WAITING_CANDIDATES,
+        }:
+            self.get_logger().warning(
+                f"{self.core.patrol_phase.value} 단계에서 도착한 "
+                f"후보를 무시합니다: {msg.candidate_id}"
+            )
+            return
 
         self.seen_candidate_ids.add(msg.candidate_id)
-        self.core.reopen_run()
-        task_id = f"run-{msg.run_id}-reinspect-{msg.candidate_id}"
-        self.core.create_task(
-            task_id=task_id,
-            run_id=msg.run_id,
-            task_type=ExecuteTask.Goal.REINSPECTION,
-            priority=10,
-            target_ref=msg.ref,
-            preferred_robot_id=self.survey_robot_id,
-            allowed_robot_ids=(self.survey_robot_id,),
-            waypoints=(Waypoint(msg.x, msg.y, msg.yaw),),
-            candidate_id=msg.candidate_id,
-        )
+        self.pending_candidates[msg.candidate_id] = msg
         self.publish_alert(
             level=Alert.LEVEL_WARN,
             code="CANDIDATE",
@@ -553,12 +637,70 @@ class InspectionManager(Node):
             ref=msg.candidate_id,
             message=(
                 f"네트워크 후보 {msg.candidate_id}: "
-                f"{self.survey_robot_id} 재측정 작업 생성"
+                f"{msg.robot_id} 재측정 대기열에 저장"
             ),
         )
         self.get_logger().info(
-            f"후보 재측정 생성: {task_id} -> {self.survey_robot_id}"
+            f"후보 저장: {msg.candidate_id} -> {msg.robot_id}"
         )
+
+    def begin_reinspection_phase(self) -> int:
+        """RSSI 후보 분석 완료 신호를 받을 콜백에서 호출할 내부 진입점."""
+        if self.core.patrol_phase != PatrolPhase.WAITING_CANDIDATES:
+            raise RuntimeError("후보 분석 대기 단계가 아닙니다.")
+
+        self.core.patrol_phase = PatrolPhase.REINSPECTION
+        candidate_counts = {
+            robot_id: 0
+            for robot_id in self.core.robots
+        }
+
+        for candidate_id, candidate in self.pending_candidates.items():
+            robot_id = candidate.robot_id
+            candidate_counts[robot_id] += 1
+            self.core.create_task(
+                task_id=(
+                    f"run-{candidate.run_id}-{robot_id}-"
+                    f"reinspect-{candidate_id}"
+                ),
+                run_id=candidate.run_id,
+                task_type=ExecuteTask.Goal.REINSPECTION,
+                priority=10,
+                target_ref=candidate.ref,
+                preferred_robot_id=robot_id,
+                allowed_robot_ids=(robot_id,),
+                waypoints=(
+                    Waypoint(
+                        candidate.x,
+                        candidate.y,
+                        candidate.yaw,
+                    ),
+                ),
+                candidate_id=candidate_id,
+            )
+
+        for robot_id, candidate_count in candidate_counts.items():
+            if candidate_count == 0:
+                continue
+
+            self.core.create_task(
+                task_id=(
+                    f"run-{self.core.run_id}-{robot_id}-reinspect-dock"
+                ),
+                run_id=self.core.run_id,
+                task_type=ExecuteTask.Goal.DOCK,
+                priority=1,
+                target_ref="dock",
+                preferred_robot_id=robot_id,
+                allowed_robot_ids=(robot_id,),
+                waypoints=(),
+            )
+
+        candidate_count = len(self.pending_candidates)
+        if candidate_count == 0:
+            self.core.patrol_phase = PatrolPhase.WAITING_KEEPOUT
+
+        return candidate_count
 
     def on_inspection_result(self, msg: InspectionResult) -> None:
         if msg.run_id != self.core.run_id:
@@ -698,7 +840,7 @@ class InspectionManager(Node):
         else:
             response.message = (
                 "재배정 가능한 대기 작업이 없습니다. "
-                "현재 시나리오는 RSSI와 설비 로봇 역할이 고정되어 있습니다."
+                "현재 시나리오는 로봇별 담당 섹터가 고정되어 있습니다."
             )
         return response
 

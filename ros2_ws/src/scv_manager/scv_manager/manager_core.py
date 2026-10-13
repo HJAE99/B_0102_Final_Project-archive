@@ -10,6 +10,16 @@ class RunState(str, Enum):
     COMPLETED = "COMPLETED"
 
 
+class PatrolPhase(str, Enum):
+    IDLE = "IDLE"
+    SURVEY = "SURVEY"
+    WAITING_CANDIDATES = "WAITING_CANDIDATES"
+    REINSPECTION = "REINSPECTION"
+    WAITING_KEEPOUT = "WAITING_KEEPOUT"
+    FACILITY = "FACILITY"
+    COMPLETED = "COMPLETED"
+
+
 class TaskState(str, Enum):
     PENDING = "PENDING"
     ASSIGNED = "ASSIGNED"
@@ -90,6 +100,7 @@ class ManagerCore:
         }
         self.run_id = 0
         self.run_state = RunState.IDLE
+        self.patrol_phase = PatrolPhase.IDLE
         self.tasks: dict[str, TaskRecord] = {}
         self.task_order: list[str] = []
 
@@ -125,6 +136,7 @@ class ManagerCore:
 
         self.run_id = next_run_id
         self.run_state = RunState.RUNNING
+        self.patrol_phase = PatrolPhase.SURVEY
         self.tasks.clear()
         self.task_order.clear()
 
@@ -156,20 +168,34 @@ class ManagerCore:
         )
         self.task_order.append(task_id)
 
-    def next_pending_task(self) -> Optional[TaskRecord]:
+    def next_pending_task(self, robot_id: str) -> Optional[TaskRecord]:
         if self.run_state != RunState.RUNNING:
             return None
 
         if any(
-            task.state in {TaskState.ASSIGNED, TaskState.RUNNING}
+            task.robot_id == robot_id
+            and task.state in {TaskState.ASSIGNED, TaskState.RUNNING}
             for task in self.tasks.values()
         ):
             return None
 
         for task_id in self.task_order:
             task = self.tasks[task_id]
-            if task.state == TaskState.PENDING:
-                return task
+
+            if task.state != TaskState.PENDING:
+                continue
+            if (
+                task.allowed_robot_ids
+                and robot_id not in task.allowed_robot_ids
+            ):
+                continue
+            if (
+                task.preferred_robot_id
+                and task.preferred_robot_id != robot_id
+            ):
+                continue
+
+            return task
 
         return None
 
@@ -197,9 +223,34 @@ class ManagerCore:
         task.reason = reason
         task.state = (
             TaskState.BLOCKED
-            if reason.upper() == "BLOCKED"
+            if reason.upper().startswith("BLOCKED")
             else TaskState.FAILED
         )
+
+    def fail_active_tasks_for_robot(
+        self,
+        robot_id: str,
+        reason: str,
+    ) -> list[str]:
+        failed_task_ids = []
+
+        for task in self.tasks.values():
+            if task.robot_id != robot_id:
+                continue
+            if task.state not in {
+                TaskState.ASSIGNED,
+                TaskState.RUNNING,
+            }:
+                continue
+
+            self.finish_task(
+                task.task_id,
+                ok=False,
+                reason=reason,
+            )
+            failed_task_ids.append(task.task_id)
+
+        return failed_task_ids
 
     def requeue_task(self, task_id: str, reason: str = "") -> None:
         task = self.tasks[task_id]
@@ -231,6 +282,7 @@ class ManagerCore:
 
     def complete_run(self) -> None:
         self.run_state = RunState.COMPLETED
+        self.patrol_phase = PatrolPhase.COMPLETED
 
     def reopen_run(self) -> None:
         if self.run_state == RunState.COMPLETED:
