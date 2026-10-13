@@ -39,10 +39,11 @@ NORMAL_TOL = (0.05, 0.087)   # nav2_rpp.yaml general_goal_checker 와 같은 값
 PRECISE_TOL = (0.03, 0.052)  # 설비 점검 지점 3 cm, 3° (PLAN 0-1 목표 5 cm, 5° 안쪽으로)
 # shortcut: facilities.yaml id 앞 세 글자로 종류를 정함, 관제가 kind 를 보내 주면 그 값으로 바꿈
 KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_SHUTTER,
-        'EXL': InspectionResult.KIND_EXIT_LIGHT}
-# undock 직후 위치 (x m, y m, yaw 도). 2-1 pose_check 3회 평균 (docs/driving/data/2026-10-11_pose_check.csv)
+        'EXL': InspectionResult.KIND_EXIT_LIGHT, 'RCK': InspectionResult.KIND_RACK}
+# undock 직후 위치 (x m, y m, yaw 도). pose_check 3회 평균 — robot3 10/12 재측정(좌우 spin 으로 AMCL 수렴 뒤, yaw 범위 2.1°), robot4 10/11 (docs/driving/data/2026-10-1{1,2}_pose_check.csv)
+DOCK_BACKOFF = 0.3   # dock 명령 내리는 자리: undock 위치보다 dock 에서 이만큼 더 먼 곳 (m, 10/12 hhj 요청)
 DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
-HOME = {'/robot3': (2.855, 4.656, 176.7), '/robot4': (2.863, 0.948, 175.8)}
+HOME = {'/robot3': (2.806, 4.610, 179.9), '/robot4': (2.863, 0.948, 175.8)}
 
 
 class MissionExecutor(Node):
@@ -53,6 +54,7 @@ class MissionExecutor(Node):
         self.busy = False
         self.state = S.STATE_IDLE
         self.task = None   # 수행 중인 ExecuteTask.Goal
+        self.run_id = 0    # 마지막으로 받은 작업의 회차 (RobotStatus.msg: 작업 사이에도 유지)
         self.progress = 0.0
         self.warning = ''
         self.battery = 100.0
@@ -88,8 +90,9 @@ class MissionExecutor(Node):
         m = RobotStatus(robot_id=self.robot_id, state=self.state, battery_percent=self.battery,
                         accepting_tasks=self.battery > 30.0, progress=self.progress, warning=self.warning)
         m.stamp = self.get_clock().now().to_msg()
+        m.run_id = self.run_id
         if self.task:
-            m.task_id, m.run_id, m.task_type = self.task.task_id, self.task.run_id, self.task.type
+            m.task_id, m.task_type = self.task.task_id, self.task.type
         if self.pose:
             m.x, m.y, m.yaw = self.pose[:3]
             m.pose_ok = self.pose[3] <= self.pose_std_max
@@ -105,10 +108,12 @@ class MissionExecutor(Node):
 
     def execute(self, gh):
         g = gh.request
-        self.task, self.progress, self.warning = g, 0.0, ''
+        self.task, self.run_id, self.progress, self.warning = g, g.run_id, 0.0, ''
+        measured = None   # REINSPECTION 의 PreciseMeasure 결과 (interfaces v0.2.10)
         if self.state == S.STATE_DOCKED and g.type != T.DOCK:
             self.nav.undock()
-            self.nav.setInitialPose(self.home)   # 시작할 때와 같은 이유 (Dock 에서는 lidar 꺼짐)
+            localize(self.nav, self.home)   # 시작할 때와 같은 이유 (Dock 에서는 lidar 꺼짐)
+            settle(self.nav)
         self.state = S.STATE_EXECUTING
         self.get_logger().info(f'task {g.task_id} type={g.type} waypoints={len(g.waypoints)}')
         try:
@@ -121,7 +126,7 @@ class MissionExecutor(Node):
             elif g.type == T.REINSPECTION:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
                 if ok:
-                    ok, reason = self.measure(gh)
+                    ok, reason, measured = self.measure(gh)
             elif g.type == T.DOCK:
                 ok, reason = self.go_dock(gh, g.waypoints)
             else:
@@ -139,7 +144,10 @@ class MissionExecutor(Node):
             gh.succeed()
         else:
             gh.abort()
-        return ExecuteTask.Result(ok=ok, reason=reason)
+        r = ExecuteTask.Result(ok=ok, reason=reason)
+        if measured:
+            r.rssi_median, r.rssi_iqr, r.n_samples = measured.rssi_median, measured.rssi_iqr, measured.n_samples
+        return r
 
     def follow(self, gh, waypoints, precise=False):
         if not waypoints:
@@ -209,6 +217,7 @@ class MissionExecutor(Node):
     def drop_unreachable(self, left):
         # 앞 점 → 다음 점 경로가 없는 waypoint 를 뺌 (첫 구간은 지금 위치에서). 플래너 tolerance(0.5 m) 안이면 갈 수 있는 것으로 봄
         kept, prev = [], None
+        saved = self.nav.goal_handle, self.nav.result_future   # getPath 가 이 둘을 덮어써 cancelTask·isTaskComplete 가 주행 goal 을 못 봄 (10/13)
         for i, w in left:
             path = self.nav.getPath(prev or w, w, use_start=prev is not None)
             if path and path.poses:
@@ -216,34 +225,37 @@ class MissionExecutor(Node):
                 prev = w
             else:
                 self.get_logger().warn(f'waypoint {i} 로 가는 길 없음')
+        self.nav.goal_handle, self.nav.result_future = saved
         return kept
 
     def inspect(self, gh, g):
         adjust = []   # 피드백 콜백은 executor 스레드라서 nav 호출은 이 스레드에서 한다
         kind = KIND.get(g.target_ref[:3], 0)
-        goal = InspectFacility.Goal(task_id=g.task_id, facility_id=g.target_ref, kind=kind)
+        if not kind:
+            self.get_logger().warn(f'{g.target_ref}: KIND 표에 없는 종류 → kind 0 으로 보냄')
+        goal = InspectFacility.Goal(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
         res, reason = self.call_action(self.inspect_cli, goal, gh, lambda m: adjust.append(m.feedback),
-                                       lambda: self.do_adjust(adjust))
+                                       lambda: self.do_adjust(adjust, gh))
         if res is None:
             return False, reason
         return res.verdict != InspectionResult.UNCONFIRMED, f'verdict={res.verdict} {res.detail}'
 
-    def do_adjust(self, adjust):
-        while adjust:
+    def do_adjust(self, adjust, gh):
+        while adjust and not gh.is_cancel_requested:
             f = adjust.pop(0)
             self.get_logger().info(f'자세 보정 {f.attempt}: yaw={f.adjust_yaw:.2f} rad forward={f.adjust_forward_m:.2f} m')
             if f.adjust_yaw:
                 self.nav.spin(f.adjust_yaw)
-                self.wait_nav()
-            if f.adjust_forward_m > 0:   # 후진은 하지 않음 (뒤에 센서 없음)
+                self.wait_nav(gh)
+            if f.adjust_forward_m > 0 and not gh.is_cancel_requested:   # 후진은 하지 않음 (뒤에 센서 없음)
                 self.nav.driveOnHeading(f.adjust_forward_m)
-                self.wait_nav()
+                self.wait_nav(gh)
 
     def measure(self, gh):
         res, reason = self.call_action(self.precise_cli, PreciseMeasure.Goal(duration_s=30), gh)
         if res is None:
-            return False, reason
-        return True, f'median={res.rssi_median:.1f} iqr={res.rssi_iqr:.1f} n={res.n_samples}'
+            return False, reason, None
+        return True, f'median={res.rssi_median:.1f} iqr={res.rssi_iqr:.1f} n={res.n_samples}', res
 
     def call_action(self, client, goal, gh, on_fb=None, each=None):
         # 다른 노드의 액션을 보내고 결과를 기다림. 작업이 취소되면 그 액션도 취소
@@ -269,7 +281,7 @@ class MissionExecutor(Node):
         if self.nav.getDockedStatus():
             self.state = S.STATE_DOCKED
             return True, ''
-        ok, reason = self.follow(gh, waypoints) if waypoints else self.go_home()
+        ok, reason = self.follow(gh, waypoints) if waypoints else self.go_home(gh)
         if not ok:
             return ok, reason
         self.state = S.STATE_DOCKING
@@ -280,9 +292,15 @@ class MissionExecutor(Node):
         self.state = S.STATE_DOCKED
         return True, ''
 
-    def go_home(self):
-        self.nav.goToPose(self.home)
-        self.wait_nav()
+    def go_home(self, gh):
+        # dock 명령은 undock 위치에서 DOCK_BACKOFF 만큼 앞(dock 반대쪽)으로 나간 자리에서 내림
+        p, q = self.home.pose.position, self.home.pose.orientation
+        yaw = 2 * math.atan2(q.z, q.w)
+        self.nav.goToPose(self.nav.getPoseStamped(
+            [p.x + DOCK_BACKOFF * math.cos(yaw), p.y + DOCK_BACKOFF * math.sin(yaw)], math.degrees(yaw)))
+        self.wait_nav(gh)   # 쉬는 중 자동 dock 은 gh=None
+        if gh and gh.is_cancel_requested:   # cancelTask 는 status 를 안 바꿔 getResult 가 직전 결과(SUCCEEDED)를 줌 → 취소 자리에서 dock 하지 않게
+            return False, 'CANCELED'
         res = self.nav.getResult()
         return res == TaskResult.SUCCEEDED, '' if res == TaskResult.SUCCEEDED else str(res)
 
@@ -301,14 +319,44 @@ class MissionExecutor(Node):
         self.get_logger().info(f'goal 허용 오차 xy={xy} yaw={yaw} ok={ok}')
         return ok
 
-    def wait_nav(self):
+    def wait_nav(self, gh=None):
         while not self.nav.isTaskComplete():
+            if gh and gh.is_cancel_requested:   # 작업 취소(E7)면 보정 동작도 바로 멈춤
+                self.nav.cancelTask()
+                self.stop()
+                return
             time.sleep(0.1)
 
     def stop(self):
         for _ in range(5):
             self.cmd_pub.publish(TwistStamped())
             time.sleep(0.05)
+
+
+def localize(nav, home):
+    # setInitialPose 는 공분산 0 이라 AMCL 이 몇 도 틀린 것도 못 고침 (10/12 robot3 6° 틀어짐)
+    # → 위치 0.15 m, 각도 10° 불확실성을 넣어 보내고 amcl_pose 가 올 때까지 반복
+    msg = PoseWithCovarianceStamped()
+    msg.header.frame_id = 'map'
+    msg.pose.pose = home.pose
+    cov = [0.0] * 36
+    cov[0] = cov[7] = 0.15 ** 2
+    cov[35] = math.radians(10.0) ** 2
+    msg.pose.covariance = cov
+    nav.initial_pose_received = False
+    while not nav.initial_pose_received:
+        msg.header.stamp = nav.get_clock().now().to_msg()
+        nav.initial_pose_pub.publish(msg)
+        rclpy.spin_once(nav, timeout_sec=1.0)
+
+
+def settle(nav):
+    # 제자리에서 좌우로 0.26 rad(15°) 돌려 AMCL 이 라이다로 방향을 맞추게 함 (10/12 시험: ±0.5 두 번과 차이 없음)
+    for yaw in (0.26, -0.26):
+        nav.spin(yaw)
+        while not nav.isTaskComplete():
+            time.sleep(0.1)
+        time.sleep(1.0)   # spin 은 목표 각도에서 바로 끝나지만 로봇은 아직 도는 중 → 멈춘 뒤 반대로 (바로 돌면 한쪽으로 치우침, 10/13)
 
 
 def main():
@@ -322,9 +370,10 @@ def main():
     home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
     if nav.getDockedStatus():
         nav.undock()
-    # undock 상태로 시작해도 home 을 줌. 안 주면 waitUntilNav2Active 가 (0,0) 을 초기 pose 로 보냄
-    nav.setInitialPose(home)
-    nav.waitUntilNav2Active()
+    # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
+    localize(nav, home)
+    nav.waitUntilNav2Active(localizer='robot_localization')   # 'amcl' 이면 공분산 0 인 (0,0) 초기 pose 를 다시 보냄
+    settle(nav)
     node = MissionExecutor(nav, home)
     ex = MultiThreadedExecutor()
     ex.add_node(node)

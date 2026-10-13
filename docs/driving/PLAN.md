@@ -72,15 +72,15 @@ Jazzy controller_server 컨트롤러 중 **MPPI와 RPP 두 개만** 비교한다
 | 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 — **완료 10/12**: robot3 재계획 3.87·1.09초, `{ns}/keepout_mask` 구독·`use_maximum` costmap 단위 수정. 실제 발행(관제 inspection_manager) 미구현 | 3-3 · 마스크 형식(RSSI) |
 | 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 — **완료 10/12**: 5초 BLOCKED, 길 없는 점만 건너뜀(출발 전 확인·5초 확인), 주행 중 막힘 10.4초 | 3-3 |
 
-> ⚠ **4-1 시작 시 keepout_layer 를 반드시 켤 것.** 지금 `config/nav2.yaml`·`nav2_rpp.yaml` 의 global·local costmap `keepout_layer` 4곳이 `enabled: false` (2026-10-11). `keepout_mask` 발행자가 없으면 StaticLayer 가 준비되지 않아 costmap 전체가 "Costmap timed out waiting for update" → 모든 goal 경로 계획이 실패했기 때문. 켤 때는 RSSI 마스크(또는 `fake_servers.py -p mask:=true`)가 먼저 발행되고 있어야 함.
+> ℹ **keepout_layer 는 10/12 부터 켜져 있음** (`config/nav2.yaml`·`nav2_rpp.yaml` global·local 4곳 `enabled: true`). `keepout_mask` 발행자가 없으면 costmap 이 준비되지 않아 모든 경로 계획이 실패하므로, 관제(inspection_manager)가 시작부터 빈 마스크를 냄 (interfaces v0.2.8). 관제 없이 시험할 때는 `fake_servers.py -p mask:=true` 를 먼저 켤 것.
 
 ## 5단계. 작업 실행 (mission_executor)
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
-| 5-1 | execute_task 서버(IF-11) + SURVEY 흐름 (원 5) | 가짜 manager로 작업 왕복·취소 | scv_msgs(PM) |
-| 5-2 | FACILITY 흐름(inspect_facility·자세 보정) · REINSPECTION(precise) (원 6) | 정밀 goal checker 사용, 비전·RSSI와 1건씩 실기 | 5-1 · 3-4 |
-| 5-3 | 예외 E1·E2·E4·E7 + DOCK + status 1 Hz (IF-12) (원 7) | 관제 PC 끊김에도 완주, 비상정지 시 goal 취소·cmd_vel 0 | 5-1 |
+| 5-1 | execute_task 서버(IF-11) + SURVEY 흐름 (원 5) | 가짜 manager로 작업 왕복·취소 — **완료 10/12** (취소 0.2초 정지) | scv_msgs(PM) |
+| 5-2 | FACILITY 흐름(inspect_facility·자세 보정) · REINSPECTION(precise) (원 6) | 정밀 goal checker 사용, 비전·RSSI와 1건씩 실기 — **가짜 서버로 완료 10/12** (정밀 0.03 m/3°), 실제 비전·RSSI 실기 남음 | 5-1 · 3-4 |
+| 5-3 | 예외 E1·E2·E4·E7 + DOCK + status 1 Hz (IF-12) (원 7) | 관제 PC 끊김에도 완주, 비상정지 시 goal 취소·cmd_vel 0 — **10/12**: E1·E2(30% 거절)·DOCK·status 1 Hz 확인, E2 20% 자동 dock·E4·E7 남음 | 5-1 |
 
 ## 6단계. 두 대·통합
 

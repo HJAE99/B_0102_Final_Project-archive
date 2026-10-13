@@ -31,6 +31,7 @@ def main():
     cancel_after = node.declare_parameter('cancel_after', 0.0).value
     kind = node.declare_parameter('type', 'survey').value
     target = node.declare_parameter('target', 'EXT-01').value
+    run_id = node.declare_parameter('run_id', 1).value   # 작업 뒤에도 RobotStatus.run_id 에 남는지 확인용
     client = ActionClient(node, ExecuteTask, 'execute_task')
     if not client.wait_for_server(timeout_sec=10.0):
         node.get_logger().error('execute_task 서버 없음 — mission_executor 실행·namespace 확인')
@@ -39,7 +40,7 @@ def main():
     types = {'survey': ExecuteTask.Goal.SURVEY_SEGMENT, 'facility': ExecuteTask.Goal.FACILITY_CHECK,
              'reinspection': ExecuteTask.Goal.REINSPECTION, 'dock': ExecuteTask.Goal.DOCK}
     wps = [] if kind == 'dock' else [pose(*w) for w in WAYPOINTS]   # dock 은 waypoint 없이 → undock 위치로
-    goal = ExecuteTask.Goal(task_id='fake-1', type=types[kind], waypoints=wps, target_ref=target)
+    goal = ExecuteTask.Goal(task_id='fake-1', type=types[kind], waypoints=wps, target_ref=target, run_id=run_id)
     fb = lambda m: node.get_logger().info(f'feedback: {m.feedback.waypoint_index} ({m.feedback.progress:.0%})')
     future = client.send_goal_async(goal, feedback_callback=fb)
     rclpy.spin_until_future_complete(node, future)
@@ -58,7 +59,8 @@ def main():
             rclpy.spin_until_future_complete(node, gh.cancel_goal_async())
             cancel_after = 0.0
     r = result.result()
-    node.get_logger().info(f'결과: status={r.status} ok={r.result.ok} reason="{r.result.reason}"')
+    node.get_logger().info(f'결과: status={r.status} ok={r.result.ok} reason="{r.result.reason}" '
+                           f'rssi_median={r.result.rssi_median:.1f} rssi_iqr={r.result.rssi_iqr:.1f} n_samples={r.result.n_samples}')
     rclpy.shutdown()
 
 
