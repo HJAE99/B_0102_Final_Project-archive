@@ -299,6 +299,8 @@ class MissionExecutor(Node):
         self.nav.goToPose(self.nav.getPoseStamped(
             [p.x + DOCK_BACKOFF * math.cos(yaw), p.y + DOCK_BACKOFF * math.sin(yaw)], math.degrees(yaw)))
         self.wait_nav(gh)   # 쉬는 중 자동 dock 은 gh=None
+        if gh and gh.is_cancel_requested:   # cancelTask 는 status 를 안 바꿔 getResult 가 직전 결과(SUCCEEDED)를 줌 → 취소 자리에서 dock 하지 않게
+            return False, 'CANCELED'
         res = self.nav.getResult()
         return res == TaskResult.SUCCEEDED, '' if res == TaskResult.SUCCEEDED else str(res)
 
