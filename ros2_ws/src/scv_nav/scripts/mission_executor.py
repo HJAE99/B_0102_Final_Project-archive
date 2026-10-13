@@ -217,6 +217,7 @@ class MissionExecutor(Node):
     def drop_unreachable(self, left):
         # 앞 점 → 다음 점 경로가 없는 waypoint 를 뺌 (첫 구간은 지금 위치에서). 플래너 tolerance(0.5 m) 안이면 갈 수 있는 것으로 봄
         kept, prev = [], None
+        saved = self.nav.goal_handle, self.nav.result_future   # getPath 가 이 둘을 덮어써 cancelTask·isTaskComplete 가 주행 goal 을 못 봄 (10/13)
         for i, w in left:
             path = self.nav.getPath(prev or w, w, use_start=prev is not None)
             if path and path.poses:
@@ -224,6 +225,7 @@ class MissionExecutor(Node):
                 prev = w
             else:
                 self.get_logger().warn(f'waypoint {i} 로 가는 길 없음')
+        self.nav.goal_handle, self.nav.result_future = saved
         return kept
 
     def inspect(self, gh, g):
