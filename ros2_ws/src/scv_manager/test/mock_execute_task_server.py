@@ -201,9 +201,12 @@ class MockExecuteTaskServer(Node):
             cleared = request.target_ref in list(
                 self.get_parameter("clear_on_remeasure").value
             )
-            # mission_executor 와 같은 꼴 (Result 필드는 채우지 않음)
+            # mission_executor 와 같은 꼴 (Result 필드와 reason 둘 다)
+            result.rssi_median = -60.0 if cleared else -80.0
+            result.rssi_iqr = 2.0
+            result.n_samples = 30
             result.reason = (
-                f"median={-60.0 if cleared else -80.0:.1f} iqr=2.0 n=30"
+                f"median={result.rssi_median:.1f} iqr=2.0 n=30"
             )
 
         return result

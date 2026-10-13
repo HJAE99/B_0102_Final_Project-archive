@@ -6,6 +6,10 @@
 - 기준 HEAD: `7da29cc` (`main e24ffd5` 동시 주행 시나리오 반영)
 - 인수인계 사유: 담당자 건강상 조퇴
 - Git 상태: 아래 구현 변경은 **아직 커밋·push하지 않은 로컬 변경**
+- **10/13 갱신 (현준)**: `temp/bundle-test-1012`(`faa34c4`)와 `feature/driving`(`630f07a`)을
+  `feature/control`에 병합했다(`200f4f3`·`e1b27ee`, 10/13 밤 push). 2절 표, 5.7절, 6절의 「10/13」 줄,
+  7절이 병합 뒤 상태다. 1·3·4·8절과 5.1–5.6절은 10/12 인수인계 당시 기록 그대로다.
+  남은 일은 `docs/control/PLAN.md`를 따른다.
 
 ## 1. 요약
 
@@ -41,12 +45,15 @@ SURVEY
 
 | 단계 | 현재 구현 상태 | 진입·종료 조건 |
 | --- | --- | --- |
-| `SURVEY` | 구현·ROS 시험 완료 | 두 로봇에 섹터 측정 후 Dock 배정 |
-| `WAITING_CANDIDATES` | 구현 완료 | 두 로봇의 측정·Dock 작업 종료 후 진입 |
-| `REINSPECTION` | 작업 생성 로직·단위 시험 완료 | 향후 RSSI 후보 분석 완료 콜백에서 `begin_reinspection_phase()` 호출 필요 |
-| `WAITING_KEEPOUT` | 내부 상태 구현 완료 | 재측정·Dock 종료 또는 후보 0건일 때 진입 |
-| `FACILITY` | 인터페이스 결정 대기 | 최종 keepout READY와 설비 섹터 배정 기준 필요 |
-| `COMPLETED` | 기존 완료 처리 유지 | 모든 시설 점검·Dock 작업 종료 후 진입 예정 |
+| `SURVEY` | 구현·ROS 시험 완료 | 두 로봇에 섹터 측정 후 Dock 배정. 경로는 벽에서 0.45 m 안쪽, 줄은 칸 중심 |
+| `WAITING_CANDIDATES` | 구현·mock 시험 완료 (10/13) | 두 로봇의 측정·Dock 종료 후 진입. `cell_map_writer`의 `commit_Z1`·`commit_Z2`를 부르고, 답이 오거나 10초가 지나면 칸 맵을 읽어 재측정 칸을 고른다 |
+| `REINSPECTION` | 구현·mock 시험 완료 (10/13) | 미검출 → 음영 → 미측정 순, 로봇마다 최대 5칸. 결과로 칸 상태를 다시 써서 `CLEARED`·`REMAINS` 알림 |
+| `WAITING_KEEPOUT` | 구현·mock 시험 완료 (10/13) | 재측정·Dock 종료 또는 후보 0건일 때 진입. 다음 dispatch 주기에 바로 `FACILITY`로 |
+| `FACILITY` | 구현·mock 시험 완료 (10/13) | 남은 칸(표본 2개 이상, Dock 반경 0.6 m 제외)을 두 로봇 마스크로 내고, 관측 자리가 든 섹터의 로봇에 점검·Dock 배정 |
+| `COMPLETED` | 구현·mock 시험 완료 (10/13) | 모든 작업 종료 후 회차를 닫고(`done`·`partial`) 마스크를 비운다 |
+
+단계는 회차 전체에 하나다. 먼저 끝난 로봇은 다른 로봇을 기다린다 (`docs/control/PLAN.md` 3-1).
+실기로는 10/12 밤 robot4 한 대로 재측정 대상 선정까지만 확인됐다.
 
 ## 3. 완료한 구현
 
@@ -261,6 +268,22 @@ candidate-z2-01 → robot3
 
 두 로봇 subscription 모두 정상 동작했다.
 
+### 5.7 병합 뒤 빌드·시험 (10/13)
+
+- 빌드: `scv_msgs`·`scv_bringup`·`scv_survey`·`scv_manager`·`scv_nav` 성공
+- 단위 시험: `scv_manager/test` + `scv_survey/test` 87 passed
+- mock 한 회차 (관제 PC 한 대, `cell_map_writer` + `inspection_manager` +
+  `mock_execute_task_server.py`, 칸 맵은 파일, 격리 도메인):
+
+```text
+측정·Dock → 칸 맵 확정 Z1 30칸(음영 1 · 미검출 1 · low 7), Z2 30칸(음영 1 · 미검출 0 · low 7)
+→ 재측정 3칸 (CLEARED 1 · REMAINS 2) → Dock → 회피 칸 2개
+→ SHT-02 점검, SHT-01 은 KEEPOUT_BLOCKED, 좌표 없는 설비 FACILITY_SKIPPED → Dock → RUN_COMPLETED
+```
+
+재현 명령은 `ros2_ws/src/scv_manager/BUNDLE_TEST.md`에 있다. 실제 로봇·Nav2·DB 백엔드로는
+병합 뒤 돌리지 않았다.
+
 ## 6. 반드시 합의할 인터페이스·정책
 
 ### 6.1 RSSI 후보 분석 완료 신호
@@ -277,6 +300,10 @@ candidate-z2-01 → robot3
 `begin_reinspection_phase()`를 호출하면 된다. 새 메시지·서비스 소유자는
 PM과 RSSI 팀이 정해야 한다.
 
+10/13: 완료 신호 대신 관제가 `cell_map_writer`의 확정 서비스를 부르고 칸 맵을 직접 읽어
+재측정 칸을 고르는 것으로 풀었다. IF-15 후보 토픽도 여전히 받으므로 두 경로를 함께 켜면
+같은 칸이 두 번 들어올 수 있다 (PLAN D3 · 3-6, 미정).
+
 ### 6.2 최종 keepout READY/ACK
 
 관제는 재측정이 끝난 뒤 남은 음영·미검출 칸이 두 로봇의 주행 costmap에
@@ -292,6 +319,10 @@ PM과 RSSI 팀이 정해야 한다.
 현재 IF-10 문서가 `/robot3`만 대상으로 되어 있다면 두 로봇 대상으로 수정해야
 한다.
 
+10/13: 관제가 `/robot4/keepout_mask`·`/robot3/keepout_mask`를 직접 낸다 (켜자마자 빈 마스크,
+점검 전 남은 칸, 종료 뒤 다시 빈 마스크). READY/ACK는 없다. 마스크를 낸 다음 dispatch
+주기(0.5초)에 점검 작업을 보내며 costmap 반영은 확인하지 않는다 (PLAN 3-2).
+
 ### 6.3 설비의 섹터 배정
 
 `facilities.yaml`에는 `zone_id`가 없다. 따라서 관제가 설비를 robot4·robot3 중
@@ -306,6 +337,9 @@ PM과 RSSI 팀이 정해야 한다.
 
 좌표 polygon 포함 여부로 자동 계산하는 방법도 가능하지만, 경계 설비 처리까지
 고려하면 명시적인 `zone_id`가 더 안전하다.
+
+10/13: 관측 자리(`view`)가 든 섹터의 polygon으로 정한다. `zone_id` 명시는 아직 결정되지
+않았다 (PLAN 3-10).
 
 ### 6.4 OFFLINE·BLOCKED 섹터 정책
 
@@ -329,7 +363,7 @@ PM과 RSSI 팀이 정해야 한다.
 ### 6.6 주행·공유 문서 확인
 
 - 주행 `mission_executor`에 `RCK` 시설 ID를 `KIND_RACK`으로 변환하는 매핑이
-  필요하다.
+  필요하다. (10/13: 주행 `86ceff8`에서 끝났고 이 브랜치에 병합됐다.)
 - 재측정은 현재 후보 한 건당 action 한 건으로 관제에서 구현했다. 주행팀에 이
   계약을 공유해야 한다.
 - 관제 B와 다음 Alert code를 공유하고 `interfaces.md`에 반영해야 한다.
@@ -345,19 +379,26 @@ TASK_FAILED
 
 ## 7. 현재 제한 사항
 
-- 운영 `zones.yaml`의 Z1·Z2 polygon이 모두 0이라 `/inspection/start`는 정상적으로
-  거절된다.
-- 운영 `facilities.yaml`의 위치·관측 자세도 0이며 섹터 정보가 없다.
-- RSSI 브랜치의 `network_map_engine`에는 아직 Candidate와 최종 keepout 생성
-  기능이 확인되지 않았다.
-- 비전 브랜치에는 두 로봇용 `InspectFacility` 액션 서버와
-  `InspectionResult` 발행 구현이 확인되지 않았다.
-- 따라서 실제 전체 시나리오의 `REINSPECTION → FACILITY → COMPLETED` ROS
-  통합 시험은 아직 수행할 수 없다.
-- 관제 내부 재측정 작업 생성 로직은 단위 시험으로 검증했지만, RSSI 완료 신호가
-  없어 ROS 서비스·토픽으로 진입시키지는 않았다.
+10/13 병합 뒤 기준이다.
+
+- 단계가 회차 전체에 하나라 먼저 끝난 로봇이 다른 로봇을 기다린다.
+- 실기 확인은 robot4 한 대로 재측정 대상 선정까지다 (10/12 밤, 임시 브랜치).
+  재측정 이후 · 두 대 동시 · DB 백엔드는 실기로 확인된 적이 없다.
+- `scv_manager`가 `scv_survey`의 `cellmap_store`·`cell_map_writer`·`precise_server`에
+  기댄다. 이 세 파일은 `feature/survey`·`main`에는 아직 없다.
+- 운영 `facilities.yaml`은 SHT-01·SHT-02만 좌표가 있다. EXT-01·EXL-01·RCK-01은
+  (0, 0)이라 건너뛴다 (`FACILITY_SKIPPED`). robot3 섹터에는 점검할 설비가 없다.
+- 비전의 `inspect_facility` 서버가 없어 `robot_pc.launch.py`는 가짜 비전
+  (`mock_inspect_facility_server.py`, 2초 뒤 NORMAL)을 띄운다.
+- 관제 웹(`scv_app`)과 `inspection_manager`는 이어져 있지 않다 (PLAN D2).
+- 재측정은 로봇마다 5칸에서 잘리고, 표본 1개(low) 칸은 마스크에 넣지 않는다.
+- 관제를 다시 켜면 진행 중이던 회차·작업 상태가 사라진다.
+- `apply_remeasure`는 `n_samples`가 0이면 `reason` 문자열에서 값을 다시 읽는다 (PLAN 3-12).
 
 ## 8. 다음 담당자 작업 순서
+
+10/13: 아래 1·2·4·7번은 끝났고, 8번은 구역 좌표와 셔터 두 건까지 들어갔다. 남은 일은
+`docs/control/PLAN.md` 4절을 따른다.
 
 1. 현재 diff를 검토하고 테스트를 한 번 재실행한다.
 2. 변경 내용을 커밋하고 `feature/control`에 push한다.

@@ -1,4 +1,4 @@
-# 묶음 시험 실행 순서 (RSSI + 주행 + 관제) — 임시 브랜치 `temp/bundle-test-1012`
+# 묶음 시험 실행 순서 (RSSI + 주행 + 관제) — `feature/control` (10/13 `temp/bundle-test-1012` 에서 병합)
 
 시연과 같은 배치: 로봇마다 로봇 PC(MSI) 한 대, 관제 PC(VICTUS) 한 대.
 로봇은 PM 이 허락하고 다른 팀이 쓰지 않을 때만 움직인다.
@@ -44,7 +44,7 @@ ros2 service call /inspection/start std_srvs/srv/Trigger
 ## 0. 모든 PC
 
 ```bash
-git fetch && git checkout temp/bundle-test-1012 && git pull
+git fetch && git checkout feature/control && git pull
 cd ros2_ws && colcon build --packages-select scv_msgs scv_bringup scv_survey scv_manager scv_nav
 source install/setup.bash
 ```
