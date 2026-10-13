@@ -231,6 +231,8 @@ class MissionExecutor(Node):
     def inspect(self, gh, g):
         adjust = []   # 피드백 콜백은 executor 스레드라서 nav 호출은 이 스레드에서 한다
         kind = KIND.get(g.target_ref[:3], 0)
+        if not kind:
+            self.get_logger().warn(f'{g.target_ref}: KIND 표에 없는 종류 → kind 0 으로 보냄')
         goal = InspectFacility.Goal(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
         res, reason = self.call_action(self.inspect_cli, goal, gh, lambda m: adjust.append(m.feedback),
                                        lambda: self.do_adjust(adjust, gh))
@@ -279,7 +281,7 @@ class MissionExecutor(Node):
         if self.nav.getDockedStatus():
             self.state = S.STATE_DOCKED
             return True, ''
-        ok, reason = self.follow(gh, waypoints) if waypoints else self.go_home()
+        ok, reason = self.follow(gh, waypoints) if waypoints else self.go_home(gh)
         if not ok:
             return ok, reason
         self.state = S.STATE_DOCKING
@@ -290,13 +292,13 @@ class MissionExecutor(Node):
         self.state = S.STATE_DOCKED
         return True, ''
 
-    def go_home(self):
+    def go_home(self, gh):
         # dock 명령은 undock 위치에서 DOCK_BACKOFF 만큼 앞(dock 반대쪽)으로 나간 자리에서 내림
         p, q = self.home.pose.position, self.home.pose.orientation
         yaw = 2 * math.atan2(q.z, q.w)
         self.nav.goToPose(self.nav.getPoseStamped(
             [p.x + DOCK_BACKOFF * math.cos(yaw), p.y + DOCK_BACKOFF * math.sin(yaw)], math.degrees(yaw)))
-        self.wait_nav()
+        self.wait_nav(gh)   # 쉬는 중 자동 dock 은 gh=None
         res = self.nav.getResult()
         return res == TaskResult.SUCCEEDED, '' if res == TaskResult.SUCCEEDED else str(res)
 

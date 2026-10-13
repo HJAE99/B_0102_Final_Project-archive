@@ -6,6 +6,7 @@
 #   python3 fake_servers.py --ros-args -r __ns:=/robot3
 #   python3 fake_servers.py --ros-args -r __ns:=/robot3 -p mask:=true -p rect:="[1.0, 2.0, 2.0, 3.0]" -p clear_after:=30.0
 # rect = [x0, y0, x1, y1] (m, map 좌표). clear_after 초 뒤 빈 마스크로 바꿔 해제도 확인 (0 이면 해제 안 함)
+#   -p adjust_yaw:=1.5 -p adjust_forward:=0.3   # 자세 보정 피드백 값 (기본 0.1 rad·0.05 m). 보정 중 취소 시험용
 import time
 
 import rclpy
@@ -32,12 +33,13 @@ class FakeServers(Node):
             self.clear_after = self.declare_parameter('clear_after', 0.0).value
             self.mask_pub = self.create_publisher(OccupancyGrid, 'keepout_mask', LATCHED)
             self.create_subscription(OccupancyGrid, 'map', self.on_map, LATCHED)
+        self.adjust = (self.declare_parameter('adjust_yaw', 0.1).value, self.declare_parameter('adjust_forward', 0.05).value)   # 보정 중 취소 시험용
         self.get_logger().info('fake_servers ready')
 
     def inspect(self, gh):
         g = gh.request
         self.get_logger().info(f'inspect_facility {g.facility_id} kind={g.kind} run_id={g.run_id}')
-        gh.publish_feedback(InspectFacility.Feedback(attempt=1, adjust_yaw=0.1, adjust_forward_m=0.05,
+        gh.publish_feedback(InspectFacility.Feedback(attempt=1, adjust_yaw=self.adjust[0], adjust_forward_m=self.adjust[1],
                                                      note='fake: 조금 돌고 앞으로'))
         time.sleep(2.0)
         gh.succeed()
