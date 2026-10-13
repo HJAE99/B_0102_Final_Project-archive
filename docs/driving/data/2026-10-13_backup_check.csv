@@ -1,0 +1,4 @@
+run,task,dur_s,task_start_s,task_end_s,end_warning,run_id_first,run_id_last,cmd_n,min_x,neg_x_n,moving_after_end_s,note
+bag_t5_check,"facility(run_id 8, 녹화 전 reinspection 7)",68.0,11.0,62.0,,7,8,519,0.0,0,,①: run_id 작업 사이 유지
+bag_t5_e1b,"survey run_id 10 + 마스크 [-0.2,3.2,3.4,3.6]",46.0,5.0,24.0,BLOCKED,9,10,177,0.0,0,3.5~5.7,②: 수정 전 (cancel 버그)
+bag_t5_e1c,"survey run_id 11 + 마스크 [-0.2,3.2,3.4,3.6]",36.0,5.0,25.0,BLOCKED,0,11,152,0.0,0,,②: cancel 수정 뒤 (4f151b4)
