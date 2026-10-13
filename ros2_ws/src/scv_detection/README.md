@@ -1,35 +1,133 @@
 # scv_detection
 
-`vision_pkg/test`를 `scv_detection`으로 이관했다. 실행 파일은
-`scv_detection_manager.py`, 클래스는 `ScvDetectionManager`다. 현재 실행기는
-학습 모델 확인용 **상시 구독 진단 노드**다. `InspectFacility` 액션 요청 중에만
-구독하고 3장을 판정하는 IF-05·14 기능은 다음 Step에서 구현해야 한다.
-아직 운영용 액션 서버로 launch에 연결하지 않는다.
+기본 실행은 카메라 미리보기다. 서비스 요청이 들어올 때만 YOLO 또는 랙 검사
+한 가지를 계속 실행한다. 같은 서비스를 다시 호출하면 중지하고 원본 카메라로 돌아온다.
+실행 진입점은 `scv_detection_manager.py:main`, 클래스는 `ScvDetectionManager`,
+노드 이름은 `detection_alert`다. 운영용 `InspectFacility` 액션 서버는 아직 구현하지 않았다.
 
-## 파일 역할과 기능 추가 방식
+## 파일 역할
 
 ```text
 scv_detection/
-├── scv_detection_manager.py  # ROS 입출력·모델 추론·화면 표시 관리
-├── rack_conditioner.py      # 직접 선택한 랙 경계·상자 윤곽으로 옆방향 돌출 검사
-└── detection_render.py      # YOLO의 모든 클래스 이름·신뢰도·상태 색상 표시
+├── scv_detection_manager.py  # 카메라·두 서비스·YOLO 추론·클래스 색상·GUI
+└── rack_conditioner.py       # 파이프 자동 검출·정상 기준 비교·랙 표시
 ```
 
-manager는 YOLO 추론 결과를 `detection_render.py`에 전달한다. 이 모듈은
-`result.names`를 읽어 전체샷을 포함한 모든 검출 클래스명과 신뢰도를 표시한다.
-클래스 수나 ID를 고정하지 않아 새 모델로 교체해도 새 클래스가 표시된다.
-정상/점등은 초록, 비정상/소등은 빨강이며 전체샷 등 상태 매핑이 없는 클래스는
-회색으로 원래 이름을 표시한다. 전체샷 검출만으로 설비가 정상이라고 판단하지 않는다.
-이전 `pressure_gauge.py`, `exit_sign.py`의 상태 매핑은 이 파일로 통합했다.
-영상 수신·추론·창 코드는 manager에만 둔다. 시작 로그의 `YOLO classes`에서
-실제로 불러온 모델의 클래스 목록을 확인할 수 있다. `enable_yolo:=true`가 필요하다.
-단, `rack_conditioner`는 YOLO 클래스 등록 없이 manager에서 원본 프레임을
-직접 전달받는다. OpenCV만 사용하는 독립 기능이다.
+매니저의 `annotate_yolo_result` 하나가 검출된 모든 클래스의 박스·이름·신뢰도를
+표시하고 로그 문자열을 반환한다. 독립 YOLO 표시 모듈과 별도 판정 목록은 없다.
+랙 알고리즘은 함수 모듈에 두며 영상 수신·모델 실행·ROS 통신은 매니저에서 관리한다.
 
-ROS 노드 이름 `detection_alert`는 기존 인터페이스와 맞게 유지한다.
-예전 실행 명령 `detection_alert`도 같은 manager를 호출하는 호환 별칭이다.
-10/12 구조 변경 후 로컬·MSI에서 각 30개 자동시험과 manager 단독 실행·통합
-launch의 화면 없는 640×480 JPEG 입출력을 확인했다. 모델 파일은 변경하지 않았다.
+## 기본 실행
+
+```bash
+ros2 run scv_detection scv_detection_manager
+```
+
+인자 없이 실행하면 `/robot4/oakd/rgb/image_raw/compressed`를 구독하고
+카메라 창을 띄운다. 대기 중에는 YOLO 추론, 랙 파이프 검출, ROI 표시를 하지 않는다.
+카메라가 아직 연결되지 않았으면 창에 영상을 기다린다는 안내를 표시한다.
+
+설치된 `share/scv_detection/models/best.pt`를 자동으로 찾는다.
+YOLO 모델은 첫 YOLO 서비스 요청에서 로딩하고 이후 재사용한다.
+잘못된 모델 경로는 YOLO 요청을 실패시키며 카메라 실행은 계속된다.
+화면 환경이 없으면 GUI만 끄고 영상 발행과 서비스는 유지한다.
+
+다른 로봇은 이름공간을 바꾼다. 예:
+
+```bash
+ros2 run scv_detection scv_detection_manager --ros-args -r __ns:=/robot3
+```
+
+화면 없는 실행은 `-p show:=false`, 다른 모델은 `-p weights:=/path/to/model.pt`다.
+`enable_yolo`, `rack_enabled`는 서비스 사용 허용 옵션이며 기본값은 둘 다 true다.
+두 옵션을 모두 false로 설정한 카메라 전용 실행도 가능하다.
+
+## 서비스 호출
+
+노드 실행 터미널을 유지하고 다른 터미널에서 호출한다.
+
+YOLO 검사:
+
+```bash
+ros2 service call /robot4/detection_alert/inspect_yolo std_srvs/srv/Trigger "{}"
+```
+
+랙 검사:
+
+```bash
+ros2 service call /robot4/detection_alert/inspect_rack std_srvs/srv/Trigger "{}"
+```
+
+YOLO 요청에서는 YOLO만, 랙 요청에서는 랙만 실행한다.
+다른 로봇을 쓰면 서비스 주소의 robot4도 해당 이름공간으로 바꾼다.
+같은 서비스를 처음 호출하면 시작, 다시 호출하면 중지한다. 자동 종료 시간은 없다.
+다른 검사를 시작하려면 실행 중인 검사의 서비스를 다시 호출해 먼저 중지한다.
+다른 모드가 실행 중이거나 모델 로딩·기준 변경 중이면 `success=false, message="busy: …"`로 응답한다.
+기준 저장·초기화도 검사 중에는 거절한다.
+
+| 서비스 | 대기 중 호출 | 같은 검사 실행 중 호출 |
+|---|---|---|
+| inspect_yolo | YOLO 시작 | YOLO 중지 |
+| inspect_rack | 랙 검사 시작 | 랙 검사 중지 |
+
+응답의 success는 시작·중지 성공 여부다. message의 `started`/`stopped`로 확인한다.
+서비스는 최종 판정을 기다리지 않는다. 실제 검출·랙 판정은 영상과 로그로 계속 표시한다.
+랙은 기본 3프레임 연속 판정 후 확정한다. 첫 YOLO 시작은 모델 로딩 시간이 걸릴 수 있다.
+카메라가 없거나 최근 2초 동안 유효 영상이 없으면 시작 요청을 실패시킨다.
+중지 요청은 카메라가 끊겼거나 기준 사진이 없어도 처리한다.
+영상 유효 시간은 `camera_timeout`으로 바꾸며 예전 duration/inspect_timeout 파라미터는 제거했다.
+
+## 랙 기준 준비
+
+기존 정상 기준 NPZ가 있으면 시작 시 로드한다.
+없거나 카메라 위치가 달라졌다면 대기 화면에서 다음처럼 준비한다.
+
+1. 상자를 모두 랙 안에 넣고, 랙의 흰색 좌우 파이프가 ROI 안에 보이게 한다.
+2. 영상 창에서 N을 눌러 정상 기준을 저장한다. 네 모서리 클릭은 필요 없다.
+3. 상자를 옆으로 움직인 뒤 랙 서비스를 호출한다.
+4. R은 메모리 기준만 초기화하며 저장 파일은 삭제하지 않는다.
+
+기본 ROI 비율은 (x1=0.25, y1=0.30, x2=0.75, y2=0.83)이다.
+필요하면 `rack_roi_x1/y1/x2/y2`를 조절한다.
+ROI 테두리와 검사 범위는 랙 검사 중에만 표시된다.
+`rack_reference_path`로 저장 파일을 명시할 수 있다.
+기본 경로는 설치 위치에서 찾은 소스 `config/rack_reference.npz`이며,
+소스 config 폴더가 없으면 기준을 메모리에 저장한다.
+
+랙 비교는 BGR 최대 채널 차이를 사용한다.
+기본 `rack_margin=30`, `rack_zone_width=90`은 경계 바깥 30~90픽셀 구간을 뜻한다.
+`rack_diff_threshold=35`, `rack_min_area=300`, `rack_confirm_frames=3`이다.
+사람·그림자·조명 변화도 검출될 수 있으며 실제 앞뒤 돌출 거리는 측정하지 않는다.
+
+## 현재 모델과 색상
+
+현재 설치 모델은 6개 클래스다. 색상과 로그 상태는 `YOLO_CLASS_STYLES`에서
+ID로 직접 선택한다. 모델 ID 순서가 바뀌면 색상표도 갱신해야 한다.
+등록되지 않은 새 ID도 회색으로 표시한다.
+
+| ID | 클래스 | 색상 | 로그 상태 |
+|---:|---|---|---|
+| 0 | Abnormal_left | 빨강 | ABNORMAL |
+| 1 | Abnormal_right | 빨강 | ABNORMAL |
+| 2 | Fire Extinguisher | 회색 | UNCONFIRMED |
+| 3 | Normal | 초록 | NORMAL |
+| 4 | Exit_sign_on | 초록 | NORMAL |
+| 5 | Exit_sign_off | 빨강 | ABNORMAL |
+
+전체 소화기 검출만으로 상태를 정상이라고 판단하지 않는다.
+압력계 정면성 검사는 하지 않으며 모델이 실제로 검출한 박스만 표시한다.
+
+## 스레드와 입출력
+
+메인 스레드는 GUI·N/R 키를 처리하고, 백그라운드 executor의 세 워커는
+영상 처리·서비스 시작 및 중지·겹치는 요청 응답을 담당한다.
+상태 잠금과 검사 잠금으로 요청을 분리하고 끝난 요청의 늦은 결과는 버린다.
+
+입력: `oakd/rgb/image_raw/compressed`.
+출력: `fire_extinguisher/detections/compressed`.
+로봇 이름공간이 각 토픽 앞에 붙는다. 출력 header는 입력에서 복사한다.
+현재 QoS는 RELIABLE / KEEP_LAST / depth 1이다.
+`InspectionResult` 메시지는 발행하지 않고 랙 판정 상수만 사용한다.
 
 ## 설치
 
@@ -47,112 +145,26 @@ rosdep install --from-paths ros2_ws/src/scv_detection ros2_ws/src/scv_msgs --ign
 colcon의 Python과 실행 환경의 Python에 의존성이 설치되어 있어야 한다.
 GPU용 PyTorch를 쓰는 PC는 기존 CUDA 환경을 유지한다.
 
-## 빌드 및 실행
+## 빌드와 단독 launch
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-cd ros2_ws
+cd ~/final_ws/ros2_ws
 colcon build --symlink-install --packages-select scv_detection
 source install/setup.bash
-ros2 launch scv_detection detection_alert.launch.py \
-  robot_ns:=robot3 \
-  weights:="$(ros2 pkg prefix --share scv_detection)/models/best.pt" \
-  show:=false
+ros2 run scv_detection scv_detection_manager
 ```
 
-설비 점검 로봇 B는 `robot3`이고, 진단 목적으로 다른 로봇을 사용할 때는
-launch의 `robot_ns` 인자만 바꾼다. 번호를 검출 코드에 고정하지 않는다.
-`PushRosNamespace`가 상대 토픽 앞에 이름공간을 붙인다.
-직접 실행할 때는 `ros2 run scv_detection scv_detection_manager --ros-args
--r __ns:=/robot3 -p weights:=<모델 경로>`처럼 ROS 이름공간을 지정한다.
-`weights`가 비어 있거나 노드 이름공간이 루트(`/`)이면 바로 오류로 종료한다.
-단, `enable_yolo=false`, `rack_enabled=true`인 랙 전용 실행에는 weights가 필요 없다.
-
-## OpenCV 랙 검사 준비와 실행
-
-1. 상자를 모두 경계 안에 둔 정상 상태에서, 영상 창의 랙 영역 좌상·우상·우하·좌하를 차례로 클릭한다.
-   노란 번호 점이 표시되고, 네 점이 유효하면 지정된 경계가 그려진다.
-2. `n` 키를 눌러 지금 모습을 정상 기준 사진으로 저장한다. 이후 상자를 바깥으로 옮겨 시험한다.
-3. 다시 지정하려면 오른쪽 클릭이나 `r` 키로 지운 뒤 정상 상태에서 네 점을 새로 선택하고 `n`을 누른다.
-   `rack_enabled=true`를 켜야 하며 기본값은 false다.
-
-랙만 검사하는 예시(학습·pt 파일 불필요):
+단독 launch도 같은 서비스 구조를 사용한다.
 
 ```bash
-ros2 run scv_detection scv_detection_manager --ros-args \
-  -r __ns:=/robot3 -p enable_yolo:=false -p rack_enabled:=true -p show:=true
+ros2 launch scv_detection detection_alert.launch.py
 ```
 
-압력계·비상구와 동시에 사용할 때는 기존 weights 인자에 `-p rack_enabled:=true`만
-추가한다. 전용 launch에도 `enable_yolo:=false rack_enabled:=true`를 지정할 수 있다.
-통합 launch에서는 `detection_enable_yolo`, `detection_rack_enabled`를 사용한다.
-출력은 기존 `fire_extinguisher/detections/compressed` 영상에 함께 표시한다.
+통합 bringup 변경은 별도 통합 작업에서 진행한다.
 
-검사 순서: 네 모서리 지정 → 정상 기준 사진 저장 → 정렬한 두 영상의 밝기 차이를
-비교 → 작은 변화를 제거 → 경계 바깥의 큰 새 변화가 3프레임 이어지면 돌출 판정.
-모서리나 정상 기준 사진이 없으면 회색 UNCONFIRMED다. 사람·그림자·다른 물체도
-기준 사진에서 달라진 바깥 영역으로 잡힐 수 있어 조명과 카메라 위치를 고정해야 한다.
+## 이전 5클래스 모델 학습 기록
 
-조절 파라미터:
-
-- `rack_tolerance=8`: 정렬된 영상에서 허용하는 좌우 초과 픽셀 수.
-- `rack_min_box_area=600`: 정렬 영상에서 상자 후보 최소 면적.
-- `rack_confirm_frames=3`: 같은 판정의 연속 확인 횟수.
-
-경계는 정렬 영상에서 폭 512px로 환산하므로 tolerance와 면적은 원본 해상도나
-실제 cm가 아니다. 앞뒤 깊이 돌출, 완전히 가려진 상자, 모든 층의 검사는 현재
-범위가 아니다. 조명이나 카메라가 달라지면 바깥 변화가 잘못 잡힐 수 있어 실제
-랙 영상으로 확인해야 한다.
-카메라 위치나 줌이 달라지면 네 점을 다시 지정해야 한다. 현재 첨부 화면처럼
-랙 경계가 영상에 보이면 테이프 부착 없이 사용할 수 있다.
-로컬·MSI 각 45개 자동시험 및 모델 없이 manager 단독 실행의 합성
-640×480 JPEG 입출력을 확인했다. 실제 랙 영상의 정확도 시험은 아직 수행하지 않았다.
-
-## launch 없이 두 로봇을 운용할 때
-
-manager는 `ros2 run`으로 단독 실행한다. 두 로봇을 동시에 사용한다고 launch가
-필수인 것은 아니다. 각 실행에서 `-r __ns:=/robot3` 또는 `-r __ns:=/robot4`를
-지정하면 입력·출력 토픽과 노드 주소가 분리된다. 기본 역할은 robot3 설비 검사,
-robot4 RSSI 측정이며, robot4에서도 비전 기능을 시험할 때만 manager를 실행한다.
-같은 로봇 이름공간에서 manager를 두 번 실행하지 않는다.
-각 PC의 ROS_DOMAIN_ID=4와 디스커버리 서버 설정을 맞춘다.
-원격 PC의 실행은 해당 PC에서 해야 하며 launch가 자동으로 SSH 실행해 주지는 않는다.
-기존 launch는 선택 실행 방법으로 남겨 두지만 새 동시운용 launch는 추가하지 않는다.
-
-- 입력 상대 이름: `oakd/rgb/image_raw/compressed`
-- 진단 이미지 출력 상대 이름: `fire_extinguisher/detections/compressed`
-- 예: launch 이름공간이 `/robot3`이면 입력 주소는 `/robot3/oakd/rgb/image_raw/compressed`.
-- QoS: best effort · keep last · depth 1
-- `show` 기본값: `false`. 데스크톱에서 `-p show:=true`로 창을 켠다.
-  디스플레이 환경이 없거나 OpenCV 창 생성/표시에 실패하면 화면을 끈다.
-- 모델 클래스와 신뢰도에 따라 박스·라벨을 표시한다. 정상/점등은 초록색,
-  비정상/소등은 빨간색이다. 미등록 클래스는 회색이다.
-
-## YOLO 클래스 표시와 상태 판정
-
-YOLO 기능은 모델의 예측 라벨을 그대로 사용한다. 이전 OpenCV 압력계 정면
-검사와 `frontal_min_size`, `frontal_min_axis_ratio` 파라미터는 제거했다.
-따라서 현재 구조는 비정면 압력계 판정을 자동 보류하지 않는다.
-모든 클래스 표시는 추론 결과에 들어온 박스가 대상이며, 신뢰도 임계값(`conf`)을
-통과하지 못한 물체나 모델이 검출하지 못한 물체의 박스를 만들어 주지는 않는다.
-여섯 클래스의 실제 검출 성능은 새 모델과 실영상으로 별도 확인해야 한다.
-
-모델 이름은 `InspectionResult`의 NORMAL/ABNORMAL/UNCONFIRMED 상수로
-매핑한다. 현재는 진단 로그와 표시에서만 사용한다. IF-19 설비 결과 발행과
-InspectFacility 피드백·자세 보정 연동은 다음 Step이다.
-
-로봇 PC 묶음 launch에서도 다음처럼 진단 실행을 명시할 수 있다(기본 비활성).
-
-```bash
-ros2 launch scv_bringup robot_pc.launch.py robot_ns:=robot3 \
-  start_detection_diagnostics:=true \
-  detection_weights:="$(ros2 pkg prefix --share scv_detection)/models/best.pt" \
-  detection_show:=false
-```
-
-## 최종 모델
-
-설치하는 모델은 `models/best.pt` 하나다. 10/12에 기존 라벨 캐시를 백업하고
+아래 학습 수치와 해시는 이전 5클래스 모델의 기록이다. 현재 설치 모델의 6개 클래스와 혼동하지 않는다. 10/12에 기존 라벨 캐시를 백업하고
 같은 277장 데이터셋으로 기존 모델을 추가 학습한
 `fire-extinguisher.v1i.yolov8/runs/review_finetune_corrected_labels_20261012/yolov8n/weights/best.pt`
 다. 예전 `Guage.v2i` 기본 데이터셋 경로는 제거했다.
@@ -183,8 +195,6 @@ SHA-256: `aff903afa7dbd8fea7ef36180141f9b0c6fd7c01513d4c1b8469d27d8956d35f`
 
 ## 다음 Step
 
-- `InspectFacility` 요청 때만 구독 → 3장 → 판정 → 구독 해제.
-- 취소·타임아웃·미검출·정면 판별 결과에 따른 자세 보정·IF-19 결과 연동.
-- 추론 작업은 액션 콜백을 막지 않게 worker/콜백 그룹과
-  `MultiThreadedExecutor`로 분리하고, 요청/취소 응답 시간을 측정.
-- 소화기 유무·위치와 셔터 띠 위 물체는 현재 5클래스 모델이 판별하지 않음.
+- 운영용 InspectFacility 액션·취소·설비 결과 메시지 연동.
+- 실제 카메라에서 조명·위치 변화에 대한 정확도 검증.
+- 다중 랙과 셔터 위 물체 검사 설계.

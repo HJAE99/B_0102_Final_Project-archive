@@ -1,4 +1,4 @@
-"""사용자가 고른 로봇 이름공간에서 화면 없는 설비 검출 진단 노드를 실행한다."""
+"""사용자가 고른 로봇의 카메라와 요청형 YOLO·랙 검사 서비스를 실행한다."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction
@@ -8,13 +8,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    """필수 모델·로봇 인자를 받고, 상대 영상 주소 앞에 로봇 이름공간을 붙인다."""
+    """기본 robot4 카메라를 표시하고 두 검사 서비스를 준비한다. 모델 경로는 자동 선택한다."""
     return LaunchDescription([
-        DeclareLaunchArgument('robot_ns', description='설비 점검 로봇 이름공간'),
-        DeclareLaunchArgument('weights', default_value='', description='YOLO 사용 시 필수인 pt 모델 경로'),
+        DeclareLaunchArgument('robot_ns', default_value='robot4', description='설비 점검 로봇 이름공간'),
+        DeclareLaunchArgument('weights', default_value='', description='빈 값이면 설치된 models/best.pt 자동 선택'),
         DeclareLaunchArgument('enable_yolo', default_value='true'),
-        DeclareLaunchArgument('rack_enabled', default_value='false'),
-        DeclareLaunchArgument('show', default_value='false'),
+        DeclareLaunchArgument('rack_enabled', default_value='true'),
+        DeclareLaunchArgument('show', default_value='true'),
         DeclareLaunchArgument('device', default_value='auto'),
         GroupAction([
             PushRosNamespace(LaunchConfiguration('robot_ns')),
