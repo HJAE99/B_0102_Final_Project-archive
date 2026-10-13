@@ -128,11 +128,17 @@ class ManagerCore:
 
         return newly_offline
 
-    def start_run(self, timestamp_sec: Optional[int] = None) -> int:
+    def start_run(
+        self,
+        timestamp_sec: Optional[int] = None,
+        run_id: Optional[int] = None,
+    ) -> int:
         next_run_id = self.run_id + 1
 
         if timestamp_sec is not None:
             next_run_id = max(next_run_id, timestamp_sec)
+        if run_id is not None:
+            next_run_id = run_id
 
         self.run_id = next_run_id
         self.run_state = RunState.RUNNING
@@ -310,3 +316,50 @@ class ManagerCore:
             moved_tasks += 1
 
         return moved_tasks
+
+
+def remeasure_targets(
+    cells: dict,
+    reachable: set,
+    limit: int,
+    include_unmeasured: bool = True,
+) -> list[tuple[int, int]]:
+    """재측정할 칸: 미검출 → 음영(중앙값 낮은 것부터) → 미측정.
+
+    cells 는 {(ix, iy): 줄(state, median, …)}, reachable 은 그 로봇이 갈 수 있는 칸.
+    """
+    miss = sorted(c for c in reachable if c in cells and cells[c].state == "miss")
+    shadow = sorted(
+        (c for c in reachable if c in cells and cells[c].state == "shadow"),
+        key=lambda c: (cells[c].median, c),
+    )
+    unmeasured = sorted(reachable - set(cells)) if include_unmeasured else []
+    return (miss + shadow + unmeasured)[:limit]
+
+
+def mask_cells(
+    cells: dict,
+    cell_size: float,
+    origin: tuple[float, float],
+    docks: list[tuple[float, float]],
+    dock_radius: float,
+) -> set[tuple[int, int]]:
+    """회피 칸: 음영·미검출이고 confidence 가 ok 인 칸. Dock 반경에 걸치는 칸은 뺀다."""
+    out = set()
+
+    for (ix, iy), row in cells.items():
+        if row.state == "normal" or row.confidence != "ok":
+            continue
+
+        x0 = origin[0] + ix * cell_size
+        y0 = origin[1] + iy * cell_size
+        near_dock = any(
+            max(x0 - dx, 0.0, dx - x0 - cell_size) ** 2
+            + max(y0 - dy, 0.0, dy - y0 - cell_size) ** 2
+            <= dock_radius ** 2
+            for dx, dy in docks
+        )
+        if not near_dock:
+            out.add((ix, iy))
+
+    return out

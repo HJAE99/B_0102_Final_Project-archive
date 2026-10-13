@@ -11,7 +11,7 @@ hhj가 권장값으로 확정했습니다. 요구사항이 바뀌면 이 표를 
 | # | 항목 | 확정 내용 | 상태 |
 | --- | --- | --- | --- |
 | 0-1 | 정확도 목표치 | 아래 「목표치」 표 | 확정 |
-| 0-2 | 테스트베드 통로 폭·코너 치수 | 도면 없음 → 3-1(footprint·inflation)에서 줄자로 실측해 기록 | **미정** |
+| 0-2 | 테스트베드 통로 폭·코너 치수 | 방 폭 약 3.2 m, 좁은 틈 두 곳: 위쪽(y≈4.8, x 1.15–3.2) 2.05 m, 가운데(y≈3.55, x 0.05–1.95) 1.98 m (2026-10-12 줄자 실측) | 확정 |
 | 0-3 | 측정 구간 속도 | 0.2 m/s (잠정, 3-5에서 RSSI 팀과 최종 확정) | 확정(잠정) |
 | 0-4 | 정답 위치 측정 방법 | 바닥 테이프 기준점 + 줄자, rosbag 기록과 비교 스크립트 | 확정 |
 
@@ -48,18 +48,31 @@ hhj가 권장값으로 확정했습니다. 요구사항이 바뀌면 이 표를 
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
-| 3-1 | [추가] 통로 폭 실측 + footprint·inflation 정하기 | 통로 폭 기록(0-2 채움), 30 cm 이격을 지키면서 통로를 지나감 | 2-2 |
-| 3-2 | [추가] 컨트롤러 비교 시험 | TurtleBot4 Jazzy 기본 설정에서 시작, MPPI vs RPP 같은 코스 5회씩 경로 이탈 비교 → 하나 선택 | 2-2 · 3-1 |
+| 3-1 | [추가] 통로 폭 실측 + footprint·inflation 정하기 | 통로 폭 기록(0-2 채움), 30 cm 이격을 지키면서 통로를 지나감 — **완료 10/12**: 최소 1.98 m, footprint·inflation 0.45 m 그대로 | 2-2 |
+| 3-2 | [추가] 컨트롤러 비교 시험 | TurtleBot4 Jazzy 기본 설정에서 시작, MPPI vs RPP 같은 코스 5회씩 경로 이탈 비교 → 하나 선택 — **완료 10/12: RPP 선택** (lookahead 0.4 m, waypoint 지움 거리 0.35 m). robot3 3회 평균 RPP 44.2초·이탈 4.5 cm·최대 16.6 cm / MPPI 47.5초·10.3 cm·27.2 cm (`docs/driving/data/2026-10-12_track_check.csv`) | 2-2 · 3-1 |
 | 3-3 | 선택한 컨트롤러·velocity_smoother 튜닝 (원 3) | 0-3 속도에서 cross-track 목표 달성, navigate_through_poses 통로 주행 | 3-2 |
-| 3-4 | [추가] goal checker 2종 구성 | 일반 지점 / 설비 점검 지점(정밀) 허용 오차 분리 | 3-3 |
+| 3-4 | [추가] goal checker 2종 구성 | 일반 지점 / 설비 점검 지점(정밀) 허용 오차 분리 — **10/12 확정**: 일반 0.05 m/5°, 정밀 0.03 m/3°, RPP `rotate_to_heading_angular_vel` 0.5 rad/s (단계 시험 `docs/driving/data/2026-10-12_tol_check.csv`) | 3-3 |
 | 3-5 | [추가] 측정 속도 확정 | RSSI 팀과 최종 값 확정, 회차마다 같은 속도 재현 (BR-T02) | 3-3 |
+
+### 3-2 비교 대상 선정 (2026-10-10 확정)
+
+Jazzy controller_server 컨트롤러 중 **MPPI와 RPP 두 개만** 비교한다. 설정: `ros2_ws/src/scv_nav/config/nav2.yaml`(MPPI), `nav2_rpp.yaml`(RPP)
+
+- MPPI: TurtleBot4 Jazzy 기본 컨트롤러 → 기준선
+- RPP: 경로 추종 전용, 파라미터가 적음 → 통로를 일정 속도로 따라가는 목표에 가장 직접 맞음
+- DWB 제외: MPPI 이전 세대 기본값, 튜닝할 critic이 많음 (TurtleBot4도 Jazzy에서 MPPI로 바꿈)
+- Graceful 제외: 목표 지점 접근용에 가까움 → 3-4 정밀 도착에서 따로 검토. Rotation Shim은 래퍼라 비교 대상 아님
+- 컨트롤러 하나당 같은 코스 5회 → 하나 늘면 시험 시간 약 1.5배
+- 두 설정 모두 속도 상한을 0-3 측정 속도 0.2 m/s로 맞춤 (MPPI `vx_max` 0.5→0.2, velocity_smoother `max_velocity` 0.26→0.2). 컨트롤러 계획 속도가 smoother 상한보다 크면 추종 오차가 커져 같은 조건 비교가 안 됨
 
 ## 4단계. 회피·안전
 
 | # | 할 일 | 완료 기준 | 선행 |
 | --- | --- | --- | --- |
-| 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 | 3-3 · 마스크 형식(RSSI) |
-| 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 | 3-3 |
+| 4-1 | keepout 필터 연결 (IF-10) (원 4) | 마스크 바뀌면 5초 이내 재계획 — **완료 10/12**: robot3 재계획 3.87·1.09초, `{ns}/keepout_mask` 구독·`use_maximum` costmap 단위 수정. 실제 발행(관제 inspection_manager) 미구현 | 3-3 · 마스크 형식(RSSI) |
+| 4-2 | 막힘·복구 규칙 E1 (원 4) | 5초/10초 규칙, 10초 내 우회·건너뛰기 — **완료 10/12**: 5초 BLOCKED, 길 없는 점만 건너뜀(출발 전 확인·5초 확인), 주행 중 막힘 10.4초 | 3-3 |
+
+> ⚠ **4-1 시작 시 keepout_layer 를 반드시 켤 것.** 지금 `config/nav2.yaml`·`nav2_rpp.yaml` 의 global·local costmap `keepout_layer` 4곳이 `enabled: false` (2026-10-11). `keepout_mask` 발행자가 없으면 StaticLayer 가 준비되지 않아 costmap 전체가 "Costmap timed out waiting for update" → 모든 goal 경로 계획이 실패했기 때문. 켤 때는 RSSI 마스크(또는 `fake_servers.py -p mask:=true`)가 먼저 발행되고 있어야 함.
 
 ## 5단계. 작업 실행 (mission_executor)
 
