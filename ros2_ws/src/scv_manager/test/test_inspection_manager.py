@@ -92,6 +92,28 @@ def make_candidate(
     return candidate
 
 
+def test_start_creates_one_survey_task_per_segment_then_dock():
+    core = ManagerCore(["robot3"])
+    manager = FakeInspectionManager(core)
+    manager.zone_by_robot = {"robot3": "Z2"}
+    a, b, c = Waypoint(1.0, 1.0, 0.0), Waypoint(2.0, 1.0, 0.0), Waypoint(2.0, 2.0, 0.0)
+    manager.route_builder.build_survey_routes = lambda: [
+        SurveyRoute("Z2", (a, b, c), segments=((a, b), (c,))),
+    ]
+
+    InspectionManager.on_start(manager, None, SimpleNamespace(success=False, message=""))
+
+    tasks = list(core.tasks.values())
+    assert [task.task_id for task in tasks] == [
+        "run-7-robot3-survey-1",
+        "run-7-robot3-survey-2",
+        "run-7-robot3-survey-dock",
+    ]
+    assert [task.waypoints for task in tasks] == [(a, b), (c,), ()]
+    # 한 로봇에는 만든 순서대로 하나씩 나간다
+    assert core.next_pending_task("robot3").task_id == "run-7-robot3-survey-1"
+
+
 def test_start_creates_survey_and_dock_for_each_robot():
     core = ManagerCore(["robot4", "robot3"])
     manager = FakeInspectionManager(core)

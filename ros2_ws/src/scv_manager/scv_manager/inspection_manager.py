@@ -406,16 +406,20 @@ class InspectionManager(Node):
 
         for robot_id, zone_id in self.zone_by_robot.items():
             route = routes_by_zone[zone_id]
-            self.core.create_task(
-                task_id=f"run-{run_id}-{robot_id}-survey",
-                run_id=run_id,
-                task_type=ExecuteTask.Goal.SURVEY_SEGMENT,
-                priority=1,
-                target_ref=route.zone_id,
-                preferred_robot_id=robot_id,
-                allowed_robot_ids=(robot_id,),
-                waypoints=route.waypoints,
-            )
+            # 구간마다 작업 하나. 구간의 마지막 점은 끝까지 도착한다
+            segments = route.segments or (route.waypoints,)
+            for index, waypoints in enumerate(segments, start=1):
+                name = "survey" if len(segments) == 1 else f"survey-{index}"
+                self.core.create_task(
+                    task_id=f"run-{run_id}-{robot_id}-{name}",
+                    run_id=run_id,
+                    task_type=ExecuteTask.Goal.SURVEY_SEGMENT,
+                    priority=1,
+                    target_ref=route.zone_id,
+                    preferred_robot_id=robot_id,
+                    allowed_robot_ids=(robot_id,),
+                    waypoints=waypoints,
+                )
             self.core.create_task(
                 task_id=f"run-{run_id}-{robot_id}-survey-dock",
                 run_id=run_id,

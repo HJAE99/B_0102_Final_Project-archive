@@ -1,5 +1,6 @@
 import math
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from .manager_core import Waypoint
 class SurveyRoute:
     zone_id: str
     waypoints: tuple[Waypoint, ...]
+    # 작업 구간. 구간의 마지막 점은 Nav2 가 끝까지 도착한다 (막다른 자리용)
+    segments: tuple[tuple[Waypoint, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,12 @@ class RouteBuilder:
         # 이상 떨어뜨린다 (사각형 wall_bounds 는 안쪽 벽 조각을 모른다).
         self.walls = list(walls)
         self.obstacle_clearance = obstacle_clearance
+        # 가까운 벽만 보도록 0.5 m 통에 나눠 담는다
+        self._wall_buckets: dict[tuple[int, int], list] = {}
+        for wx, wy in self.walls:
+            self._wall_buckets.setdefault(
+                (math.floor(wx / 0.5), math.floor(wy / 0.5)), []
+            ).append((wx, wy))
         self.skipped_facilities: list[str] = []
 
     def zones(self) -> dict[str, dict]:
@@ -76,9 +85,33 @@ class RouteBuilder:
         c = self.wall_clearance
         return (xmin + c, ymin + c, xmax - c, ymax - c)
 
+    def wall_distance(self, x: float, y: float) -> float:
+        """가장 가까운 벽 픽셀까지 거리. 0.5 m 안에 없으면 inf."""
+        bx, by = math.floor(x / 0.5), math.floor(y / 0.5)
+        return min(
+            (
+                math.hypot(x - wx, y - wy)
+                for i in (bx - 1, bx, bx + 1)
+                for j in (by - 1, by, by + 1)
+                for wx, wy in self._wall_buckets.get((i, j), ())
+            ),
+            default=math.inf,
+        )
+
     def clear_of_walls(self, x: float, y: float) -> bool:
-        c = self.obstacle_clearance
-        return all(math.hypot(x - wx, y - wy) >= c for wx, wy in self.walls)
+        # 벽 픽셀과 후보 점이 같은 5 cm 격자라 딱 0.30 인 점이 흔하다
+        return self.wall_distance(x, y) >= self.obstacle_clearance - 1e-6
+
+    def line_clear(self, a: tuple[float, float], b: tuple[float, float]) -> bool:
+        """a–b 직선이 벽에서 obstacle_clearance 이상 떨어져 있는가 (5 cm 마다)."""
+        steps = max(math.ceil(math.dist(a, b) / 0.05), 1)
+        return all(
+            self.clear_of_walls(
+                a[0] + (b[0] - a[0]) * k / steps,
+                a[1] + (b[1] - a[1]) * k / steps,
+            )
+            for k in range(steps + 1)
+        )
 
     def reachable_cells(
         self,
@@ -111,14 +144,23 @@ class RouteBuilder:
             spacing = float(zone.get("spacing", 1.0))
 
             dock = zone.get("dock")
-            waypoints = self._build_scanline_route(
-                polygon,
-                spacing,
-                bounds=self.inner_bounds() if self.wall_bounds else None,
-                origin_y=self.origin[1],
-                start_x=float(dock["x"]) if dock else None,
-                clear=self.clear_of_walls if self.walls else None,
-            )
+            segments = ()
+            if self.walls:
+                segments = self._build_cell_route(
+                    polygon,
+                    spacing,
+                    (float(dock["x"]), float(dock["y"])) if dock else None,
+                )
+                waypoints = [p for segment in segments for p in segment]
+            else:
+                # shortcut: 지도 없이 쓰는 예전 줄 방식, 칸 방식이 실기로 확인되면 지운다
+                waypoints = self._build_scanline_route(
+                    polygon,
+                    spacing,
+                    bounds=self.inner_bounds() if self.wall_bounds else None,
+                    origin_y=self.origin[1],
+                    start_x=float(dock["x"]) if dock else None,
+                )
 
             if not waypoints:
                 raise ValueError(
@@ -130,6 +172,7 @@ class RouteBuilder:
                 SurveyRoute(
                     zone_id=str(zone["id"]),
                     waypoints=tuple(waypoints),
+                    segments=tuple(tuple(s) for s in segments),
                 )
             )
 
@@ -186,6 +229,159 @@ class RouteBuilder:
         ) as file:
             return yaml.safe_load(file) or {}
 
+    def _build_cell_route(
+        self,
+        polygon: list[tuple[float, float]],
+        cell: float,
+        dock: tuple[float, float] | None,
+    ) -> list[list[Waypoint]]:
+        """칸 기준 측정 경로. 구간(작업)의 목록을 돌려준다.
+
+        줄(칸 한 줄)마다 벽을 피하는 높이를 골라 이어진 칸을 직선 하나로 묶고,
+        Dock 에서 갈 수 있는 직선만 남겨 가까운 것부터 잇는다. 직선으로 못 가거나
+        되돌아가야 하는 점에서는 구간을 끊어 Nav2 가 그 점에 끝까지 도착하게 한다.
+        """
+        if cell <= 0.0 or len(polygon) < 3:
+            return []
+
+        ox, oy = self.origin
+        xs = [p[0] for p in polygon]
+        ys = [p[1] for p in polygon]
+        # 칸 안쪽 10 cm 부터의 5 cm 격자. 위치 오차가 있어도 샘플이 그 칸에 찍히게
+        offsets = sorted(
+            (k * 0.05 for k in range(2, round(cell / 0.05) - 1)),
+            key=lambda d: abs(d - cell / 2.0),
+        )
+
+        def point_at(i: int, dy: float):
+            """칸 i 를 높이 dy(칸 아래에서부터)로 지나갈 점. x 는 칸 중심 (벽에 붙은 가장자리 열은 뺀다)."""
+            x, y = ox + (i + 0.5) * cell, oy + j * cell + dy
+            # 높이를 옮긴 점은 벽 픽셀과 같은 5 cm 격자라 딱 0.30 이 흔하다 → 2 cm 더
+            need = self.obstacle_clearance + (0.0 if abs(dy - cell / 2.0) < 1e-9 else 0.02)
+            if in_polygon(x, y, polygon) and self.wall_distance(x, y) >= need - 1e-6:
+                return (x, y)
+            return None
+
+        columns = range(
+            math.floor((min(xs) - ox) / cell),
+            math.floor((max(xs) - ox) / cell) + 1,
+        )
+        points: dict[tuple[int, int], tuple[float, float]] = {}
+        runs: list[list[tuple[int, int]]] = []
+        for j in range(
+            math.floor((min(ys) - oy) / cell),
+            math.floor((max(ys) - oy) / cell) + 1,
+        ):
+            i = columns.start
+            while i < columns.stop:
+                # 이 칸에서 시작해 가장 길게 이어지는 높이를 고른다
+                best: list[tuple[float, float]] = []
+                for dy in offsets:
+                    line: list[tuple[float, float]] = []
+                    for k in range(i, columns.stop):
+                        point = point_at(k, dy)
+                        if point is None or (line and not self.line_clear(line[-1], point)):
+                            break
+                        line.append(point)
+                    if len(line) > len(best):
+                        best = line
+                if not best:
+                    i += 1
+                    continue
+                run = [(i + k, j) for k in range(len(best))]
+                points.update(zip(run, best))
+                runs.append(run)
+                i += len(best)
+
+        if not runs:
+            return []
+
+        adjacent = {
+            key: [
+                near for near in (
+                    (key[0] + 1, key[1]), (key[0] - 1, key[1]),
+                    (key[0], key[1] + 1), (key[0], key[1] - 1),
+                )
+                if near in points and self.line_clear(points[key], points[near])
+            ]
+            for key in points
+        }
+
+        def hops(source):
+            distance = {source: 0}
+            queue = deque([source])
+            while queue:
+                key = queue.popleft()
+                for near in adjacent[key]:
+                    if near not in distance:
+                        distance[near] = distance[key] + 1
+                        queue.append(near)
+            return distance
+
+        home = min(
+            points,
+            key=lambda key: math.dist(points[key], dock) if dock else (key[1], key[0]),
+        )
+        from_home = hops(home)
+        # 줄 안의 칸은 서로 이어져 있으므로 줄은 통째로 남거나 빠진다
+        runs = [run for run in runs if run[0] in from_home]
+
+        # 맨 아래 줄과 맨 위 줄 중 Dock 에서 가까운 쪽 끝에서 시작
+        edge_rows = {runs[0][0][1], runs[-1][0][1]}
+        current = min(
+            (key for run in runs if run[0][1] in edge_rows for key in (run[0], run[-1])),
+            key=lambda key: from_home[key],
+        )
+        first_row = current[1]
+        route: list[tuple[tuple[float, float], float]] = []     # (점, yaw)
+        remaining = list(runs)
+        while remaining:
+            distance = hops(current)
+            run = min(
+                remaining,
+                key=lambda r: (
+                    min(distance[r[0]], distance[r[-1]]),
+                    abs(r[0][1] - current[1]),
+                    abs(r[0][1] - first_row),       # 같으면 지나온 쪽에 남은 줄부터
+                ),
+            )
+            remaining.remove(run)
+            if distance[run[-1]] < distance[run[0]]:
+                run = run[::-1]
+            start, end = points[run[0]], points[run[-1]]
+            origin = start if len(run) > 1 or not route else route[-1][0]
+            target = end if len(run) > 1 else start
+            yaw = math.atan2(target[1] - origin[1], target[0] - origin[0])
+            route.append((start, yaw))
+            if len(run) > 1:
+                route.append((end, yaw))
+            current = run[-1]
+
+        def turns_back(a, b, c) -> bool:
+            turn = math.atan2(c[1] - b[1], c[0] - b[0]) - math.atan2(b[1] - a[1], b[0] - a[0])
+            return abs(math.remainder(turn, math.tau)) > math.radians(120.0)
+
+        # 구간을 끊는 점: 앞이나 뒤 직선이 벽에 걸리거나, 120도 넘게 되돌아가는 점.
+        # 경로 가운데 점은 0.35 m 안에 들어와야 지워지는데 이런 점은 RPP 가 닿기 전에 돌아선다
+        segments: list[list[Waypoint]] = [[]]
+        for index, (point, yaw) in enumerate(route):
+            before = route[index - 1][0] if index else dock
+            after = route[index + 1][0] if index + 1 < len(route) else None
+            segments[-1].append(Waypoint(x=point[0], y=point[1], yaw=yaw))
+            if after is not None and (
+                # Dock 은 벽에 붙어 있어 첫 점까지의 직선은 따지지 않는다
+                (index and not self.line_clear(before, point))
+                or not self.line_clear(point, after)
+                or (before is not None and turns_back(before, point, after))
+            ):
+                # 다음 점까지 곧게 갈 수 있으면 다음 구간도 이 점에서 시작한다 (그 줄이 구간 안에 들게)
+                segments.append(
+                    [Waypoint(x=point[0], y=point[1], yaw=route[index + 1][1])]
+                    if self.line_clear(point, after)
+                    else []
+                )
+        return segments
+
     @staticmethod
     def _build_scanline_route(
         polygon: list[tuple[float, float]],
@@ -193,7 +389,6 @@ class RouteBuilder:
         bounds: tuple[float, float, float, float] | None = None,
         origin_y: float = 0.0,
         start_x: float | None = None,
-        clear=None,
     ) -> list[Waypoint]:
         if len(polygon) < 3:
             return []
@@ -268,16 +463,6 @@ class RouteBuilder:
                 if bounds is not None:
                     left_x = max(left_x, bounds[0])
                     right_x = min(right_x, bounds[2])
-                    if left_x >= right_x:
-                        continue
-
-                if clear is not None:
-                    # 줄 끝이 벽에 가까우면 안쪽으로 당긴다 (지도 해상도 5 cm 씩).
-                    # shortcut: 줄 끝만 본다, 줄 가운데를 벽이 가로지르는 지도가 생기면 줄을 나눈다
-                    while left_x < right_x and not clear(left_x, y):
-                        left_x += 0.05
-                    while left_x < right_x and not clear(right_x, y):
-                        right_x -= 0.05
                     if left_x >= right_x:
                         continue
 

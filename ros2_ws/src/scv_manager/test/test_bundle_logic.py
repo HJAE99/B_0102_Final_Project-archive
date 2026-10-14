@@ -29,7 +29,7 @@ facilities:
 ORIGIN = (-0.15, -0.25)
 
 
-def builder(tmp_path: Path) -> RouteBuilder:
+def builder(tmp_path: Path, **kwargs) -> RouteBuilder:
     (tmp_path / "zones.yaml").write_text(ZONES, encoding="utf-8")
     (tmp_path / "facilities.yaml").write_text(FACILITIES, encoding="utf-8")
     return RouteBuilder(
@@ -38,6 +38,7 @@ def builder(tmp_path: Path) -> RouteBuilder:
         wall_bounds=(0.08, -0.05, 3.18, 6.48),
         wall_clearance=0.45,
         origin=ORIGIN,
+        **kwargs,
     )
 
 
@@ -49,28 +50,81 @@ def test_wall_points_reads_occupied_pixels_in_map_coordinates(tmp_path):
     assert wall_points(info) == [(1.75, 2.75), (1.25, 2.25)]
 
 
-def test_route_ends_and_cells_keep_clear_of_inner_wall(tmp_path):
-    # Z2 첫 줄(y 3.5) 오른쪽 위의 벽 조각 (실제 지도의 y 3.62, x 2.0–2.7)
-    walls = [(2.0 + 0.05 * k, 3.62) for k in range(15)]
-    rb = builder(tmp_path)
-    rb.walls, rb.obstacle_clearance = walls, 0.30
-    z1, z2 = rb.build_survey_routes()
+def room_walls(extra=()):
+    """ZONES 의 방 둘레 벽 (5 cm 픽셀) + 더할 벽."""
+    xs = [0.08 + 0.05 * k for k in range(63)]
+    ys = [-0.05 + 0.05 * k for k in range(132)]
+    return (
+        [(x, y) for x in xs for y in (-0.05, 6.48)]
+        + [(x, y) for y in ys for x in (0.08, 3.18)]
+        + list(extra)
+    )
 
-    assert len(z1.waypoints) == 12 and len(z2.waypoints) == 12
+
+def cell_routes(tmp_path, extra=()):
+    rb = builder(tmp_path, walls=room_walls(extra), obstacle_clearance=0.30)
+    return rb, rb.build_survey_routes()
+
+
+def rows(rb, route):
+    """줄(연속한 두 점이 같은 높이이고 직선으로 이어짐)의 (y, x 작은 쪽, x 큰 쪽)."""
+    w = route.waypoints
+    return sorted(
+        (round(a.y, 2), round(min(a.x, b.x), 2), round(max(a.x, b.x), 2))
+        for a, b in zip(w, w[1:])
+        if abs(a.y - b.y) < 1e-6 and rb.line_clear((a.x, a.y), (b.x, b.y))
+    )
+
+
+def test_cell_route_in_open_room_is_the_same_zigzag(tmp_path):
+    rb, (z1, z2) = cell_routes(tmp_path)
+
+    # 가장자리 열(x 0.1 · 3.1)은 빠지고 줄은 칸 중심을 지난다
+    assert rows(rb, z1) == [(y, 0.6, 2.6) for y in (0.5, 1.0, 1.5, 2.0, 2.5, 3.0)]
+    assert rows(rb, z2) == [(y, 0.6, 2.6) for y in (3.5, 4.0, 4.5, 5.0, 5.5, 6.0)]
+    assert all(rb.clear_of_walls(p.x, p.y) for p in z1.waypoints + z2.waypoints)
+    assert [len(s) for s in z1.segments] == [12]                    # 막힌 곳이 없으면 한 구간
+    assert (z1.waypoints[0].x, z1.waypoints[0].y) == (2.6, 0.5)     # Dock(오른쪽 아래) 쪽
+
+
+def test_cell_route_splits_a_row_at_a_crossing_wall(tmp_path):
+    wall = [(1.6, 5.75 + 0.05 * k) for k in range(15)]             # Z2 맨 윗줄을 가로지름
+    rb, (_, z2) = cell_routes(tmp_path, wall)
+
+    assert (6.0, 0.6, 1.1) in rows(rb, z2) and (6.0, 2.1, 2.6) in rows(rb, z2)
+    # 벽(y 5.75 부터)을 가로지르는 줄은 없다. 그 아래 줄은 높이를 낮춰 벽 끝 밑으로 지나간다
+    assert not any(y >= 5.45 and left < 1.6 < right for y, left, right in rows(rb, z2))
+    assert any(y < 5.45 and left < 1.6 < right for y, left, right in rows(rb, z2))
     assert all(rb.clear_of_walls(p.x, p.y) for p in z2.waypoints)
-    assert (round(z2.waypoints[0].x, 2), z2.waypoints[0].y) == (1.68, 3.5)
-    assert {round(p.x, 2) for p in z1.waypoints} == {0.53, 2.73}
 
-    grid = [
-        (i, j, ORIGIN[0] + (i + 0.5) * 0.5, ORIGIN[1] + (j + 0.5) * 0.5)
-        for i in range(7)
-        for j in range(14)
-    ]
-    # 칸 중심 (2.1, 3.5), (2.6, 3.5) 는 벽 조각에서 0.12 m
-    assert rb.reachable_cells("Z2", grid) == {
-        c for c in builder(tmp_path).reachable_cells("Z2", grid)
-        if c not in {(4, 7), (5, 7)}
-    }
+
+def test_cell_route_leaves_out_a_closed_room(tmp_path):
+    box = (
+        [(1.05 + 0.05 * k, y) for k in range(23) for y in (0.75, 1.85)]
+        + [(x, 0.75 + 0.05 * k) for k in range(23) for x in (1.05, 2.15)]
+    )
+    rb, (z1, _) = cell_routes(tmp_path, box)
+
+    assert not any(1.05 < p.x < 2.15 and 0.75 < p.y < 1.85 for p in z1.waypoints)
+    assert (2.5, 0.6, 2.6) in rows(rb, z1)
+
+
+def test_cell_route_ends_a_segment_in_a_dead_end(tmp_path):
+    stub = [(0.08 + 0.05 * k, 4.8) for k in range(23)]             # 실제 지도의 Z2 벽 조각 (x 0.08–1.18)
+    rb, (_, z2) = cell_routes(tmp_path, stub)
+
+    # 벽 조각 위 줄은 높이를 옮겨 벽 옆 칸까지 지나간다 (아래 줄은 딱 0.30 m 라 그대로)
+    assert (5.15, 0.6, 2.6) in rows(rb, z2) and (4.5, 0.6, 2.6) in rows(rb, z2)
+    # 벽 조각 위 막다른 끝 (0.6, 5.15) 에서 구간이 끝난다
+    ends = [(round(s[-1].x, 2), round(s[-1].y, 2)) for s in z2.segments]
+    assert (0.6, 5.15) in ends
+    assert [p for s in z2.segments for p in s] == list(z2.waypoints)
+    # 구간 안의 이웃한 두 점은 직선으로 갈 수 있다
+    assert all(
+        rb.line_clear((a.x, a.y), (b.x, b.y))
+        for s in z2.segments
+        for a, b in zip(s, s[1:])
+    )
 
 
 def test_survey_route_keeps_wall_clearance_and_starts_at_dock_side(tmp_path):
