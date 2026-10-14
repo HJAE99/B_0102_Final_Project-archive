@@ -200,7 +200,8 @@ function MissionCard({ d }) {
 // ---------------------------------------------------------------- 카메라
 // 카메라 탭 (3-3차) — 순찰 중에만 실시간 영상. 지도(제어 PC 지도 파일) 위 이 로봇 위치,
 //   순찰 시작 때 관제 PC가 보낸 섹터 칸 · 도크 · 설비 · 측정 AP(순찰이 끝날 때까지), 아래에 이번 순찰의 후보 · 판정
-const FAC = { extinguisher: ['소', '#dc2626'], shutter: ['셔', '#7c3aed'], exit_light: ['유', '#16a34a'] };
+// 설비 종류 → 지도 아이콘 글자 · 색 — server 화면과 같음 (rack: 3-3 보완에서 추가)
+const FAC = { extinguisher: ['소', '#dc2626'], shutter: ['셔', '#7c3aed'], exit_light: ['유', '#16a34a'], rack: ['랙', '#b45309'] };
 const OUT_COLOR = { CONFIRMED: '#b91c1c', CLEARED: '#15803d', UNCONFIRMED: '#64748b' };
 const FINAL_COLOR = { normal: '#16a34a', abnormal: '#dc2626', unconfirmed: '#64748b' };
 const hms = (iso) => { if (!iso) return '—'; const d = new Date(iso), p = (n) => String(n).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; };

@@ -194,7 +194,7 @@ h2 { font-size: 18px; margin: 0 0 4px; }
   width: 100%; min-width: 90px; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px;
 }
 .grid .pose { display: flex; gap: 4px; }
-.grid .pose input { min-width: 60px; }
+.grid .pose input { min-width: 90px; }   /* 안내 글자 「yaw (rad)」가 숫자 칸 화살표 자리까지 빼고도 잘리지 않는 너비 */
 .grid .num { font-family: var(--mono); }
 .yes { color: var(--ok); font-weight: 600; }
 .no { color: #9aa7b0; }

@@ -167,6 +167,16 @@ SELECT pg_temp.expect_fail('1-38 다른 로봇의 측정 task로 표본 저장 �
 SELECT pg_temp.expect_fail('1-39 측정(SURVEY_SEGMENT)이 아닌 task로 표본 저장 거부',
     $q$INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, task_id)
        VALUES ('robot3', 900001, 11, now(), 3.5, 7.5, 0, true, 9001, -70, 'v-t003')$q$);
+-- 3-3 보완 — 설비 종류 rack(랙). 다른 항목의 설비 수에 영향이 없도록 넣고 바로 지움
+SELECT pg_temp.expect_ok  ('1-40 설비 종류 rack(랙) 저장',
+    $q$DO $d$ BEGIN
+         INSERT INTO facilities (facility_id, map_id, facility_type, expected_x, expected_y, view_pose)
+         VALUES ('v-rck-01', 900001, 'rack', 4.0, 3.0, '{"x": 4.0, "y": 2.2, "yaw": 1.57}');
+         DELETE FROM facilities WHERE map_id = 900001 AND facility_id = 'v-rck-01';
+       END $d$$q$);
+SELECT pg_temp.expect_fail('1-41 정해지지 않은 설비 종류 거부',
+    $q$INSERT INTO facilities (facility_id, map_id, facility_type, expected_x, expected_y, view_pose)
+       VALUES ('v-xxx-01', 900001, 'ladder', 4.0, 3.0, '{"x": 4.0, "y": 2.2, "yaw": 1.57}')$q$);
 
 -- ---------------------------------------------------------------------
 -- 2. 후보 → 재검증 → 확정 (트리거 규칙)

@@ -58,6 +58,9 @@ function showValue(col, v) {
   }
 }
 
+// 자세 입력칸 안내 글자 — 지도 좌표(m)와 방향(rad) 단위를 함께 보여 줌 (도 °로 잘못 넣지 않게)
+const POSE_PH = { x: 'x (m)', y: 'y (m)', yaw: 'yaw (rad)' };
+
 function Input({ col, value, onChange }) {
   const set = (v) => onChange(col.name, v);
   switch (col.type) {
@@ -72,15 +75,15 @@ function Input({ col, value, onChange }) {
         <option value="">선택</option>
         ${(col.options || []).map((o) => html`<option key=${o.value} value=${o.value}>${o.label}</option>`)}
       </select>`;
-    case 'pose': {
+    case 'pose': {                                      // 관측 자세 — x · y는 지도 좌표 m, yaw는 rad (안내 글자에 단위)
       const p = value || { x: '', y: '', yaw: '' };
       const part = (k, ph) => html`<input type="number" step="any" placeholder=${ph} value=${p[k] ?? ''}
         onInput=${(e) => set({ ...p, [k]: e.target.value })} />`;
-      return html`<div class="pose">${part('x', 'x')}${part('y', 'y')}${part('yaw', 'yaw')}</div>`;
+      return html`<div class="pose">${part('x', POSE_PH.x)}${part('y', POSE_PH.y)}${part('yaw', POSE_PH.yaw)}</div>`;
     }
-    case 'docks': {                                     // 로봇마다 x · y · yaw (비우면 그 로봇 도크 없음)
+    case 'docks': {                                     // 로봇마다 x · y(m) · yaw(rad) (비우면 그 로봇 도크 없음)
       const v = value || {};
-      const part = (rid, k) => html`<input type="number" step="any" placeholder=${k} value=${(v[rid] || {})[k] ?? ''}
+      const part = (rid, k) => html`<input type="number" step="any" placeholder=${POSE_PH[k]} value=${(v[rid] || {})[k] ?? ''}
         onInput=${(e) => set({ ...v, [rid]: { ...(v[rid] || {}), [k]: e.target.value } })} />`;
       return html`<div class="docks">${(col.options || []).map((rid) => html`<div class="pose" key=${rid}>
         <span class="rid">${rid}</span>${part(rid, 'x')}${part(rid, 'y')}${part(rid, 'yaw')}</div>`)}
@@ -248,7 +251,8 @@ function MapView({ m, robots, overlay, mini }) {
       L.marker([a.y, a.x], { icon: L.divIcon({ className: 'ap-icon', iconSize: [18, 18], html: '<b>📶</b>' }) })
         .bindTooltip(`${a.is_target ? '측정 AP · ' : ''}${a.ssid}${a.is_active ? '' : ' (비활성)'}`, label('', a.is_target ? 'ap target' : 'ap')).addTo(info);
     });
-    const FAC = { extinguisher: ['소', '#dc2626'], shutter: ['셔', '#7c3aed'], exit_light: ['유', '#16a34a'] };
+    // 설비 종류 → 지도 아이콘 글자 · 색 (rack: 3-3 보완에서 추가)
+    const FAC = { extinguisher: ['소', '#dc2626'], shutter: ['셔', '#7c3aed'], exit_light: ['유', '#16a34a'], rack: ['랙', '#b45309'] };
     (m.facilities || []).forEach((f) => {
       const [ch, col] = FAC[f.facility_type] || ['?', '#555'];
       const c = f.is_active ? col : '#9aa3aa', v = f.view_pose || {};
@@ -462,7 +466,7 @@ function MonitorPage({ onAuthLost }) {
             섹터 ${x.sector} · ${x.cells}칸${x.robot ? ` · 기본 ${x.robot}` : ''}</span>`)}
           <span class="lg"><i class="sq"></i>도크 ${Object.keys(m.dock_poses || {}).length}</span>
           <span class="lg">📶 AP ${(m.aps || []).length}</span>
-          <span class="lg"><b class="fac-dot" style=${{ background: '#dc2626' }}>소</b><b class="fac-dot" style=${{ background: '#7c3aed' }}>셔</b><b class="fac-dot" style=${{ background: '#16a34a' }}>유</b>
+          <span class="lg"><b class="fac-dot" style=${{ background: '#dc2626' }}>소</b><b class="fac-dot" style=${{ background: '#7c3aed' }}>셔</b><b class="fac-dot" style=${{ background: '#16a34a' }}>유</b><b class="fac-dot" style=${{ background: '#b45309' }}>랙</b>
             설비 ${(m.facilities || []).length} (점선 끝 = 관측 자세)</span>
           <span class="lg">큰 숫자 = 칸 번호(cell_id) · 작은 숫자 = ix,iy (칸이 작으면 숨김)</span>
           ${m.running_run && html`<span class="lg run">순찰 run ${m.running_run} 진행 중 — 격자 변경 · 현재 지도 바꾸기 잠김</span>`}
@@ -666,7 +670,7 @@ function HistoryPage({ onAuthLost }) {
 
 // ---------------------------------------------------------------- 이력 › task 「자세히」 (3-3차)
 //   측정: 거친 칸 · 칸별 AP 측정값 · 이 구간 후보 / 정밀측정: 후보 · 정밀측정 · 결론 / 탐지: 설비 · 판정 · 사진 / 공통: 경로 · 이벤트
-const FAC_LABEL = { extinguisher: '소화기', shutter: '셔터', exit_light: '유도등' };
+const FAC_LABEL = { extinguisher: '소화기', shutter: '셔터', exit_light: '유도등', rack: '랙' };   // 「자세히」 설비 종류 이름
 const dur = (a, b) => {
   if (!a) return '—';
   const s = Math.max(0, Math.round(((b ? new Date(b) : new Date()) - new Date(a)) / 1000));
@@ -806,7 +810,7 @@ function TaskDetail({ taskId, m, onClose, onAuthLost }) {
       ${t.type === 'FACILITY_CHECK' && html`<h4>설비 · 판정 · 사진</h4>
         ${d.facility && html`<dl class="kv wide">
           <dt>설비</dt><dd class="mono">${d.facility.facility_id} · ${FAC_LABEL[d.facility.facility_type] || d.facility.facility_type}${d.facility.has_gauge ? ' · 압력계' : ''}${d.facility.is_active ? '' : ' (비활성)'}</dd>
-          <dt>등록 위치</dt><dd>(${fmtNum(d.facility.expected_x)}, ${fmtNum(d.facility.expected_y)}) · 관측 자세 (${fmtNum(d.facility.view_pose.x)}, ${fmtNum(d.facility.view_pose.y)}, ${fmtNum(d.facility.view_pose.yaw)})</dd>
+          <dt>등록 위치</dt><dd>(${fmtNum(d.facility.expected_x)} m, ${fmtNum(d.facility.expected_y)} m) · 관측 자세 (${fmtNum(d.facility.view_pose.x)} m, ${fmtNum(d.facility.view_pose.y)} m, ${fmtNum(d.facility.view_pose.yaw)} rad)</dd>
         </dl>`}
         ${(d.inspections || []).length ? d.inspections.map((i) => html`<div class="insp" key=${i.inspection_id}>
           <dl class="kv wide">

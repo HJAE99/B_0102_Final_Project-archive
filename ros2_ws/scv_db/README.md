@@ -146,6 +146,7 @@ ON CONFLICT (event_uid) DO NOTHING;            -- 다른 표: (robot_id, run_id,
   - `grid_cells.sector`를 추가하고, 이미 있는 칸은 격자 생성 때와 같은 규칙(ix 순 칸 수 절반)으로 채웁니다.
   - `robots`·`aps`의 `is_active` 기본값을 false로 바꿉니다. 이미 있는 행의 값은 server_page가 시작할 때 모두 비활성으로 맞춥니다.
   - **3-3차** — `aps.is_target`(기본 false)과 `aps_one_target_per_map`을 추가합니다. 이전 지도에는 측정 AP가 없으므로 server page 정보 탭에서 지정해야 순찰을 시작할 수 있습니다.
+  - **3-3 보완** — 설비 종류에 `rack`(랙)을 더합니다. 이전 DB의 `facilities.facility_type` CHECK(3종류)를 4종류로 다시 만듭니다(기존 설비 값은 그대로).
   - **3-3차** — `net_samples.task_id`(외래키 tasks)와 트리거 `trg_net_samples_check`를 추가합니다. 이전 표본은 같은 로봇 · run의 측정 task 수행 시간(assigned_at ~ ended_at) 안이면 그 task로 채우고, 못 찾으면 비워 둡니다.
   - 02_seed.sql이 `wall_margin_m`의 이전 설명(「경로·격자 칸을…」)을 새 설명으로 바꿉니다(설명을 직접 고치지 않은 경우만).
 - **03_verify.sql은 운영 전에.** 진행 중인 run이 있으면 `runs_one_running` 때문에 실패합니다. 모두 ROLLBACK되어 데이터는 남지 않고 번호 시퀀스만 조금 올라갑니다.
@@ -190,7 +191,7 @@ python make_dummy.py --reset      # 지우고 다시 생성
 | aps | 50 | 현재 지도에 SCV_AP_01 ~ 40, 다른 두 지도에 같은 SSID 01 ~ 05(지도마다 다른 ap_id). **모두 비활성**(보고 전). 현재 지도의 01 ~ 05는 과거 측정 기록에 쓰인 AP이고 설치 위치가 있음. **측정 AP는 지도마다 SCV_AP_01**(화면에서는 활성 AP만 고를 수 있지만 더미는 보고가 없어 비활성 상태로 지정 — 순찰 시작 조건 「측정 AP 활성」은 client가 그 SSID를 보내야 만족) |
 | maps | 3 | dummy_testbed_a(합성, 현재 지도, 9 × 6 m 방) · **실제 지도**(yaml 이름, 현재 지도 아님 — server page에서 「현재 지도로」 누르면 격자 생성) · dummy_lab_c(합성) — PNG 파일 생성. 합성 지도의 도크 접근 자세는 robot3 왼쪽 아래 · robot4 오른쪽 아래, 실제 지도는 비움(화면에서 입력) |
 | grid_cells | 54 | 현재 지도에만 생성(server page에서 지도를 선택할 때와 같은 계산 — 흰 부분이 걸치는 칸 모두). 섹터 1 = 24칸 · 섹터 2 = 30칸 |
-| facilities | 54 | 현재 지도에 소화기 · 셔터 · 유도등 각 16 ~ 17개(2개 비활성) + dummy_lab_c에 같은 ID 4개(EXT-01 · EXT-02 · SHT-01 · EXL-01 — 설비 ID는 지도 안에서 유일) |
+| facilities | 54 | 현재 지도에 소화기 · 셔터 · 유도등 · 랙 각 12 ~ 13개(2개 비활성) + dummy_lab_c에 같은 ID 4개(EXT-01 · EXT-02 · SHT-01 · EXL-01 — 설비 ID는 지도 안에서 유일) |
 | runs | 50 | 하루 1회, done 42 · partial 4 · aborted 4, 기준선 재료(`is_baseline_ok`) 22 — done · patrol · RSSI 확정 이상 없음. 섹터 1 = robot3 · 섹터 2 = robot4 동시 운행(10회는 robot3 혼자 — 섹터 1만). partial은 주 로봇의 섹터만 실패, aborted는 혼자 운행한 회차의 실패 |
 | tasks | 206 | 회차마다 주 task 1개(주 로봇을 번갈아, 자기 섹터의 SURVEY_SEGMENT · FACILITY_CHECK) + 다른 로봇의 자기 섹터 측정 1구간 + 정밀측정 26(발견한 로봇이 스스로) + 로봇마다 DOCK(경로점 = 그 로봇의 도크 접근 자세). 측정 경로는 server의 `plan_survey`처럼 **섹터 칸 중심을 지그재그로** 이어 20점씩 자르고 `seg:a-b`(섹터 경로의 점 번호) — 더미 지도는 합성이라 벽 여유는 계산하지 않음 |
 | candidates · findings | 28 · 12 | CLOSED 24(CONFIRMED 12 · CLEARED 8 · UNCONFIRMED 4) · OPEN 2 · REINSPECTING 2. 네트워크 후보 칸 = 그 측정 task가 지난 칸 중 하나(실패한 task는 간 데까지), 그 칸 표본 4개는 기준(−72) 미만, 후보 지점 = 그 칸의 마지막 표본 위치 — client 후보 규칙과 같은 모양 |

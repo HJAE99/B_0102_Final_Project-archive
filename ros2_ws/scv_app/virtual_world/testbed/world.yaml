@@ -31,7 +31,7 @@ register:
   aps:
     - { ssid: SCV_VAP_A, note: "가상 AP A — 왼쪽 위", x: 2.0, y: 6.5, target: true }
     - { ssid: SCV_VAP_B, note: "가상 AP B — 가운데 오른쪽", x: 9.0, y: 3.5 }
-  # 점검 설비 — type: extinguisher(소화기) · shutter(셔터) · exit_light(유도등), x · y: 설비 위치, view: 관측 자세
+  # 점검 설비 — type: extinguisher(소화기) · shutter(셔터) · exit_light(유도등) · rack(랙), x · y: 설비 위치, view: 관측 자세
   facilities:
     - { id: EXT-01, type: extinguisher, gauge: true,  x: 0.15,  y: 4.5,  view: { x: 0.9,  y: 4.5, yaw: 3.1416 } }
     - { id: EXT-02, type: extinguisher, gauge: true,  x: 11.85, y: 1.0,  view: { x: 11.1, y: 1.0, yaw: 0.0 } }

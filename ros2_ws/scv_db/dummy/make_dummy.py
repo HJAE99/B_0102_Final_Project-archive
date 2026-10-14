@@ -354,12 +354,12 @@ class Dummy:
         self.count("maps", len(MAPS))
 
     def facilities(self):
-        types = [("extinguisher", "EXT"), ("shutter", "SHT"), ("exit_light", "EXL")]
+        types = [("extinguisher", "EXT"), ("shutter", "SHT"), ("exit_light", "EXL"), ("rack", "RCK")]   # rack: 3-3 보완
         w, h = self.room
         self.fac = {}                                      # facility_id → dict
         seq = {p: 0 for _, p in types}
         for i in range(self.n):
-            ftype, prefix = types[i % 3]
+            ftype, prefix = types[i % len(types)]           # 종류를 차례로 돌아가며
             seq[prefix] += 1
             fid = f"{prefix}-{seq[prefix]:02d}"
             # 벽 가까운 곳에 두고, 관측 자세는 방 안쪽 0.8 m 앞에서 설비를 바라봄

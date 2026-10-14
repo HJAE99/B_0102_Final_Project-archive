@@ -111,7 +111,8 @@ CREATE TABLE IF NOT EXISTS grid_cells (
 CREATE TABLE IF NOT EXISTS facilities (
     map_id          INT          NOT NULL REFERENCES maps (map_id),           -- 지도를 지우면 관제 PC가 함께 지움
     facility_id     VARCHAR(32)  NOT NULL,
-    facility_type   VARCHAR(16)  NOT NULL CHECK (facility_type IN ('extinguisher', 'shutter', 'exit_light')),
+    -- rack(랙)은 3-3 보완에서 추가 — 이전 DB는 파일 끝 업그레이드 ⑪이 CHECK를 바꿈
+    facility_type   VARCHAR(16)  NOT NULL CHECK (facility_type IN ('extinguisher', 'shutter', 'exit_light', 'rack')),
     has_gauge       BOOLEAN      NOT NULL DEFAULT false,
     expected_x      REAL         NOT NULL,
     expected_y      REAL         NOT NULL,
@@ -642,6 +643,7 @@ END $$;
 --          · inspections.map_id + 외래키 (map_id, facility_id)
 --   ⑩ 3-3차: net_samples.task_id(표본을 모은 측정 task) — net_samples 정의 바로 아래에서 추가,
 --          이전 표본은 같은 로봇 · run의 측정 task 수행 시간(assigned_at ~ ended_at)으로 채움
+--   ⑪ 3-3 보완: 설비 종류에 rack(랙) — facilities.facility_type CHECK를 4종류로 다시 만듦
 -- =====================================================================
 -- ⑧ 준비 — 트리거 scv_check_task_robot이 inspections.map_id를 읽으므로 다른 갱신보다 먼저 추가 (채우기는 아래 ⑧)
 ALTER TABLE inspections ADD COLUMN IF NOT EXISTS map_id INT;
@@ -781,6 +783,21 @@ ALTER TABLE aps ALTER COLUMN is_active SET DEFAULT false;
 -- ② settings.description (이전 DB에서는 맨 끝 컬럼으로 추가됨 — 이름으로 읽으므로 동작은 같음)
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS description TEXT;
 
+-- ⑪ 3-3 보완 — 설비 종류 CHECK에 rack이 없으면(이전 판) 4종류로 다시 만듦. 새 DB는 위 정의에 이미 있음
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'facilities'::regclass AND contype = 'c'
+                  AND pg_get_constraintdef(oid) LIKE '%facility_type%' AND pg_get_constraintdef(oid) NOT LIKE '%rack%') THEN
+        EXECUTE (SELECT string_agg(format('ALTER TABLE facilities DROP CONSTRAINT %I', conname), '; ')
+                   FROM pg_constraint
+                  WHERE conrelid = 'facilities'::regclass AND contype = 'c'
+                    AND pg_get_constraintdef(oid) LIKE '%facility_type%');
+        ALTER TABLE facilities ADD CONSTRAINT facilities_facility_type_check
+            CHECK (facility_type IN ('extinguisher', 'shutter', 'exit_light', 'rack'));
+    END IF;
+END $$;
+
 -- ⑩ 3-3차 — 이전 표본의 task_id. 측정 시각(stamp)이 그 로봇 측정 task의 수행 시간 안이면 그 task (없으면 NULL로 둠)
 UPDATE net_samples n SET task_id = t.task_id
   FROM tasks t
@@ -872,7 +889,7 @@ COMMENT ON COLUMN grid_cells.sector IS '섹터 번호(3차). 격자를 만들 �
 COMMENT ON TABLE facilities IS '점검 설비 (지도별) — 점검 설비 등록부(지도별). 원문의 facilities YAML을 DB로 옮긴 것입니다. 3차부터 지도에 속하고 키는 (map_id, facility_id) — 설비 ID는 지도 안에서 유일합니다. 설비의 섹터는 관측 자세가 속한 칸의 섹터(저장하지 않고 계산)입니다.';
 COMMENT ON COLUMN facilities.map_id IS '이 설비가 속한 지도(3차). server page 정보 탭에서 지도를 골라 추가. 지도를 지우면 함께 지움';
 COMMENT ON COLUMN facilities.facility_id IS '설비 ID. 예: ''EXT-01''. 지도 안에서 유일(3차 — 키 (map_id, facility_id), 다른 지도에는 같은 ID 가능). Candidate.ref · FACILITY_CHECK target_ref에 들어가며 그 run의 지도 안에서 찾음';
-COMMENT ON COLUMN facilities.facility_type IS '소화기 / 방화셔터 하강구간 / 유도등';
+COMMENT ON COLUMN facilities.facility_type IS '소화기 / 방화셔터 하강구간 / 유도등 / 랙(rack, 3-3 보완)';
 COMMENT ON COLUMN facilities.has_gauge IS '소화기 압력계까지 판정할지(BR-T13)';
 COMMENT ON COLUMN facilities.expected_x IS '등록 위치 x(m). 검출 위치와 비교해 위치 이상(POSITION_ANOMALY) 판단';
 COMMENT ON COLUMN facilities.expected_y IS '등록 위치 y(m)';
@@ -1008,7 +1025,7 @@ COMMENT ON TABLE findings IS '확정 이상 (알림 대상) — 확정된 이상
 COMMENT ON COLUMN findings.finding_id IS '확정 이상 번호';
 COMMENT ON COLUMN findings.candidate_id IS '출발한 후보. 후보 하나에 확정 이상은 하나';
 COMMENT ON COLUMN findings.task_id IS '확정을 지은 REINSPECTION task. 트리거로 candidates.reinspect_task_id와 같고 outcome = CONFIRMED인지 검사 → 재검증 없이 확정 0건(BR-T06)';
-COMMENT ON COLUMN findings.category IS '이상 분류. 예: coverage, extinguisher, gauge, shutter, exit_light';
+COMMENT ON COLUMN findings.category IS '이상 분류. 예: coverage, extinguisher, gauge, shutter, exit_light, rack';
 COMMENT ON COLUMN findings.status IS 'open = 확정됨, acked = 담당자가 봤음. 조치·해소 여부는 시스템이 다루지 않음';
 COMMENT ON COLUMN findings.acked_by IS '확인(ack)한 사람';
 COMMENT ON COLUMN findings.confirmed_at IS '확정 시각';

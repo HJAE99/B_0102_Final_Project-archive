@@ -8,23 +8,23 @@ SCV client page — 제어 PC (3-3차)
   화면: /client/login → /client/robot (로봇 정보) · /client/camera (카메라)
   흐름
     1) 로그인 — 아이디·비밀번호를 관제 PC POST /api/client/login으로 확인 (DB에 등록된 계정)
-    2) 로그인하면 ROS 토픽 목록을 확인해 /{robot_id}/… 토픽을 내보내는 노드가 있는지 봄
+    2) 로그인하면 ROS 토픽 목록을 확인해 /{robot_id}/… 토픽을 내보내는 노드가 있는지 봄 (로그인 전에는 확인 · 로봇 정보 구독 · 관제 PC 접속 모두 안 함)
        없으면(비활성) ACTIVE_CHECK_S마다 다시 확인, 있으면(활성) 확인을 멈춤
-    3) 활성이 되면 관제 PC WebSocket /ws/agent에 접속해 hello { robot_id, … }를 한 번 보냄
+    3) 활성이 되면 관제 PC WebSocket /ws/agent에 접속해 hello { robot_id, … }를 한 번 보냄 (응답 welcome → 이어서 config, 순찰 중이면 run_config · task_assign/task_cancel)
        → 관제 PC가 robots.is_active = true. 연결이 끊기면 관제 PC가 false로 바꾸고, 이쪽은 다시 접속해 hello
-    4) 로봇 정보 탭: battery_state · dock_status · odom · ip 구독 값 표시
+    4) 로봇 정보 탭: battery_state · dock_status · odom · amcl_pose · ip · rssi 구독 값 표시
        활성인 동안 이 값이 STALE_S(5초) 넘게 하나도 안 오면 로봇이 꺼진 것으로 보고 비활성으로 바꿈
        → 관제 PC 연결을 닫아 관제 PC도 비활성, 2)의 토픽 목록 확인을 다시 시작
          (다시 활성이 되려면 토픽 목록의 발행자 + 꺼진 뒤 새로 받은 값이 함께 있어야 함 — DDS 목록에 남은 옛 발행자 제외)
     5) 카메라 탭: 카메라 토픽(CompressedImage)을 보는 동안만 구독해 MJPEG으로 화면에 전달
-    6) 3-1차 — mission_executor가 1초마다 status(RobotStatus 필드)를 만들고, scv_agent가 관제 PC로 보냄
-    7) 3-2차 — 관제 PC config(현재 지도 · 도크 접근 자세)를 받아, 로봇이 도킹 중이거나 위치를 모르면
+    6) 3-1차 — mission_executor가 status(RobotStatus 필드)를 만들고, scv_agent가 1초마다 불러 관제 PC로 보냄
+    7) 3-2차 — 관제 PC config(현재 지도 · 도크 접근 자세)를 받아, 로봇이 도킹 중(실행 중 task 없음)이거나 위치를 모르면
                /{ns}/initialpose로 시작 위치를 지정 (가상 로봇은 이 값을 받아야 위치를 내보냄)
        위치는 {ns}/amcl_pose(지도 좌표), 배터리 · 도킹은 로봇 토픽
     8) 3-3차 — 관제 PC의 run_config · task_assign을 받아 task를 하나씩 실행 (로봇마다 ACTIVE task 하나)
        SURVEY_SEGMENT  undock → Nav2 navigate_through_poses로 경로점 주행, 그동안 {ns}/rssi 표본을 자기 섹터 칸만 모음
                        → 끝나면 칸 중앙값으로 네트워크 후보(CANDIDATE 이벤트)
-       REINSPECTION    후보 지점으로 이동 → 정지 정밀측정(precise_duration_s) → CONFIRMED / CLEARED
+       REINSPECTION    후보 지점으로 이동 → 정지 정밀측정(precise_duration_s) → CONFIRMED / CLEARED (값 없음 UNCONFIRMED)
        FACILITY_CHECK  관측 자세로 이동 → 설비 판정 1회(다시 판정하지 않음) + 사진. 정면 확보 실패가 max_pose_retry를 넘으면 미확인(E6)
        DOCK            도크 접근 자세로 이동 → {ns}/dock
        기록(표본 · 이벤트 · 정밀측정 · 판정 · 사진 · task 결과)은 아웃박스 폴더에 쌓았다가 순서대로 관제 PC REST로 보냄
@@ -130,12 +130,14 @@ POWER_STATUS = {0: "알 수 없음", 1: "충전 중", 2: "방전 중", 3: "충�
 
 
 def utc_now_iso() -> str:
+    """현재 UTC 시각 ISO 8601 문자열 (밀리초, 끝은 Z) — status · 표본 · 이벤트 · 결과 시각."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def guarded(fn):
     """ROS 콜백 보호 — 예외가 나면 spin 전체가 멈추므로, 내용을 남기고 계속 돌게 함."""
     def wrap(*args):
+        """fn(*args)를 부르고 예외는 로그만 남김 (반환 None)."""
         try:
             return fn(*args)
         except Exception:
@@ -148,7 +150,13 @@ def guarded(fn):
 # ROS 쪽 — rclpy 노드를 별도 스레드에서 spin. 구독·해제는 모두 ROS 스레드의 타이머에서 처리
 # ---------------------------------------------------------------------------
 class RosBridge:
+    """로봇과의 ROS 통신 — rclpy 노드(scv_client_page)를 ros-spin 스레드에서 돌림.
+    구독: {ns}/battery_state · odom · amcl_pose · ip · rssi · dock_status (로그인 뒤), 카메라(보는 동안), virtual/detect_result
+    발행: {ns}/initialpose · virtual/detect_request. 액션 클라이언트: navigate_through_poses · undock · dock
+    rssi 값은 on_rssi 콜백(SurveyBuffer.on_rssi)으로 넘김. 화면 · MissionExecutor는 snapshot · latest · frame 등으로 읽음"""
     def __init__(self, robot_id: str, camera_topic: str, check_s: float):
+        """robot_id = 토픽 이름공간(/{robot_id}), check_s = 비활성일 때 토픽 목록 확인 주기.
+        rclpy init · 노드 · 0.2 s 타이머(_tick) · 발행자 · 액션 클라이언트를 만들고 spin 스레드를 시작"""
         self.robot_id = robot_id
         self.camera_topic = camera_topic
         self.check_s = check_s
@@ -204,9 +212,11 @@ class RosBridge:
         self.log(f"client page ROS 노드 시작 — 로봇 {robot_id}, 카메라 토픽 {camera_topic}")
 
     def log(self, text: str):
+        """ROS 노드 로거로 info 로그."""
         self.node.get_logger().info(text)
 
     def _spin(self):
+        """ros-spin 스레드 본체 — executor.spin() (콜백 · 타이머 · 액션 응답을 여기서 처리)."""
         try:
             self.executor.spin()
         except Exception as e:                         # 종료 중 예외는 무시
@@ -214,6 +224,7 @@ class RosBridge:
                 print(f"[ros] spin 중단: {e}", flush=True)
 
     def shutdown(self):
+        """종료 — executor · 노드 정리, rclpy shutdown (lifespan 끝에서 부름)."""
         try:
             self.executor.shutdown()
             self.node.destroy_node()
@@ -223,6 +234,7 @@ class RosBridge:
 
     # ---- 화면 쪽에서 부르는 함수 (스레드 안전: 표시만 바꾸고 실제 처리는 _tick)
     def on_login(self):
+        """웹 로그인 때 (/api/login) — 로봇 정보 구독을 켜고, 비활성이면 토픽 목록 확인을 바로 시작."""
         with self.lock:
             self.want_info = True
             if not self.active:
@@ -230,15 +242,18 @@ class RosBridge:
                 self.check_now = True
 
     def add_viewer(self):
+        """카메라를 보는 화면(또는 사진 1장) 하나 늘림 — 실제 구독은 _tick이 함."""
         with self.lock:
             self.cam_viewers += 1
 
     def remove_viewer(self):
+        """카메라를 보는 화면 하나 줄임 — 0이 되면 _tick이 구독 해제."""
         with self.lock:
             self.cam_viewers = max(0, self.cam_viewers - 1)
 
     # ---- ROS 스레드 (0.2 s)
     def _tick(self):
+        """0.2 s 타이머 (ROS 스레드) — 값 끊김 → 비활성 전환, 활성 확인 주기, 로봇 정보 구독, 카메라 구독 · 해제."""
         now = time.monotonic()
         went_off = False
         with self.lock:                                # 활성인데 로봇 정보 값이 STALE_S 넘게 없으면 → 비활성
@@ -251,6 +266,7 @@ class RosBridge:
                 went_off = True
         if went_off:
             self.log(f"{self.robot_id} 비활성 — 로봇 정보 값이 {STALE_S:g}초 넘게 오지 않음. 토픽 목록 확인을 다시 시작")
+        # 비활성인 동안 check_s마다(로그인 직후 · 꺼짐 직후는 check_now로 바로) 토픽 목록 확인
         with self.lock:
             do_check = self.checking and (self.check_now or now >= self.next_check)
             want_info, viewers = self.want_info, self.cam_viewers
@@ -259,8 +275,10 @@ class RosBridge:
             with self.lock:
                 self.check_now = False
                 self.next_check = now + self.check_s
+        # 로봇 정보 구독은 로그인 뒤 한 번만 만듦 (해제하지 않음)
         if want_info and not self.info_subs:
             self._subscribe_info()
+        # 카메라 — 보는 화면이 있으면 구독, 없으면 해제
         if viewers > 0 and self.cam_sub is None:
             self.cam_sub = self.node.create_subscription(CompressedImage, self.camera_topic, guarded(self._on_camera),
                                                          qos_profile_sensor_data)
@@ -276,6 +294,7 @@ class RosBridge:
         listed = [name for name, _types in self.node.get_topic_names_and_types() if name.startswith(prefix)]
         found = sorted(name for name in listed if self.node.count_publishers(name) > 0)
         became = False
+        # 활성 전환 판단 · 확인 결과 기록 (화면 표시용)
         with self.lock:
             self.checked_at = time.time()
             self.found_topics = found
@@ -293,6 +312,7 @@ class RosBridge:
                      + ("" if fresh or not found else " (꺼진 뒤 새 값이 아직 없어 비활성 유지)"))
 
     def _subscribe_info(self):
+        """로봇 정보 토픽 구독 (best effort) — battery_state · odom · amcl_pose · ip · rssi · dock_status(패키지 있을 때)."""
         ns = f"/{self.robot_id}"
         q = qos_profile_sensor_data                    # best effort — 로봇 쪽이 reliable이든 best effort든 받음
         self.info_subs.append(self.node.create_subscription(BatteryState, f"{ns}/battery_state", guarded(self._on_battery), q))
@@ -307,6 +327,7 @@ class RosBridge:
 
     # ---- 구독 콜백 (ROS 스레드)
     def _put(self, key: str, topic: str, data: dict[str, Any]):
+        """로봇 정보 최신값 저장 {topic, data, t, count} + last_data(활성 판정) 갱신, 토픽별 첫 값 로그."""
         with self.lock:
             prev = self.info.get(key)
             n = (prev["count"] + 1) if prev else 1
@@ -318,6 +339,7 @@ class RosBridge:
             self.log(f"첫 값 받음 {topic}")
 
     def _on_battery(self, m):
+        """{ns}/battery_state (BatteryState) → info["battery"] — percentage(%) · 전압 · 전류 · 온도 · 충전 상태. NaN은 None."""
         self._put("battery", f"/{self.robot_id}/battery_state", {
             "percentage": round(float(m.percentage) * 100, 1) if m.percentage == m.percentage else None,
             "voltage": round(float(m.voltage), 2), "current": round(float(m.current), 2),
@@ -326,7 +348,8 @@ class RosBridge:
         })
 
     def set_initial_pose(self, pose: dict[str, float], reason: str):
-        """{ns}/initialpose 발행 — 지도(map) 좌표, 위치 σ 5 cm · 방향 σ 약 3°"""
+        """{ns}/initialpose 발행 — 지도(map) 좌표, 위치 σ 5 cm · 방향 σ 약 3°.
+        ScvAgent가 관제 PC config의 도크 접근 자세로 부름. 마지막으로 보낸 값은 self.initialpose (화면 표시)"""
         m = PoseWithCovarianceStamped()
         m.header.stamp = self.node.get_clock().now().to_msg()
         m.header.frame_id = "map"
@@ -344,10 +367,12 @@ class RosBridge:
         self.log(f"initialpose 발행 /{self.robot_id}/initialpose ({pose['x']}, {pose['y']}, {yaw:.3f}) — {reason}")
 
     def _on_dock(self, m):
+        """{ns}/dock_status (DockStatus) → info["dock"] — is_docked · dock_visible."""
         self._put("dock", f"/{self.robot_id}/dock_status", {"is_docked": bool(m.is_docked),
                                                              "dock_visible": bool(m.dock_visible)})
 
     def _on_odom(self, m):
+        """{ns}/odom (Odometry) → info["odom"] — odom 좌표 x · y · yaw_deg · 선속도 · 각속도 (화면 표시용)."""
         p, q = m.pose.pose.position, m.pose.pose.orientation
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         self._put("odom", f"/{self.robot_id}/odom", {
@@ -356,6 +381,8 @@ class RosBridge:
         })
 
     def _on_amcl(self, m):
+        """{ns}/amcl_pose (PoseWithCovarianceStamped) → info["pose"] — 지도 좌표 x · y · yaw(rad) · sigma_xy.
+        status 위치 · 표본 위치 · 화면 지도에 쓰는 값"""
         p, q = m.pose.pose.position, m.pose.pose.orientation
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         cov = list(m.pose.covariance)
@@ -365,15 +392,18 @@ class RosBridge:
         })
 
     def _on_ip(self, m):
+        """{ns}/ip (String) → info["ip"]."""
         self._put("ip", f"/{self.robot_id}/ip", {"ip": m.data})
 
     def _on_rssi(self, m):
+        """{ns}/rssi (String JSON {scans: [{ssid, rssi_dbm}], stamp}) → info["rssi"] + on_rssi 콜백(SurveyBuffer)."""
         d = json.loads(m.data)
         self._put("rssi", f"/{self.robot_id}/rssi", {"scans": d.get("scans", []), "stamp": d.get("stamp")})
         if self.on_rssi:
             self.on_rssi(d)
 
     def _on_detect(self, m):
+        """{ns}/virtual/detect_result (String JSON) → detect_results[request_id] (virtual_detect가 꺼냄)."""
         d = json.loads(m.data)
         with self.lock:
             self.detect_results[str(d.get("request_id"))] = d
@@ -381,6 +411,7 @@ class RosBridge:
     # ---- 3-3차 — 액션 · 가상 판정 · 사진 (MissionExecutor 스레드에서 부름. 결과는 ROS 스레드가 채움)
     @staticmethod
     def _wait(future, stop=None, timeout: float = 1e9) -> bool:
+        """rclpy future가 끝날 때까지 폴링 — 끝나면 True, stop() 또는 timeout이면 False (MissionExecutor 스레드에서)."""
         end = time.monotonic() + timeout
         while not future.done():
             if (stop and stop()) or time.monotonic() > end:
@@ -389,6 +420,7 @@ class RosBridge:
         return True
 
     def _pose_stamped(self, p: dict[str, Any]) -> PoseStamped:
+        """{x, y, yaw} → map 좌표 PoseStamped (Nav2 경로점)."""
         ps = PoseStamped()
         ps.header.frame_id = "map"
         ps.header.stamp = self.node.get_clock().now().to_msg()
@@ -400,7 +432,8 @@ class RosBridge:
         return ps
 
     def _run_action(self, client, goal, stop, feedback=None, timeout: float = 1e9) -> str:
-        """'ok' · 'failed' · 'stopped' · 'no_server'"""
+        """액션 goal을 보내고 결과까지 기다림 → 'ok' · 'failed' · 'stopped' · 'no_server'.
+        서버 대기 3 s · goal 수락 대기 10 s. 기다리는 동안 stop()이 True면 goal 취소를 요청하고 'stopped'"""
         if client is None or not client.wait_for_server(timeout_sec=3.0):
             return "no_server"
         f = client.send_goal_async(goal, feedback_callback=feedback)
@@ -418,7 +451,7 @@ class RosBridge:
         return "ok" if st == GOAL_OK else ("stopped" if st == GOAL_CANCELED else "failed")
 
     def navigate(self, waypoints: list[dict[str, Any]], stop, on_remaining=None) -> str:
-        """Nav2 navigate_through_poses — 경로점을 차례로. on_remaining(남은 점 수)"""
+        """{ns}/navigate_through_poses 액션 — 경로점을 차례로. on_remaining(남은 점 수)은 피드백마다 (진행률 계산)"""
         if NavigateThroughPoses is None:
             return "no_server"
         goal = NavigateThroughPoses.Goal()
@@ -427,16 +460,21 @@ class RosBridge:
             goal.poses = poses
         else:                                          # 이후 판 — nav_msgs/Goals
             goal.goals.goals = poses
+        # 피드백 number_of_poses_remaining → on_remaining
         fb = (lambda m: on_remaining(int(m.feedback.number_of_poses_remaining))) if on_remaining else None
         return self._run_action(self.nav, goal, stop, fb)
 
     def undock(self, stop) -> str:
+        """{ns}/undock 액션 (최대 60 s) → _run_action 결과 문자열."""
         return self._run_action(self.undock_ac, Undock.Goal(), stop, timeout=60) if Undock else "no_server"
 
     def dock(self, stop) -> str:
+        """{ns}/dock 액션 (최대 120 s) → _run_action 결과 문자열."""
         return self._run_action(self.dock_ac, Dock.Goal(), stop, timeout=120) if Dock else "no_server"
 
     def virtual_detect(self, req: dict[str, Any], timeout: float = 3.0) -> dict[str, Any] | None:
+        """가상 판정 1회 — {ns}/virtual/detect_request에 req(JSON) 발행 → 같은 request_id의 detect_result를
+        timeout까지 기다려 돌려줌, 없으면 None (DetectionAlert가 부름)"""
         rid = req["request_id"]
         self.pub_detect.publish(String(data=json.dumps(req)))
         end = time.monotonic() + timeout
@@ -464,6 +502,7 @@ class RosBridge:
             self.remove_viewer()
 
     def _on_camera(self, m):
+        """카메라 토픽 (CompressedImage) → 최신 프레임 · 순번(seq) · fps(지수 평균) 저장. MJPEG · capture_jpeg가 읽음."""
         data = bytes(m.data)
         ctype = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
         if self.camera_topic not in self.first_seen:          # (카메라)
@@ -480,6 +519,7 @@ class RosBridge:
 
     # ---- 화면용 읽기
     def snapshot(self) -> dict[str, Any]:
+        """화면 /api/robot용 — 활성 확인 상태 · 로봇 정보 최신값(age_s · stale 포함) · dock 지원 여부."""
         now = time.time()
         with self.lock:
             info = {k: {**v, "age_s": round(now - v["t"], 1), "stale": now - v["t"] > STALE_S}
@@ -494,6 +534,7 @@ class RosBridge:
             }
 
     def camera_status(self) -> dict[str, Any]:
+        """화면 /api/camera용 — 카메라 토픽 · 구독 여부 · 보는 화면 수 · 프레임 수 · fps · 마지막 프레임 나이."""
         now = time.time()
         with self.lock:
             c = self.cam
@@ -502,6 +543,7 @@ class RosBridge:
                     "age_s": round(now - c["t"], 1) if c["t"] else None, "format": c["format"], "size": c["size"]}
 
     def frame(self) -> tuple[int, bytes | None, str]:
+        """최신 카메라 프레임 (seq, JPEG/PNG 바이트 또는 None, content-type)."""
         with self.lock:
             return self.cam["seq"], self.cam["data"], self.cam["ctype"]
 
@@ -516,10 +558,14 @@ class RosBridge:
 # 아웃박스 — 관제 PC로 보낼 기록을 폴더에 쌓아 순서대로 REST로 보냄 (scv_agent의 일부)
 #   파일 하나 = 요청 하나 (번호 순). 관제 PC가 받으면(2xx) 지움, 연결 실패 · 5xx · 409는 잠시 뒤 다시,
 #   그 밖의 4xx는 다시 보내도 같으므로 failed/ 폴더로 옮기고 다음으로 넘어감
-#   관제 PC는 seq · event_uid · inspection_uid · (task_id, ap_id) · object_key로 중복을 무시하므로 다시 보내도 됨
+#   관제 PC는 seq · event_uid · inspection_uid · (task_id, ap_id) · object_key로 중복을 무시하므로 다시 보내도 됨 (모두 ON CONFLICT DO NOTHING)
+#   409는 관제 PC on_media의 「판정이 아직 없음」(사진이 판정보다 먼저 도착) — 판정 기록이 먼저 가면 풀림
 # ---------------------------------------------------------------------------
 class Outbox:
+    """관제 PC로 보낼 기록 큐 (파일 기반) — MissionExecutor · SurveyBuffer가 put, outbox 스레드가 순서대로 POST.
+    폴더: NNNNNNNNNN_{kind}.json(요청) · files/(사진 바이트) · failed/(거부 · 깨진 파일) · state.dat(run별 번호)"""
     def __init__(self, folder: Path):
+        """폴더 준비, 남은 파일의 마지막 번호 다음부터 seq, state.dat 읽기, 전송 스레드(outbox) 시작."""
         self.dir = folder
         (folder / "failed").mkdir(parents=True, exist_ok=True)
         (folder / "files").mkdir(parents=True, exist_ok=True)
@@ -528,7 +574,7 @@ class Outbox:
         self.seq = int(names[-1].split("_")[0]) + 1 if names else 1
         self.sent = 0
         self.last_error: str | None = None
-        self.state_path = folder / "state.dat"        # run마다 표본 seq · 이벤트 번호 (client를 다시 켜도 이어서)
+        self.state_path = folder / "state.dat"        # run마다 표본 seq · 이벤트 · 후보 번호 (client를 다시 켜도 이어서)
         try:
             self.state = json.loads(self.state_path.read_text())
         except (OSError, ValueError):
@@ -536,7 +582,8 @@ class Outbox:
         threading.Thread(target=self._loop, name="outbox", daemon=True).start()
 
     def counter(self, key: str, start: int = 0, step: int = 1) -> int:
-        """run별 번호를 step만큼 올리고 마지막 값을 돌려줌 (파일에 남김 — client를 다시 켜도 이어서)"""
+        """run별 번호(seq_r · event_r · cand_r)를 start 이상으로 올린 뒤 step만큼 더하고 그 값을 돌려줌.
+        state.dat에 바로 남김 — client를 다시 켜도 이어서. step=0이면 「최소 start로 맞추기」"""
         with self.lock:
             v = max(int(self.state.get(key, 0)), start) + step
             self.state[key] = v
@@ -546,6 +593,7 @@ class Outbox:
             return v
 
     def put(self, kind: str, path: str, body: dict[str, Any], file: bytes | None = None):
+        """기록 하나를 큐에 넣음 — kind(파일 이름 표시) · path(관제 PC REST 경로) · body(JSON), file이 있으면 사진(multipart)."""
         with self.lock:
             n = self.seq
             self.seq += 1
@@ -554,17 +602,21 @@ class Outbox:
                 fp = self.dir / "files" / f"{n:010d}.bin"
                 fp.write_bytes(file)
                 item["file"] = fp.name
+            # .tmp에 쓰고 이름 바꾸기 — 쓰는 도중의 파일을 전송 스레드가 읽지 않게
             tmp = self.dir / f"{n:010d}_{kind}.tmp"
             tmp.write_text(json.dumps(item, ensure_ascii=False, default=str))
             os.replace(tmp, self.dir / f"{n:010d}_{kind}.json")
 
     def pending(self) -> int:
+        """아직 보내지 않은 기록 수 (hello의 outbox_pending · 화면)."""
         return len(list(self.dir.glob("[0-9]*.json")))
 
     def status(self) -> dict[str, Any]:
+        """화면 /api/robot용 — 폴더 · 남은 수 · 보낸 수 · 마지막 오류."""
         return {"folder": str(self.dir), "pending": self.pending(), "sent": self.sent, "last_error": self.last_error}
 
     def _send(self, item: dict[str, Any]) -> int:
+        """기록 하나를 관제 PC에 POST → HTTP 상태 코드. 연결 실패는 예외(URLError · OSError)로 올림."""
         url = CFG["server"] + item["path"]
         if item.get("file"):                           # 사진 — multipart (meta JSON + 파일)
             boundary = uuid.uuid4().hex
@@ -586,6 +638,7 @@ class Outbox:
             return e.code
 
     def _loop(self):
+        """outbox 스레드 — 가장 앞 번호 파일부터 하나씩 보냄. 2xx 지움 · 연결 실패 · 409 · 5xx 다시(최대 10 s 간격) · 그 밖 failed/."""
         backoff = 1.0
         while True:
             files = sorted(self.dir.glob("[0-9]*.json"))
@@ -607,6 +660,7 @@ class Outbox:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 10.0)
                 continue
+            # 응답 코드별 처리 (머리의 규칙과 같음)
             if 200 <= code < 300:
                 f.unlink(missing_ok=True)
                 if item.get("file"):
@@ -625,7 +679,7 @@ class Outbox:
 # survey_buffer — RSSI + 같은 시각 AMCL 위치 + seq. 자기 섹터 칸 표본만 (다른 섹터를 지나며 잰 것은 버림)
 #   후보 규칙(임시 — 함수 하나, 4차에 교체): 같은 칸 표본 min_samples개 이상이고 「가장 센 AP의 중앙값」 < rssi_suspect_dbm
 # ---------------------------------------------------------------------------
-POSE_SIGMA_OK_M = 0.25                 # AMCL 위치 σ가 이보다 크면 pose_ok = false (E5)
+POSE_SIGMA_OK_M = 0.25                 # AMCL 위치 σ가 이보다 크면 pose_ok = false (E5 상황 — 이벤트는 보내지 않고 표본에만 표시)
 POSE_MAX_AGE_S = 1.5
 
 
@@ -639,6 +693,7 @@ def candidate_rule(medians: dict[str, float], n_min: int, counts: dict[str, int]
 
 
 def iqr(vals: list[float]) -> float:
+    """사분위 범위 Q3 - Q1 (값 2개 미만이면 0) — 정밀측정 rssi_iqr."""
     if len(vals) < 2:
         return 0.0
     q = statistics.quantiles(vals, n=4, method="inclusive")
@@ -646,7 +701,11 @@ def iqr(vals: list[float]) -> float:
 
 
 class SurveyBuffer:
+    """survey_buffer — RosBridge.on_rssi로 RSSI를 받아 자기 섹터 칸 표본(+ AMCL 위치 · seq)을 모음.
+    표본 묶음은 flush로 Outbox(/api/agent/samples), 칸 중앙값 후보는 find_candidates로 MissionExecutor에 넘김.
+    정밀측정(measure) · 최근 SSID(recent_ssids → status ssids)도 담당"""
     def __init__(self, ros: RosBridge, outbox: Outbox):
+        """RosBridge.on_rssi에 자기 on_rssi를 연결. cfg(run_config)를 받기 전에는 표본을 모으지 않음."""
         self.ros, self.outbox = ros, outbox
         self.lock = threading.Lock()
         self.cfg: dict[str, Any] | None = None
@@ -664,6 +723,8 @@ class SurveyBuffer:
         ros.on_rssi = self.on_rssi
 
     def configure(self, cfg: dict[str, Any]):
+        """MissionExecutor.on_run_config가 부름 — 격자 · 자기 섹터 칸 · 측정 SSID 설정.
+        새 run이면 칸 기록을 비우고, 이어서 쓸 표본 seq를 관제 PC GET /api/agent/last-seq와 state.dat 중 큰 값으로 맞춤"""
         with self.lock:
             new_run = not self.cfg or self.cfg.get("run_id") != cfg.get("run_id")
             self.cfg = cfg
@@ -682,11 +743,14 @@ class SurveyBuffer:
             self.seq = self.outbox.counter(f"seq_r{cfg['run_id']}", last, 0)
 
     def recent_ssids(self) -> list[str]:
+        """최근 5 s 안에 받은 SSID 목록 — status의 ssids (관제 PC가 AP 활성으로 표시)."""
         now = time.time()
         with self.lock:
             return sorted(s for s, t in self.seen.items() if now - t < 5)
 
-    def on_rssi(self, d: dict[str, Any]):              # ROS 스레드
+    def on_rssi(self, d: dict[str, Any]):              # ROS 스레드 (RosBridge._on_rssi에서)
+        """rssi JSON 하나 처리 — 정밀측정 중이면 그 값만 모으고, SURVEY task 중이면 자기 섹터 칸 표본(batch)을 만듦.
+        pose_ok인 표본만 칸 중앙값 재료(vals)로. 위치가 STALE_S 넘게 오래되면 버림"""
         now = time.time()
         scans = d.get("scans") or []
         with self.lock:
@@ -708,6 +772,7 @@ class SurveyBuffer:
         if not pose or age > STALE_S:
             return
         pose_ok = (pose.get("sigma_xy") or 0) <= POSE_SIGMA_OK_M and age <= POSE_MAX_AGE_S
+        # 지금 위치의 격자 칸 (ix, iy) → 자기 섹터 칸 번호
         g = cfg["grid"]
         key = (math.floor((pose["x"] - g["origin_x"]) / g["size"]), math.floor((pose["y"] - g["origin_y"]) / g["size"]))
         cid = self.cells.get(key)
@@ -715,6 +780,7 @@ class SurveyBuffer:
             with self.lock:
                 self.stats["other_sector"] += 1
             return
+        # 측정 SSID만 표본으로 — SSID 하나 = 표본 하나 (seq 하나)
         rows = []
         for sc in scans:
             if sc["ssid"] not in self.ssids:
@@ -734,6 +800,8 @@ class SurveyBuffer:
                 self.where[cid] = (pose["x"], pose["y"])
 
     def flush(self):
+        """쌓인 표본 묶음 → Outbox samples (POST /api/agent/samples {robot_id, run_id, samples}) · 마지막 seq를 state.dat에.
+        MissionExecutor가 주행 중 1초마다 · SURVEY 끝 · task 결과 전에 부름"""
         with self.lock:
             batch, self.batch = self.batch, []
             cfg, seq = self.cfg, self.seq
@@ -743,7 +811,8 @@ class SurveyBuffer:
                             {"robot_id": self.ros.robot_id, "run_id": cfg["run_id"], "samples": batch})
 
     def find_candidates(self) -> list[dict[str, Any]]:
-        """새로 후보가 된 칸 → CANDIDATE 이벤트 detail 목록"""
+        """새로 후보가 된 칸 → CANDIDATE 이벤트 detail 재료 목록 {cell_id, score, medians, target(재방문 위치)}.
+        같은 칸은 run에서 한 번만 (reported). MissionExecutor가 SURVEY_SEGMENT 끝에 부름"""
         st = self.cfg["settings"]
         thr, n_min = float(st.get("rssi_suspect_dbm") or -72), int(float(st.get("min_samples") or 3))
         out = []
@@ -760,7 +829,7 @@ class SurveyBuffer:
         return out
 
     def measure(self, seconds: float, stop) -> dict[str, list[float]]:
-        """정지 정밀측정 — seconds 동안 받은 RSSI (ssid → 값들)"""
+        """정지 정밀측정 — seconds 동안(stop()이면 일찍 끝) 받은 측정 SSID RSSI (ssid → 값들). 위치 · 칸 조건 없음"""
         with self.lock:
             self.precise = {}
         end = time.monotonic() + seconds
@@ -776,13 +845,15 @@ class SurveyBuffer:
 #   3차는 가상 판정: 가상 로봇에 virtual/detect_request → virtual/detect_result (world.yaml 정답)
 #   실제 구성에서는 같은 자리에서 카메라 영상 YOLO 결과를 쓰면 됨 (이후 차수)
 #   판정 규칙(임시 — 함수 하나, 4차에 교체): 가림 · 정면 아님 → 자세 보정 재관측(max_pose_retry까지) → 넘으면 OCCLUDED · 미확인
-#     안 보임 → NOT_DETECTED · 위치가 POSITION_TOL_M 넘게 다름 → POSITION_ANOMALY · 상태 이상 → ABNORMAL · 그 밖 NORMAL
+#     안 보임 → NOT_DETECTED(abnormal) · 위치가 POSITION_TOL_M 넘게 다름 → POSITION_ANOMALY · 상태 이상 → ABNORMAL · 그 밖 NORMAL
+#     가상 판정 응답이 없음(시간 초과) → NOT_DETECTED · unconfirmed
 # ---------------------------------------------------------------------------
 POSITION_TOL_M = 0.5
 MODEL_VERSION = "virtual-truth-1"
 
 
 def judge(fac: dict[str, Any], res: dict[str, Any] | None) -> dict[str, Any]:
+    """판정 규칙 — fac(task_assign의 facility) + 가상 판정 결과 res → {detail, final, frontal, det(쓴 검출)}."""
     if res is None:
         return {"detail": "NOT_DETECTED", "final": "unconfirmed", "frontal": False, "det": None}
     if res.get("occluded") or not res.get("frontal"):
@@ -790,6 +861,7 @@ def judge(fac: dict[str, Any], res: dict[str, Any] | None) -> dict[str, Any]:
     dets = [d for d in res.get("detections") or [] if d.get("class") == fac["facility_type"]]
     if not dets:
         return {"detail": "NOT_DETECTED", "final": "abnormal", "frontal": True, "det": None}
+    # 같은 종류 검출 중 등록 위치에 가장 가까운 것으로 판정
     d = min(dets, key=lambda d: math.hypot(d["x"] - fac["expected_x"], d["y"] - fac["expected_y"]))
     if math.hypot(d["x"] - fac["expected_x"], d["y"] - fac["expected_y"]) > POSITION_TOL_M:
         return {"detail": "POSITION_ANOMALY", "final": "abnormal", "frontal": True, "det": d}
@@ -799,10 +871,13 @@ def judge(fac: dict[str, Any], res: dict[str, Any] | None) -> dict[str, Any]:
 
 
 class DetectionAlert:
+    """detection_alert — 설비 판정 1회 + 사진. MissionExecutor(FACILITY_CHECK)가 부름, RosBridge 가상 판정 · 카메라 사용."""
     def __init__(self, ros: RosBridge):
+        """ros = 가상 판정 요청 · 사진 캡처에 쓰는 RosBridge."""
         self.ros = ros
 
     def inspect(self, fac: dict[str, Any], max_retry: int, stop) -> tuple[dict[str, Any], bytes | None, int]:
+        """가상 판정 → judge. OCCLUDED면 max_retry번까지 다시 관측(1 s 간격) → (판정, 사진 JPEG 또는 None, 재관측 수)."""
         retry = 0
         while True:
             res = self.ros.virtual_detect({"request_id": uuid.uuid4().hex[:12], **{k: fac[k] for k in (
@@ -820,7 +895,10 @@ class DetectionAlert:
 #   관제 PC 연결이 끊겨도 받은 task는 끝까지 하고, 결과는 아웃박스로 (다시 연결되면 보냄)
 # ---------------------------------------------------------------------------
 class MissionExecutor:
+    """mission_executor — ScvAgent가 넘긴 관제 PC 명령으로 task를 하나씩 실행 (mission 스레드, 큐 q).
+    결과 · 이벤트 · 정밀측정 · 판정 · 사진은 Outbox로, 진행률 · 받음 · 거부는 send_ws(ScvAgent)로. status()는 ScvAgent가 1초마다 부름"""
     def __init__(self, ros: RosBridge, survey: SurveyBuffer, detect: DetectionAlert, outbox: Outbox):
+        """구성 요소 연결 · 상태 초기화 · mission 스레드 시작. send_ws는 ScvAgent가 나중에 넣음."""
         self.ros, self.survey, self.detect, self.outbox = ros, survey, detect, outbox
         self.run_cfg: dict[str, Any] | None = None
         self.run_id: int | None = None
@@ -844,6 +922,7 @@ class MissionExecutor:
 
     # ---- 관제 PC 명령 (ScvAgent가 부름)
     def on_run_config(self, cfg: dict[str, Any]):
+        """WS run_config — 순찰 설정 저장 · SurveyBuffer.configure. 새 run이면 카메라 탭 기록(log · photos)을 새로."""
         self.run_cfg, self.run_id = cfg, cfg.get("run_id")
         if self.log["run_id"] != self.run_id:          # 새 순찰 — 카메라 탭 기록을 새로
             self.log = {"run_id": self.run_id, "candidates": [], "inspections": []}
@@ -853,6 +932,7 @@ class MissionExecutor:
               f"· SSID {cfg.get('ssids')}", flush=True)
 
     def on_task_assign(self, t: dict[str, Any]):
+        """WS task_assign — 큐에 넣음. 이미 실행 중이거나 큐에 있는 task_id면 무시 (재접속 때 다시 오는 것)."""
         cur = self.task
         if cur and cur["task_id"] == t["task_id"]:
             return                                     # 이미 하는 중 (재접속 때 다시 온 것)
@@ -861,6 +941,9 @@ class MissionExecutor:
         self.q.put(t)
 
     def on_task_cancel(self, task_id: str, go_dock: bool):
+        """WS task_cancel — 큐에서 빼고, 실행 중이면 cancel 신호(go_dock이면 끝난 뒤 도크로).
+        실행 중 task가 없고 go_dock이면 복귀(_RETURN)만 넣음"""
+        # 큐(queue.Queue 내부 deque)에서 그 task만 뺌
         with self.q.mutex:
             keep = [x for x in self.q.queue if x.get("task_id") != task_id]
             self.q.queue.clear()
@@ -879,6 +962,8 @@ class MissionExecutor:
         self.log["status"] = status
 
     def on_run_cancel(self, run_id: int, go_dock: bool):
+        """WS run_cancel (관제 PC 순찰 중단) — 큐 비움 · 카메라 탭 기록 aborted · 실행 중 task 취소, go_dock이면 도크로.
+        도크 자세는 home_pose에 남겨 _return_home이 씀"""
         with self.q.mutex:
             self.q.queue.clear()
         self.log["status"] = "aborted"
@@ -892,8 +977,10 @@ class MissionExecutor:
             self.q.put({"type": "_RETURN", "task_id": None})
         self.run_id = None
 
-    # ---- 상태 (1 Hz)
+    # ---- 상태 (1 Hz — ScvAgent.run이 불러 WS status로 보냄)
     def status(self) -> dict[str, Any]:
+        """WS status 본문 (RobotStatus 필드) — stamp · robot_id · run_id · task_id · nav_state · progress · x · y · yaw ·
+        battery_pct · is_docked · estop · ssids. 위치 · 배터리 · 도킹은 STALE_S 안의 값만, run_id · progress는 task 실행 중일 때만"""
         pose = self.ros.latest("pose")
         bat = self.ros.latest("battery")
         dock = self.ros.latest("dock")
@@ -910,6 +997,7 @@ class MissionExecutor:
         }
 
     def snapshot(self) -> dict[str, Any]:
+        """화면 /api/robot용 — run · 단계 · 진행률 · 실행 중 task · 대기 task · 최근 결과 8개 · 표본 통계."""
         t = self.task
         return {"run_id": self.run_id, "phase": self.phase, "progress": self.progress,
                 "task": t and {k: t.get(k) for k in ("task_id", "type", "target_ref")},
@@ -918,6 +1006,7 @@ class MissionExecutor:
 
     # ---- 실행
     def _loop(self):
+        """mission 스레드 — 큐에서 task를 하나씩 꺼내 실행하고 결과를 보냄 (취소된 task는 결과 없음)."""
         while True:
             t = self.q.get()
             self.cancel.clear()
@@ -941,16 +1030,20 @@ class MissionExecutor:
                 self.task, self.progress, self.phase = None, None, "IDLE"
 
     def _note(self, t, text):
+        """화면용 최근 결과(history)에 한 줄 + 로그."""
         self.history.append({"task_id": t.get("task_id"), "type": t.get("type"), "result": text, "at": utc_now_iso()})
         print(f"[mission] {t.get('task_id')} {t.get('type')} — {text}", flush=True)
 
     def _result(self, t, ok, reason):
+        """task 결과 — 표본을 먼저 flush하고 Outbox result (POST /api/agent/tasks/{task_id}/result {robot_id, ok, reason, ended_at})."""
         self.survey.flush()
         self.outbox.put("result", f"/api/agent/tasks/{t['task_id']}/result",
                         {"robot_id": self.ros.robot_id, "ok": ok, "reason": reason, "ended_at": utc_now_iso()})
         self._note(t, "완료" if ok else f"실패 {reason}")
 
     def _event(self, code: str, level: str, detail: dict[str, Any] | None = None, task_id: str | None = None):
+        """이벤트 하나 → Outbox event (POST /api/agent/events {robot_id, events: [ev]}).
+        event_uid = {robot_id}-r{run}-e{번호} (run별 번호는 state.dat — 다시 보내도 관제 PC가 중복 무시)"""
         run = (self.task or {}).get("run_id") or self.run_id
         n = self.outbox.counter(f"event_r{run}")
         ev = {"event_uid": f"{self.ros.robot_id}-r{run}-e{n:06d}", "run_id": run,
@@ -959,16 +1052,19 @@ class MissionExecutor:
         self.outbox.put("event", "/api/agent/events", {"robot_id": self.ros.robot_id, "events": [ev]})
 
     def _ws(self, kind, body):
+        """관제 PC에 WS 메시지 (type, body) — ScvAgent.send_ws (연결 중일 때만, 끊겨 있으면 버림)."""
         if self.send_ws:
             self.send_ws(kind, body)
 
     def _setting(self, key, default):
+        """run_config settings 값을 float로 (없거나 숫자가 아니면 default)."""
         try:
             return float(((self.run_cfg or {}).get("settings") or {}).get(key))
         except (TypeError, ValueError):
             return default
 
     def _battery_low(self) -> bool:
+        """배터리 % ≤ battery_return_pct(기본 15)면 True."""
         b = self.ros.latest("battery")
         return bool(b and b["percentage"] is not None and b["percentage"] <= self._setting("battery_return_pct", 15))
 
@@ -987,6 +1083,7 @@ class MissionExecutor:
         last = {"t": 0.0}
 
         def stop():
+            """navigate의 stop 콜백 (폴링) — 배터리 부족 표시, 1초마다 표본 flush · task_progress, 취소 · 배터리 부족이면 True."""
             if check_battery and self._battery_low():
                 low["hit"] = True
             now = time.monotonic()
@@ -997,9 +1094,11 @@ class MissionExecutor:
             return self.cancel.is_set() or low["hit"]
 
         def remaining(n):
+            """피드백(남은 경로점 수) → 진행률 p0~p1."""
             self.progress = p0 + (p1 - p0) * (1 - n / total)
 
         r = self.ros.navigate(waypoints, stop, remaining)
+        # 결과 → (ok, 사유). 배터리 부족 E2 · 막힘 E1 이벤트
         if low["hit"]:
             self._event("E2", "warn", {"battery_pct": (self.ros.latest("battery") or {}).get("percentage")})
             return False, "BATTERY_LOW"
@@ -1015,6 +1114,8 @@ class MissionExecutor:
         return False, "BLOCKED"
 
     def _execute(self, t) -> tuple[bool, str | None]:
+        """task 하나 실행 → (ok, 실패 사유). 지도 파일 확인 → task_accepted → type별 실행
+        (SURVEY_SEGMENT · REINSPECTION · FACILITY_CHECK · DOCK). 각 단계의 기록은 Outbox로"""
         if t.get("map_path") and not os.path.exists(t["map_path"]):   # 작업의 지도 파일이 이 제어 PC에 없음
             self._ws("task_rejected", {"task_id": t["task_id"], "reason": "MAP_MISMATCH"})
             self._event("MAP_MISMATCH", "error", {"map_path": t["map_path"]})
@@ -1023,6 +1124,7 @@ class MissionExecutor:
         self._ws("task_accepted", {"task_id": t["task_id"]})
         kind = t["type"]
         self._note(t, f"시작 ({len(t.get('waypoints') or [])}점)")
+        # SURVEY_SEGMENT — 주행 중 표본 수집(collect_task) → 끝나면 새 후보 칸마다 CANDIDATE 이벤트
         if kind == "SURVEY_SEGMENT":
             self.survey.collect_task = t["task_id"]
             try:
@@ -1039,6 +1141,7 @@ class MissionExecutor:
                 self.log["candidates"].append({"candidate_id": cid, "cell_id": c["cell_id"], "score": c["score"],
                                                "target": list(c["target"]), "outcome": None, "precise": None, "at": utc_now_iso()})
             return ok, why
+        # REINSPECTION — 후보 지점(진행 0~0.3) → 정지 정밀측정(0.3~1) → precise-measures · CONFIRMED/CLEARED/UNCONFIRMED 이벤트
         if kind == "REINSPECTION":
             ok, why = self._drive(t, t["waypoints"], 0.0, 0.3)
             if not ok:
@@ -1047,6 +1150,7 @@ class MissionExecutor:
             sec = self._setting("precise_duration_s", 30)
             t0 = time.monotonic()
             got = {}
+            # 정밀측정은 별도 스레드 — 기다리는 동안 1초마다 진행률(task_progress)
             th = threading.Thread(target=lambda: got.update(self.survey.measure(sec, self.cancel.is_set)))
             th.start()
             while th.is_alive():
@@ -1055,6 +1159,7 @@ class MissionExecutor:
                 th.join(1.0)
             if self.cancel.is_set():
                 return False, "CANCELED"
+            # SSID별 중앙값 · IQR → 관제 PC precise_measures (cell_id = 후보 ref = 칸 번호)
             cand = t.get("candidate") or {}
             meas = [{"ssid": s, "duration_s": int(round(time.monotonic() - t0)), "n_samples": len(v),
                      "rssi_median": statistics.median(v), "rssi_iqr": iqr(v), "measured_at": utc_now_iso()}
@@ -1063,6 +1168,7 @@ class MissionExecutor:
                 self.outbox.put("precise", "/api/agent/precise-measures",
                                 {"robot_id": self.ros.robot_id, "task_id": t["task_id"], "cell_id": int(cand.get("ref")),
                                  "measures": meas})
+            # 판정 — 가장 센 SSID 중앙값 < rssi_suspect_dbm이면 CONFIRMED, 값이 없으면 UNCONFIRMED
             best = max((m["rssi_median"] for m in meas), default=None)
             thr = self._setting("rssi_suspect_dbm", -72)
             code = "UNCONFIRMED" if best is None else ("CONFIRMED" if best < thr else "CLEARED")
@@ -1073,6 +1179,7 @@ class MissionExecutor:
                 if c["candidate_id"] == t["target_ref"]:
                     c.update(outcome=code, precise=best)
             return True, None
+        # FACILITY_CHECK — 관측 자세(진행 0~0.6) → 판정 1회 + 사진 → inspections · media
         if kind == "FACILITY_CHECK":
             ok, why = self._drive(t, t["waypoints"], 0.0, 0.6)
             if not ok:
@@ -1103,6 +1210,7 @@ class MissionExecutor:
                 self._event("E6", "warn", {"facility_id": fac["facility_id"], "pose_retry": retry})
             self.progress = 1.0
             return True, None
+        # DOCK — 이미 도킹이면 끝. 아니면 도크 접근 자세(0~0.8, 배터리 확인 안 함) → dock 액션
         if kind == "DOCK":
             d = self.ros.latest("dock")
             if d and d.get("is_docked"):
@@ -1119,7 +1227,8 @@ class MissionExecutor:
         return False, f"UNKNOWN_TYPE:{kind}"
 
     def _return_home(self):
-        """순찰 중단 · 관제 PC에 없는 task — task 없이 도크로 복귀"""
+        """task 없이 도크로 복귀 (순찰 중단 · 취소의 go_dock). 도크 자세: run_config → home_pose → 관제 PC config 순.
+        이미 도킹 중이거나 도크 자세가 없으면 아무것도 안 함. 주행 · 도킹은 취소할 수 없음(stop 없음)"""
         dock = ((self.run_cfg or {}).get("dock_pose") or getattr(self, "home_pose", None)
                 or ((link.config or {}).get("dock_pose") if link else None))
         d = self.ros.latest("dock")
@@ -1135,13 +1244,16 @@ class MissionExecutor:
 
 # ---------------------------------------------------------------------------
 # scv_agent — 관제 PC와의 유일한 창구 (ROS 노드 아님). 로봇이 활성이 되면 WebSocket /ws/agent에 접속해
-#   hello 한 번 → 이후 1초마다 status, 관제 PC 명령(run_config · task_assign · task_cancel · run_cancel)을 받음.
-#   기록은 Outbox가 REST로. 로봇이 꺼지면(값 끊김) 연결을 닫아 관제 PC도 비활성
+#   hello 한 번(→ welcome) → 이후 1초마다 status, 관제 PC 메시지(config · run_config · task_assign · task_cancel ·
+#   run_end · run_cancel)를 받음 (config → RosBridge initialpose, 나머지 → MissionExecutor). 보내는 것은 status와 MissionExecutor의 task_progress · task_accepted ·
+#   task_rejected. 기록은 Outbox가 REST로. 로봇이 꺼지면(값 끊김) 연결을 닫아 관제 PC도 비활성
 # ---------------------------------------------------------------------------
 class ScvAgent:
+    """관제 PC WebSocket 클라이언트 (Uvicorn 이벤트 루프의 작업). 받은 명령은 MissionExecutor.on_*, config는 initialpose로."""
     STATUS_PERIOD_S = 1.0
 
     def __init__(self, ros: RosBridge, executor: MissionExecutor, outbox: Outbox):
+        """상태 초기화, MissionExecutor.send_ws에 자기 send_ws를 넣음."""
         self.ros = ros
         self.executor = executor
         self.outbox = outbox
@@ -1160,15 +1272,18 @@ class ScvAgent:
         executor.send_ws = self.send_ws
 
     def ws_url(self) -> str:
+        """관제 PC 주소 → WebSocket 주소 (http → ws, https → wss) + /ws/agent."""
         s = CFG["server"]
         return ("wss://" + s[8:] if s.startswith("https://") else "ws://" + s.split("://", 1)[-1]) + "/ws/agent"
 
     def send_ws(self, kind: str, body: dict[str, Any]):
-        """스레드 안전 — 연결 중일 때만 보냄 (진행률 등은 끊겨 있으면 버림)"""
+        """스레드 안전 — 연결 중일 때만 outq에 넣음 (진행률 등은 끊겨 있으면 버림). run 루프가 꺼내 보냄"""
         if self.loop and self.outq is not None and self.state == "connected":
             self.loop.call_soon_threadsafe(self.outq.put_nowait, (kind, body))
 
     async def run(self):
+        """접속 루프 — 로봇 활성 기다림 → 접속 · hello → welcome 확인 → 1초마다 status · outq 전송 · 받은 메시지 처리.
+        로봇이 비활성이 되면 정상 종료(1000)로 닫고, 오류면 1~15 s 뒤 다시"""
         self.loop = asyncio.get_running_loop()
         backoff = 1.0
         while True:
@@ -1182,6 +1297,7 @@ class ScvAgent:
             self.state, self.detail = "connecting", f"{self.ws_url()} 접속 중"
             try:
                 async with ws_connect(self.ws_url(), open_timeout=5) as ws:
+                    # hello — 순찰 중 재접속이면 관제 PC가 active_task_id로 task를 다시 보내거나 취소(agent_resync)
                     t = self.executor.task
                     hello = {"type": "hello", "msg_id": f"c-{self.connects + 1:06d}", "ts": utc_now_iso(), "body": {
                         "robot_id": self.ros.robot_id, "agent_version": AGENT_VERSION,
@@ -1189,6 +1305,7 @@ class ScvAgent:
                         "outbox_pending": self.outbox.pending()}}
                     await ws.send(json.dumps(hello))
                     self.hello_at = time.time()
+                    # 첫 응답이 welcome이 아니면(예: error UNKNOWN_ROBOT) 실패로 보고 다시 접속
                     reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                     if reply.get("type") != "welcome":
                         raise RuntimeError(f"관제 PC 응답: {reply.get('type')} {reply.get('body')}")
@@ -1214,6 +1331,7 @@ class ScvAgent:
                             self.sent_n += 1
                             await ws.send(json.dumps({"type": kind, "msg_id": f"c-m{self.sent_n:08d}", "ts": utc_now_iso(),
                                                       "body": b}))
+                        # 받기 — 다음 status 시각까지 짧게(0.05~0.2 s) 기다림
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=max(0.05, min(0.2, next_status - time.monotonic())))
                         except asyncio.TimeoutError:
@@ -1234,6 +1352,7 @@ class ScvAgent:
             backoff = min(backoff * 2, 15.0)
 
     def on_message(self, msg: dict[str, Any]):
+        """관제 PC WS 메시지 처리 (이벤트 루프에서 동기로) — config · run_config · task_assign · task_cancel · run_end · run_cancel."""
         kind = msg.get("type")
         b = msg.get("body") or {}
         if kind == "config":
@@ -1243,7 +1362,7 @@ class ScvAgent:
             print(f"[agent] config 받음 — 지도 {mp.get('name', '없음')} · 도크 접근 자세 {dock}", flush=True)
             if not dock:
                 return
-            # 로봇이 도크에 있거나(dock_status) 아직 위치를 모를 때만 시작 위치를 지정 — 순찰 중 위치를 덮어쓰지 않음
+            # 로봇이 도크에 있고(dock_status) 실행 중 task가 없거나, 아직 위치를 모를 때만 시작 위치를 지정 — 순찰 중 위치를 덮어쓰지 않음
             d = self.ros.latest("dock")                 # 최근 STALE_S 안의 값만 (없으면 None)
             p = self.ros.latest("pose")
             docked = bool(d and d.get("is_docked"))
@@ -1267,6 +1386,7 @@ class ScvAgent:
             print(f"[agent] ← {kind} (처리하지 않는 메시지)", flush=True)
 
     def status(self) -> dict[str, Any]:
+        """화면 /api/robot의 link — 연결 상태 · 받은 config · hello · status 전송 수."""
         return {"server": CFG["server"], "state": self.state, "detail": self.detail,
                 "config": self.config, "config_at": self.config_at,
                 "hello_at": self.hello_at, "connects": self.connects,
@@ -1276,6 +1396,7 @@ class ScvAgent:
 # ---------------------------------------------------------------------------
 # 웹 (FastAPI)
 # ---------------------------------------------------------------------------
+# 전역 구성 요소 (lifespan에서 만듦) · 로그인 세션 (메모리, token → 사용자 + 만료 시각)
 ros: RosBridge | None = None
 executor: MissionExecutor | None = None
 link: ScvAgent | None = None
@@ -1285,6 +1406,8 @@ SESSIONS: dict[str, dict[str, Any]] = {}
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """앱 시작 — RosBridge · Outbox · SurveyBuffer · MissionExecutor(+ DetectionAlert) · ScvAgent를 만들고 ScvAgent.run 시작.
+    종료 때 접속 작업 취소 · ROS 정리"""
     global ros, executor, link, outbox
     camera_topic = CFG["camera_topic"] or f"/{CFG['robot_id']}/oakd/rgb/image_raw/compressed"
     ros = RosBridge(CFG["robot_id"], camera_topic, CFG["check_s"])
@@ -1303,6 +1426,7 @@ app = FastAPI(title="SCV client page", version=AGENT_VERSION, lifespan=lifespan)
 
 
 def current_user(request: Request) -> dict[str, Any]:
+    """세션 쿠키 확인 → 사용자 (만료 시각 연장). 없거나 만료면 401."""
     token = request.cookies.get(SESSION_COOKIE)
     s = SESSIONS.get(token or "")
     if not s or s["expires"] < time.time():
@@ -1314,16 +1438,19 @@ def current_user(request: Request) -> dict[str, Any]:
 
 @app.get("/", include_in_schema=False)
 def root():
+    """/ → 로그인 화면."""
     return RedirectResponse("/client/login")
 
 
 @app.get("/client", include_in_schema=False)
 def client_root():
+    """/client → 로봇 정보 화면."""
     return RedirectResponse("/client/robot")
 
 
 @app.get("/client/{page}", include_in_schema=False)
 def client_page(page: str):
+    """/client/{login · robot · camera} — 한 페이지 앱(static/client/index.html)."""
     if page not in PAGES:
         raise HTTPException(404, "없는 화면입니다")
     return FileResponse(STATIC_DIR / "client" / "index.html")
@@ -1333,7 +1460,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 def server_login(username: str, password: str) -> dict[str, Any]:
-    """관제 PC POST /api/client/login — 제어 PC는 DB에 직접 접속하지 않음."""
+    """관제 PC POST /api/client/login {username, password} → user {user_id, username, role}. 제어 PC는 DB에 직접 접속하지 않음.
+    400 · 401은 그대로, 그 밖 오류 502, 접속 실패 503"""
     req = urllib.request.Request(CFG["server"] + "/api/client/login", method="POST",
                                  data=json.dumps({"username": username, "password": password}).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -1352,6 +1480,7 @@ def server_login(username: str, password: str) -> dict[str, Any]:
 
 @app.post("/api/login")
 async def login(request: Request):
+    """POST /api/login — 관제 PC로 계정 확인 → 세션 쿠키 발급, 로봇 활성 확인 시작(ros.on_login)."""
     body = await request.json()
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
@@ -1368,6 +1497,7 @@ async def login(request: Request):
 
 @app.post("/api/logout")
 def logout(request: Request):
+    """POST /api/logout — 세션 삭제 · 쿠키 삭제 (ROS 구독 · 관제 PC 연결은 그대로)."""
     SESSIONS.pop(request.cookies.get(SESSION_COOKIE, ""), None)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(SESSION_COOKIE, path="/")
@@ -1376,6 +1506,7 @@ def logout(request: Request):
 
 @app.get("/api/me")
 def me(request: Request):
+    """GET /api/me — 로그인 사용자(없으면 None)와 robot_id."""
     try:
         u = current_user(request)
     except HTTPException:
@@ -1385,6 +1516,7 @@ def me(request: Request):
 
 @app.get("/api/robot")
 def robot(request: Request):
+    """GET /api/robot — 로봇 정보 탭: ROS 상태 · 관제 PC 연결 · status · initialpose · mission · outbox."""
     current_user(request)
     return {**ros.snapshot(), "link": link.status(), "status": executor.status(), "initialpose": ros.initialpose,
             "mission": executor.snapshot(), "outbox": outbox.status()}
@@ -1392,6 +1524,7 @@ def robot(request: Request):
 
 @app.get("/api/camera")
 def camera(request: Request):
+    """GET /api/camera — 카메라 상태 + 순찰 중 여부 (실시간 영상은 순찰 중에만)."""
     current_user(request)
     return {**ros.camera_status(), "patrol": executor.patrolling}
 
@@ -1411,6 +1544,7 @@ def patrol(request: Request):
 
 @app.get("/api/patrol/photo/{uid}")
 def patrol_photo(uid: str, request: Request):
+    """GET /api/patrol/photo/{uid} — 판정 사진 (메모리의 최근 12장)."""
     current_user(request)
     data = executor.photos.get(uid)
     if not data:
@@ -1461,6 +1595,7 @@ def map_info(request: Request):
 
 @app.get("/api/map/image")
 def map_image(request: Request):
+    """GET /api/map/image — local_map이 만든 PNG (먼저 /api/map을 불러야 있음)."""
     current_user(request)
     if not MAP_CACHE.get("png"):
         raise HTTPException(404, "지도 이미지가 없습니다")
@@ -1473,6 +1608,7 @@ async def camera_stream(request: Request):
     current_user(request)
 
     async def frames():
+        """MJPEG 프레임 생성기 — 연결된 동안 viewer로 등록, 새 프레임(seq 바뀜)만 보냄 (~33 Hz 폴링)."""
         ros.add_viewer()
         try:
             last = -1
@@ -1491,6 +1627,7 @@ async def camera_stream(request: Request):
 
 
 def main():
+    """명령행 옵션 → CFG, Uvicorn 실행 (ROS 인자는 무시)."""
     ap = argparse.ArgumentParser(description="SCV client page (제어 PC)")
     ap.add_argument("--robot-id", default=CFG["robot_id"])
     ap.add_argument("--server", default=CFG["server"])
