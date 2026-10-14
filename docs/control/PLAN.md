@@ -1,4 +1,4 @@
-# 관제 A (inspection_manager) 인수 작업 계획 (v0.5)
+# 관제 A (inspection_manager) 인수 작업 계획 (v0.8)
 
 2026-10-13 저녁 · 담당 현준 (10/13 관제 A 에 추가 — 관제는 정섭 · 현민 · 현준, 주행도 그대로) · 기준: COOP Hub 일정 T6·T2·T5-8, `docs/interfaces.md` v0.2.11, `docs/CONTROL_MANAGER_STATUS.md`(10/12 인수인계), `docs/TEST_PLAN.md`, `docs/CRITICAL_PATH.md`
 
@@ -13,6 +13,10 @@ v0.4 (10/13 20:20): 남은 일을 순서대로 4절 맨 위 「지금 남은 일
 v0.5 (10/14 새벽): 10/13 밤 robot3 실기 결과와 새 측정 경로 계획을 넣었습니다 (4절 「새 측정 경로」). 「지금 남은 일」을 그 순서로 다시 짰습니다.
 
 v0.6 (10/14 오후): 통합에 빠진 `survey_buffer`(IF-08·09)와 DB 연결(2-10 · D4 · 4-7 · 4-4)을 작업 표로 넣었습니다 (4절 「survey_buffer 추가」 · 「DB 연결」, 「지금 남은 일」 12 · 13번). 로봇 PC 는 지금 시험용 `manual_tagger` 가 그 자리를 대신하고, `backend:=db` 는 실제 DB 로 돌린 적이 없습니다.
+
+v0.7 (10/14): 12번 S-1·2·3 구현, S-4의 단위·로봇 없는 ROS 연동 검증 완료. CSV 선저장·번호 복원·회차별 sync·tf launch 교체. 관제·RSSI 시험 113 passed, `scv_msgs/scv_survey/scv_bringup` 빌드 성공. 실제 Wi-Fi 차단 시험과 13번 자동 sync·DB 저장은 남음.
+
+v0.8 (10/14): 사용자 요청으로 13번 구현. DbStore 원본 저장·마지막 번호 조회, writer 자동 sync·저장 대기·복구, ROS 회차 소유 모드 추가. 별도 PostgreSQL과 가짜 ROS에서 검증. 실제 관제 PC 등록·robot3 한 회차·Wi-Fi 차단, D4 팀 배포 결정은 남음. 시험 방법은 `docs/daily/HJAE99/2026-10-14_survey_buffer_작업요약_테스트방법.md`.
 
 ## 0. 한눈에
 
@@ -132,7 +136,7 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 | 9 | 두 대 동시, 이어서 DB 백엔드 | 2-9 · 2-10 (DB-1 – DB-3) | 10/14 통합 중 | 7번 · D4 |
 | 10 | 단계를 로봇마다 따로 (D5), 마스크 반영 대기 | 3-1 · 3-2 | 한 대 완주 뒤 | 7번 |
 | 11 | 예외 시험 (통로에 상자 5-3 포함), 웹과 잇기 | 단계 5 · 단계 4 | 10/14 통합 중 | D2 · D4 · D6 |
-| 12 | survey_buffer 추가 — run_id · 버퍼 · `survey/sync` · CSV, 끊김 복구 시험 | S-1 – S-4 | 10/14 통합 중 | 7번 · 로봇 · RSSI A 합의 |
+| 12 | survey_buffer 추가 — run_id · 버퍼 · `survey/sync` · CSV, 끊김 복구 시험 | S-1 – S-4 | 구현·로봇 없는 시험 완료 (10/14), Wi-Fi 실기 대기 | 실기: 로봇·통신 차단 |
 | 13 | DB 연결 — 시험 DB · 지도 0.5 m 격자 · db 한 회차 · 원본 샘플 · 끊김 복구 | DB-1 – DB-6 | 10/14 통합 중 | 12번 · D4 · 정섭 (지도 등록) |
 
 ### 새 측정 경로 (칸 기준 · 줄 묶기 · 구간 나누기)
@@ -162,7 +166,7 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 
 ### survey_buffer 추가 (IF-08·09) — 통합에 빠진 것
 
-`survey_buffer` 노드는 어느 브랜치에도 없습니다. 로봇 PC 는 `robot_pc.launch.py` 가 `laptop_test.launch.py` 를 tf 모드로 불러 **시험용 `manual_tagger`** 를 그 자리에 쓰고 있습니다. `manual_tagger` 에 없는 것: run_id 가 파라미터 고정값(기본 1), 버퍼 · 디스크 저장 없음, `survey/sync` 서비스 없음, 재시작하면 seq 가 0 부터라 수신 쪽이 중복으로 버림 (`scv_survey/README.md` 「알려진 한계」). 받는 쪽(`cell_map_writer` · `network_map_engine`)은 `(robot_id, seq)` 로 중복을 걸러서 재발행 샘플을 그대로 받을 수 있습니다. `sync` 를 부를 `ros_bridge`(관제 B)는 아직 없습니다 (4-7). 웹 `scv_app` 의 `SurveyBuffer` 클래스는 웹 흐름(D2)이라 별개입니다. 주인은 `interfaces.md` 상 RSSI A (성현 · 희재) — 통합 bringup 이 `feature/control` 에 있어 관제 A 가 하되 5절에서 확인.
+10/14 구현 전에는 `survey_buffer`가 없고 tf launch가 시험용 `manual_tagger`를 사용했습니다. 지금은 S-1·2·3이 구현돼 tf 모드가 `survey_buffer`를 실행합니다. 기존 TF 결합을 재사용하고, status 회차·CSV 선저장·seq 복원·수동 sync를 추가했습니다. 받는 쪽의 `(robot_id, seq)` 검사는 유지하며 회차 변경·재시작에도 seq를 이어 중복 충돌을 피합니다. 웹 `scv_app`의 `SurveyBuffer`는 별개이고 수정하지 않았습니다. 자동 sync 호출·DB 저장은 13번(DB-4·5)에 구현했고, 실기 Wi-Fi 차단은 S-4에 남았습니다. 작업은 사용자(희재)의 12번 진행 요청으로 수행했으며, 별도 팀 메시지는 보내지 않았습니다.
 
 | # | 할 일 | 파일 | 완료 기준 | 우선 |
 | --- | --- | --- | --- | --- |
@@ -173,20 +177,28 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 | S-5 | sync 호출 주체 — 설계는 `ros_bridge`(관제 B). 10/14 통합은 관제 A 의 `cell_map_writer` 가 임시로 맡음 (DB-5), `ros_bridge` 가 생기면 넘김 | — | 4-7 · DB-5 에 연결 | P2 |
 | S-6 | 문서 · 주인 — README · CODE_WALKTHROUGH 의 `manual_tagger` 설명 고침, 5절에 RSSI A 와 파일 주인 확인 | `scv_survey/README.md` · 이 문서 | — | P3 |
 
-위험: `status` 가 오기 전 샘플은 run_id 0 (`cell_map_writer` 는 자기 run 을 쓰므로 무해). 재발행이 depth 50 을 넘지 않게 속도 제한.
+진행 (10/14): S-1·S-2·S-3 완료. S-4는 CSV 복원·sync 범위·쓰기 실패·동일 파일 두 작성자·20 Hz 제한, 가짜 TF/상태/RSSI의 실제 ROS 송수신·노드 재시작·히트맵 중복 제거·launch 선택을 확인했습니다(관제·RSSI 전체 113 passed). 3개 패키지 빌드 성공. **실제 Wi-Fi 30초 차단과 실제 로봇 시험은 미실시**이며 S-4 실기 완료로 표시하지 않습니다. S-6의 README·CODE_WALKTHROUGH 설명은 갱신했습니다.
+
+주의: status 전 샘플은 run_id 0으로 보존합니다. 작업 회차의 DB 원본으로 넣는 정책은 DB-4에서 구분해야 합니다. 재발행은 최대 20 Hz이나 QoS depth 50만으로 누락 0이 보장되지는 않습니다. 관제 수신 기록과 비교하는 실기·자동 sync 검증이 필요합니다. CSV의 count는 원본 수이며 재전송을 포함하지 않습니다.
 
 ### DB 연결 (2-10 · D4 · 4-7 · 4-4 를 한 줄로)
 
-확인한 것 (10/14): `inspection_manager` · `cell_map_writer` 는 이미 `backend:=db` 로 `cellmap_store.DbStore`(psycopg, `SCV_DB_DSN`)를 써서 `runs` · `grid_stats` · `aps` 에 직접 씁니다 — 실제 PostgreSQL 로는 한 번도 안 돌림 (2-10). `DbStore` 는 `maps.is_active` 지도와 그 `grid_cells` 를 전제로 하는데, 격자는 웹 서버가 지도 업로드 때 만들고 **기본 격자가 1.0 m** 라 0.5 m 로 올려야 `cellmap_store` 의 (ix, iy) 와 맞습니다. 웹의 섹터는 ix 절반 규칙, 관제 A 는 `zones.yaml` 폴리곤이라 서로 다릅니다. 원본 샘플 표 `net_samples`(PK robot_id · run_id · seq) 는 ROS 경로에서 아무도 쓰지 않고 웹 경로(`client_page` → `/api/agent/samples`)만 씁니다 — 이 PK 가 그대로 「중복 0」 장치이고 `last_seq` 조회가 sync 호출 근거라 4-7 · S-5 를 여기서 한 번에 풉니다. `runs` 는 `DbStore.open_run` 과 웹 `POST /api/runs` 둘이 만듭니다 (4-4 · D2 · D4).
+구현 전 확인 (10/14, 아래 진행 참고): `inspection_manager` · `cell_map_writer` 는 이미 `backend:=db` 로 `cellmap_store.DbStore`(psycopg, `SCV_DB_DSN`)를 써서 `runs` · `grid_stats` · `aps` 에 직접 씁니다 — 실제 PostgreSQL 로는 한 번도 안 돌림 (2-10). `DbStore` 는 `maps.is_active` 지도와 그 `grid_cells` 를 전제로 하는데, 격자는 웹 서버가 지도 업로드 때 만들고 **기본 격자가 1.0 m** 라 0.5 m 로 올려야 `cellmap_store` 의 (ix, iy) 와 맞습니다. 웹의 섹터는 ix 절반 규칙, 관제 A 는 `zones.yaml` 폴리곤이라 서로 다릅니다. 원본 샘플 표 `net_samples`(PK robot_id · run_id · seq) 는 ROS 경로에서 아무도 쓰지 않고 웹 경로(`client_page` → `/api/agent/samples`)만 씁니다 — 이 PK 가 그대로 「중복 0」 장치이고 `last_seq` 조회가 sync 호출 근거라 4-7 · S-5 를 여기서 한 번에 풉니다. `runs` 는 `DbStore.open_run` 과 웹 `POST /api/runs` 둘이 만듭니다 (4-4 · D2 · D4).
+
+진행 (10/14): DB-4·5 구현, DB-6은 `SCV_RUN_OWNER=ros` 선택 모드로 구현(기본 web 유지). 원본에 detected·resent·ROS 시각 성분을 추가하는 호환 스키마 적용 필요. 최초/누락/재시작에는 전체 sync를 받아 대상 수와 고유 번호를 대조하므로 최대 seq만 보는 선두·중간 누락을 피함. DB 저장·복구 전 칸 확정은 실패로 응답하고 관제는 다음 단계로 진행하지 않음.
+
+재검토 (10/14): sync 무응답+commit 겹침, writer 재시작 뒤 확정/재측정 값 보존, 불일치 과거 회차로 정상 저장이 막힘, DB 종료 실패를 완료로 표시하던 흐름을 보완. 추가 예외 검증 포함 122 passed. 중복 회차 변경 처리 통합, 시험 전용 조회 도우미는 시험 파일로 이동. 시험/운영 DB는 buffer_csv_path를 분리한다.
+
+검증: 별도 PostgreSQL 16에서 회차 done/partial, 칸 통계의 파일 백엔드 일치·update_cell, 원본 멱등 저장·미검출·위치 불확실·nanosecond 보존 확인. 가짜 ROS domain에서 자동 복구·DB 저장 실패·commit 대기·writer 재시작 후 중복 0 확인. 실제 testbed_v1의 웹 generate_cells와 ROS free_cells는 둘 다 98칸. DB-1·2의 실제 관제 PC 등록, DB-3 로봇 한 회차, DB-5 Wi-Fi 30초 실기는 미완료이며 D4 팀 합의는 확정했다고 간주하지 않음.
 
 | # | 할 일 | 파일 · 명령 | 완료 기준 | 우선 |
 | --- | --- | --- | --- | --- |
 | DB-1 | 관제 PC DB 준비 — `ros2_ws/scv_db/docker/setup_db.sh --test` 로 시험 DB, `SCV_DB_DSN` 환경변수(값은 `scv_db/README.md` 의 접속 정보, 문서에 적지 않음), psycopg 설치 확인 | `ros2_ws/scv_db` | `python3 -c` 접속 · `maps` 조회 | P2 |
 | DB-2 | 지도 · 격자 · AP 등록 — 웹 `/api/maps/upload` 로 `testbed_v1` 을 `grid_size_m=0.5` 로 올리고 격자 생성 · 활성, `aps` 에 핫스팟 SSID(측정 AP). `grid_cells` 의 (ix, iy) · 원점 · 칸 수가 `cellmap_store.free_cells` 와 같은지 비교 (5절 「칸 원점」 질문을 여기서 닫음). 섹터 열은 웹 표시용으로만 두고 관제 A 는 `zones.yaml` 만 씀 | `server_page.py` · `cellmap_store.py` | 칸 수 · 원점 일치. 어긋나면 정섭 님과 규칙 합의 | P2 |
 | DB-3 | `backend:=db ap_ssid:=<SSID>` 한 회차 (2-10) — mock 먼저, 그다음 robot3. `runs` 열림 → 닫힘(done / partial), `grid_stats` 칸 수가 파일 백엔드와 같음, 재측정 `update_cell` 반영. DB 를 끄면 `DB_UNAVAILABLE` 알림 | `control_pc.launch.py` | 회차 1건이 DB 에 완결 | P2 |
-| DB-4 | 원본 샘플 저장 — db 백엔드일 때 `cell_map_writer` 가 NetSample 을 `net_samples` 에 그대로 INSERT … ON CONFLICT DO NOTHING (`ap_id` · `cell_id` 는 `DbStore` 가 붙임, `task_id` 비움, 1초 묶음). `DbStore.write_samples` · `last_seq(robot_id, run_id)` 추가 | `cellmap_store.py` · `cell_map_writer.py` · `test_cellmap_store.py` | 로봇 CSV 줄 수 = `net_samples` 줄 수, 같은 seq 두 번 보내도 1건 | P2 |
-| DB-5 | 끊김 복구 — `cell_map_writer` 가 seq 빈틈을 보거나 샘플이 N 초 끊겼다 다시 오면 `survey/sync(run_id, last_seq+1)` 호출. S-5 의 호출 주체를 당분간 관제 A 가 맡음 (관제 B `ros_bridge` 가 생기면 넘김) | `cell_map_writer.py` | Wi-Fi 30 초 차단 뒤 누락 0 · 중복 0 (TEST_PLAN survey_buffer 행, T6-3 ②③) | P2 |
-| DB-6 | run 의 원본 하나 (4-4 · D2 · D4) — 권장: 통합 시연은 `inspection_manager` 의 `DbStore` 가 `runs` 를 열고 닫고, 웹은 `runs WHERE status='running'` 을 읽어 표시만, 웹 `POST /api/runs` · client 흐름은 끔. 「DB 쓰기는 관제 API 로」(v0.2.9)는 `ros_bridge` 뒤로 미룸 — PM · 정섭 확인 | — | D4 상태를 「10/14: DbStore 직접 쓰기」로 | P2 |
+| DB-4 | 원본 샘플 저장 — db 백엔드일 때 `cell_map_writer` 가 NetSample 을 `net_samples` 에 그대로 INSERT … ON CONFLICT DO NOTHING (`ap_id` · `cell_id` 는 `DbStore` 가 붙임, `task_id` 비움, 1초 묶음). `DbStore.write_samples` · `last_seq(robot_id, run_id)` 추가 | `cellmap_store.py` · `cell_map_writer.py` · `test_db_store.py` | 로봇 CSV 줄 수 = `net_samples` 줄 수, 같은 seq 두 번 보내도 1건 | P2 |
+| DB-5 | 끊김 복구 — `cell_map_writer` 가 seq 빈틈을 보거나 샘플이 N 초 끊겼다 다시 오면 `survey/sync` 호출(최초·누락은 from_seq=0 전체 수 확인, 완전 수신 뒤 last_seq+1). S-5 의 호출 주체를 당분간 관제 A 가 맡음 (관제 B `ros_bridge` 가 생기면 넘김) | `cell_map_writer.py` | Wi-Fi 30 초 차단 뒤 누락 0 · 중복 0 (TEST_PLAN survey_buffer 행, T6-3 ②③) | P2 |
+| DB-6 | run 의 원본 하나 (4-4 · D2 · D4) — 권장: 통합 시연은 `inspection_manager` 의 `DbStore` 가 `runs` 를 열고 닫고, 웹은 `runs WHERE status='running'` 을 읽어 표시만, 웹 `POST /api/runs` · client 흐름은 끔. 「DB 쓰기는 관제 API 로」(v0.2.9)는 `ros_bridge` 뒤로 미룸 — PM · 정섭 확인. SCV_RUN_OWNER=ros 모드는 구현, 배포 결정 미확정 | `server_page.py` | D4 상태를 「10/14: DbStore 직접 쓰기」로 | P2 |
 | DB-7 | 보고서용 나머지 표(`tasks` · `precise_measures` · `inspections`)는 4-5 · 4-6 에서. 10/14 에는 넣지 않음 | — | — | P3 |
 
 위험: `DbStore` 가 질의마다 접속을 열므로 재발행 20 Hz 는 묶어서 넣음. DB 가 죽어도 `cell_map_writer` 는 메모리 격자로 계속 (칸 확정은 파일처럼 되지 않으므로 `DB_UNAVAILABLE` 로 알림).
@@ -349,7 +361,7 @@ ros2 topic info /robot4/keepout_mask -v
 | `scv_manager` 가 `scv_survey` 의 임시 파일 세 개에 기댐 | 빌드 · 팀 브랜치 병합 | D1·D3 로 주인을 정함 |
 | 관제를 늦게 켜거나 죽으면 주행의 costmap 이 준비되지 않음 | 모든 주행 시험 | 실행 순서를 `BUNDLE_TEST.md` 대로 지킴. 관제는 저장소를 못 열어도 빈 마스크는 냄 |
 | 설비 좌표가 셔터 두 건뿐 | 설비 점검 시연, robot3 의 점검 단계 | 비전 팀의 좌표를 기다리되 흐름은 SHT-01·02 로 확인 |
-| 로봇 PC 가 시험용 `manual_tagger` 로 샘플을 냄 — run_id 고정 · 버퍼 없음 · 끊기면 그 구간 샘플이 사라짐 | T6-3 완료 기준 ②③ (누락 0 · 중복 0), DB 의 `net_samples` | S-1 – S-4 · DB-4 · DB-5 |
+| 로봇 버퍼·관제 자동 sync·DB 원본 저장은 구현·로봇 없는 검증 완료, 실제 PC·Wi-Fi 차단은 미완료 | T6-3 완료 기준 ②③ (누락 0 · 중복 0), DB 의 `net_samples` | S-4 실기 · DB-4 · DB-5 |
 | `backend:=db` 가 실제 DB 로 검증된 적 없고 웹 격자 기본값(1.0 m)이 칸 맵(0.5 m)과 다름 | DB 회차 · 보고서 | DB-1 – DB-3 을 mock 으로 먼저, 격자는 0.5 m 로 등록 |
 
 ## 8. 저장소 메모

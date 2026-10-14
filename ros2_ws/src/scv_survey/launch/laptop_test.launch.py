@@ -31,7 +31,9 @@ def _nodes(context):
 
     if use_tf:
         tagger_params = {'pose_source': 'tf', 'base_frame': arg('base_frame'),
-                         'max_pose_age': float(arg('max_pose_age'))}
+                         'max_pose_age': float(arg('max_pose_age')),
+                         'robot_id': ns, 'buffer_csv_path': arg('buffer_csv_path') or
+                         f'~/scv_survey_logs/{ns}_buffer.csv'}
         # TurtleBot4 는 TF·지도·AMCL 을 로봇 이름공간 아래에 둔다
         tf_remaps = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
         rviz_remaps = [(f'/{t}', f'/{ns}/{t}')
@@ -59,7 +61,8 @@ def _nodes(context):
                           'full_scan_interval': float(arg('full_scan_interval')),
                           'log_samples': arg('log_samples') == 'true',
                           'status_period': float(arg('status_period'))}]),
-        Node(package='scv_survey', executable='manual_tagger', namespace=ns, output='screen',
+        Node(package='scv_survey', executable='survey_buffer' if use_tf else 'manual_tagger',
+             namespace=ns, output='screen',
              parameters=[tagger_params], remappings=tf_remaps),
         Node(package='scv_survey', executable='network_map_engine', output='screen',
              parameters=[{'sample_topics': [f'/{ns}/survey/sample'],
@@ -171,6 +174,8 @@ def generate_launch_description():
                               description='이 값 이하는 파랑(음영) [dBm]'),
         DeclareLaunchArgument('csv_path', default_value='',
                               description='비우면 ~/scv_survey_logs/{robot_ns}_{pose_source}.csv'),
+        DeclareLaunchArgument('buffer_csv_path', default_value='',
+                              description='tf 선저장·재전송 버퍼. 비우면 ~/scv_survey_logs/{robot_ns}_buffer.csv'),
         DeclareLaunchArgument('mask_topic', default_value='/keepout_mask',
                               description='회피 마스크 (IF-10). 실제 구성은 점검 로봇의 /{ns}/keepout_mask'),
         DeclareLaunchArgument('shadow_dbm', default_value='-72.0',

@@ -23,6 +23,7 @@ SCV server page — 관제 PC (3-3차)
     SCV_DB_DSN     기본 "host=127.0.0.1 port=5432 dbname=robotdb4_postgresql user=rokey password=rokey"
     SCV_MEDIA_DIR  지도 PNG 등 파일 저장 위치 (기본 ./scv_media)
     SCV_HOST / SCV_PORT  기본 0.0.0.0 / 8000
+    SCV_RUN_OWNER  web(기존 기본값) / ros(ROS 관제가 회차·샘플을 관리, 웹 agent·순찰 명령 차단)
 
   워커는 1개로만 실행 — 세션 · 로봇 상태 · 제어 PC WebSocket 연결을 이 프로세스 메모리에 두기 때문
   (메모리에는 다시 채울 수 있는 값만 둠 — 세션은 다시 로그인, 나머지는 status 수신 · DB 재집계로 다시 참. 기록은 모두 PostgreSQL)
@@ -70,6 +71,9 @@ DSN = os.environ.get("SCV_DB_DSN",
 MEDIA_DIR = Path(os.environ.get("SCV_MEDIA_DIR", BASE / "scv_media")).resolve()
 HOST = os.environ.get("SCV_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SCV_PORT", "8000"))
+RUN_OWNER = os.environ.get("SCV_RUN_OWNER", "web").lower()
+if RUN_OWNER not in ("web", "ros"):
+    raise ValueError("SCV_RUN_OWNER는 web 또는 ros여야 합니다")
 
 SESSION_COOKIE = "scv_session"
 SESSION_TTL_S = 8 * 3600                     # 로그인 세션 8 h (요청마다 연장)
@@ -106,6 +110,16 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="SCV server page", version="3-3", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def guard_ros_owner(request: Request, call_next):
+    # ROS 통합에서 웹 client의 원본·작업 결과가 같은 회차에 섞이지 않게 한다.
+    if RUN_OWNER == "ros" and request.url.path.startswith("/api/agent/") and request.method != "GET":
+        return JSONResponse(status_code=409, content={"detail": "ROS 관제가 회차·샘플을 관리합니다"})
+    return await call_next(request)
+
+
 MAIN_LOOP: asyncio.AbstractEventLoop | None = None       # 동기 API에서 제어 PC로 config를 밀어 보낼 때 씀
 
 # ---------------------------------------------------------------------------
@@ -119,6 +133,8 @@ REPORTED_ACTIVE_TABLES = ("robots", "aps")
 
 def reset_reported_active() -> None:
     """서버 시작 때 robots · aps의 is_active를 모두 false로 (메모리 연결 정보가 비었으므로)"""
+    if RUN_OWNER == "ros":
+        return
     with pool.connection() as conn:
         for t in REPORTED_ACTIVE_TABLES:
             conn.execute(sql.SQL("UPDATE {} SET is_active = false WHERE is_active").format(sql.Identifier(t)))
@@ -1147,6 +1163,9 @@ async def ws_agent(ws: WebSocket):
     welcome · config · (순찰 중 재접속이면 agent_resync 메시지) 보낸 뒤 받기 반복. 끊기면 AGENTS에서 빼고 비활성.
     인증 없음 — 등록된 robot_id면 받아들임 (등록 안 된 로봇은 error UNKNOWN_ROBOT 후 4404로 닫음)"""
     await ws.accept()
+    if RUN_OWNER == "ros":
+        await ws.close(code=4409, reason="ROS owns runs; web agent disabled")
+        return
     robot_id = None
     try:
         try:                                           # 첫 메시지 = hello 확인
@@ -1480,7 +1499,10 @@ def send_agent(rid: str, *msgs: tuple[str, dict[str, Any]]):
 # ---------------------------------------------------------------- run · task 조회 도우미
 def running_run(conn) -> dict[str, Any] | None:
     """진행 중(status 'running') run 행 하나 — 한 번에 하나만 있다고 봄"""
-    return conn.execute("SELECT * FROM runs WHERE status = 'running'").fetchone()
+    run = conn.execute("SELECT * FROM runs WHERE status = 'running'").fetchone()
+    if RUN_OWNER == "ros":
+        CURRENT_RUN["run_id"] = run and run["run_id"]
+    return run
 
 
 def run_config(conn, run: dict[str, Any], rid: str) -> dict[str, Any]:
@@ -1654,6 +1676,8 @@ def start_form(conn) -> dict[str, Any]:
         "SELECT sector, count(*) AS n FROM grid_cells WHERE map_id = %s GROUP BY sector ORDER BY sector", (m["map_id"],))]
     target = m and conn.execute("SELECT ap_id, ssid, is_active FROM aps WHERE map_id = %s AND is_target", (m["map_id"],)).fetchone()
     problems = []                                      # 순찰 전체를 막는 것
+    if RUN_OWNER == "ros":
+        problems.append("ROS 관제에서 순찰을 시작·종료합니다")
     if not m:
         problems.append("현재 지도 없음")
     elif not sectors:
@@ -1687,6 +1711,8 @@ def start_run(user: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
     """순찰 시작 — body.sector_robots {"섹터": robot_id} 확인(준비된 로봇 · 로봇 1대 = 섹터 1개) → runs INSERT(running) ·
     로봇마다 첫 단계 task 생성 · 첫 task ACTIVE (한 트랜잭션, IM_LOCK). 커밋 뒤 CURRENT_RUN 설정 ·
     제어 PC마다 WS run_config + task_assign"""
+    if RUN_OWNER == "ros":
+        raise HTTPException(409, "ROS 관제에서 순찰을 시작하세요")
     req = {str(k): (str(v) if v else None) for k, v in (body.get("sector_robots") or {}).items()}
     run_type = str(body.get("run_type") or "patrol")
     if run_type not in RUN_TYPES:
@@ -1736,6 +1762,8 @@ def start_run(user: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
 def abort_run(run_id: int, reason: str) -> dict[str, Any]:
     """순찰 중단 — scv_abort_run(남은 task 모두 CANCELED · run aborted). 커밋 뒤 CURRENT_RUN 비움 ·
     배정 로봇 제어 PC에 WS run_cancel(go_dock true)"""
+    if RUN_OWNER == "ros":
+        raise HTTPException(409, "ROS 관제에서 순찰을 중단하세요")
     with IM_LOCK, pool.connection() as conn:
         with conn.transaction():
             run = conn.execute("SELECT * FROM runs WHERE run_id = %s", (run_id,)).fetchone()
@@ -1934,7 +1962,7 @@ def on_samples(rid: str, run_id: int, samples: list[dict[str, Any]]) -> dict[str
                     if c:
                         inc.append((c[0], ap, float(s["rssi_dbm"])))
     with MEM_LOCK:                                     # 실시간 히트맵 누적 (이미 만든 run만 — 없으면 처음 볼 때 DB에서)
-        live = LIVE_CELLS.get(run_id)
+        live = LIVE_CELLS.get(run_id) if RUN_OWNER == "web" else None
         if live is not None:
             for cid, ap, v in inc:
                 a = live.setdefault(cid, {}).setdefault(ap, [0, 0.0, 0.0, v])
@@ -1945,15 +1973,16 @@ def on_samples(rid: str, run_id: int, samples: list[dict[str, Any]]) -> dict[str
 def live_cells(conn, run_id: int) -> dict[int, dict[int, list[float]]]:
     """그 run의 칸별 · AP별 누적 [n, sum, sumsq, last] — LIVE_CELLS에 없으면 net_samples에서 집계해 넣음 (히트맵용)"""
     with MEM_LOCK:
-        live = LIVE_CELLS.get(run_id)
+        live = LIVE_CELLS.get(run_id) if RUN_OWNER == "web" else None
     if live is None:                                   # 처음이거나 server_page 재시작 — net_samples에서 다시 집계
         live = {}
         for r in conn.execute("SELECT cell_id, ap_id, count(*) AS n, sum(rssi_dbm) AS s, sum(rssi_dbm * rssi_dbm) AS q "
-                              "FROM net_samples WHERE run_id = %s AND pose_ok AND cell_id IS NOT NULL "
+                              "FROM net_samples WHERE run_id = %s AND pose_ok AND detected AND cell_id IS NOT NULL "
                               "GROUP BY cell_id, ap_id", (run_id,)):
             live.setdefault(r["cell_id"], {})[r["ap_id"]] = [int(r["n"]), float(r["s"]), float(r["q"]), None]
         with MEM_LOCK:
-            live = LIVE_CELLS.setdefault(run_id, live)
+            if RUN_OWNER == "web":
+                live = LIVE_CELLS.setdefault(run_id, live)
             for old in [k for k in LIVE_CELLS if k != run_id and k != CURRENT_RUN["run_id"]][:-3]:
                 LIVE_CELLS.pop(old, None)              # 지난 run은 몇 개만 남김 (이 run · 진행 중 run 말고 나중에 넣은 3개)
     return live
@@ -2069,7 +2098,7 @@ def restore_memory():
         for e in reversed(conn.execute("SELECT event_id, event_uid, robot_id, run_id, task_id, code, source, level, detail, ts "
                                        "FROM robot_events ORDER BY event_id DESC LIMIT 1000").fetchall()):
             remember_event(e)
-        busy = [] if not run else [r["robot_id"] for r in conn.execute(
+        busy = [] if not run or RUN_OWNER == "ros" else [r["robot_id"] for r in conn.execute(
             "SELECT DISTINCT robot_id FROM tasks WHERE run_id = %s AND status IN ('PENDING', 'ACTIVE')", (run["run_id"],))]
     now = time.monotonic()
     with MEM_LOCK:
@@ -2273,7 +2302,7 @@ def api_task_detail(task_id: str, request: Request):
                 f"SELECT n.cell_id, {cell_cols}, n.ap_id, count(*) AS n, min(n.stamp) AS first, "
                 f"percentile_cont(0.5) WITHIN GROUP (ORDER BY n.rssi_dbm)::float8 AS median, "
                 f"round(avg(n.rssi_dbm), 1)::float8 AS mean, min(n.rssi_dbm) AS min, max(n.rssi_dbm) AS max "
-                f"FROM net_samples n JOIN grid_cells g USING (cell_id) WHERE {where} AND n.pose_ok "
+                f"FROM net_samples n JOIN grid_cells g USING (cell_id) WHERE {where} AND n.pose_ok AND n.detected "
                 f"GROUP BY n.cell_id, {cell_cols}, n.ap_id ORDER BY min(n.stamp)", args).fetchall()
             cells: dict[int, dict[str, Any]] = {}
             for r in rows:                             # 칸마다 AP별 값 · 처음 지난 시각 순서
@@ -2303,7 +2332,7 @@ def api_task_detail(task_id: str, request: Request):
                 "FROM precise_measures p JOIN aps a USING (ap_id) WHERE p.task_id = %s ORDER BY a.ssid", (task_id,)).fetchall()
             out["survey_cell"] = conn.execute(           # 후보가 된 측정 때 그 칸의 값 (비교용)
                 "SELECT n.ap_id, count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY n.rssi_dbm)::float8 AS median "
-                "FROM net_samples n WHERE n.run_id = %s AND n.cell_id::text = %s AND n.pose_ok GROUP BY n.ap_id",
+                "FROM net_samples n WHERE n.run_id = %s AND n.cell_id::text = %s AND n.pose_ok AND n.detected GROUP BY n.ap_id",
                 (t["run_id"], c["ref"])).fetchall() if c and c["source"] == "NETWORK" else []
         elif t["type"] == "FACILITY_CHECK":             # 탐지 — 설비 · 판정 · 판정마다 사진(media)
             out["facility"] = conn.execute(

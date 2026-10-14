@@ -10,6 +10,7 @@ import json
 import math
 import os
 import statistics
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -155,8 +156,14 @@ class FileStore:
         return free_cells(self.map, self.cell)
 
 
+class SampleRunMismatch(RuntimeError):
+    def __init__(self, run_ids):
+        self.run_ids = run_ids
+        super().__init__(f'원본 샘플 회차 {sorted(run_ids)}가 기준 지도와 일치하지 않습니다')
+
+
 class DbStore:
-    """PostgreSQL 직접 (scv_db 01_schema.sql 의 runs · grid_cells · aps · grid_stats). 스키마는 바꾸지 않는다"""
+    """PostgreSQL 직접. runs·grid_stats·net_samples 저장; 스키마 적용은 setup_db에서 수행."""
 
     def __init__(self, map_yaml, cell_size: float = 0.5, dsn_env: str = 'SCV_DB_DSN', ap_ssid: str = ''):
         if not ap_ssid:     # 빈 값이면 DB 에 뜻 없는 AP 줄이 생긴다
@@ -183,15 +190,26 @@ class DbStore:
         self._q('INSERT INTO aps (map_id, ssid, note, is_active) VALUES (%s, %s, %s, true) '
                 'ON CONFLICT (map_id, ssid) DO NOTHING', (self.map_id, ap_ssid, 'cell_map_writer 자동 등록 (묶음 시험)'))
         self.ap_id = self._q('SELECT ap_id FROM aps WHERE map_id = %s AND ssid = %s', (self.map_id, ap_ssid))[0][0]
+        expected = {(i, j) for i, j, *_ in free_cells(self.map, self.cell)}
+        actual = set(self._cell_ids())
+        if actual != expected:
+            raise RuntimeError(f'DB 격자가 기준 지도와 다릅니다: DB {len(actual)}칸, '
+                               f'기준 {len(expected)}칸 — 지도·0.5m 격자를 확인하세요')
+        columns = {r[0] for r in self._q(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'net_samples'")}
+        if not {'detected', 'resent', 'stamp_sec', 'stamp_nanosec'} <= columns:
+            raise RuntimeError('DB 원본 샘플 스키마가 오래됐습니다 — 01_schema.sql을 적용하세요')
 
     def _q(self, sql: str, params=(), many=None):
         """한 번 접속해 실행하고 닫는다. SELECT·RETURNING 이면 줄 목록. 오류에 접속 정보를 싣지 않는다"""
         try:
-            conn = self.driver.connect(self.dsn)
+            conn = self.driver.connect(self.dsn, connect_timeout=3)
         except self.driver.Error:
             raise RuntimeError('DB 에 접속하지 못했습니다') from None
         try:
             cur = conn.cursor()
+            cur.execute('SET LOCAL statement_timeout = 3000')
             if many is not None:
                 cur.executemany(sql, many)
             else:
@@ -218,7 +236,9 @@ class DbStore:
                 (status, run_id))
 
     def running_run(self) -> int:
-        r = self._q("SELECT run_id FROM runs WHERE status = 'running'")
+        r = self._q("SELECT run_id, map_id FROM runs WHERE status = 'running'")
+        if r and r[0][1] != self.map_id:
+            raise RuntimeError('진행 중 회차가 기준 지도와 다릅니다')
         return r[0][0] if r else 0
 
     def _cell_ids(self) -> Dict[Cell, int]:
@@ -255,6 +275,38 @@ class DbStore:
 
     def grid_cells(self) -> List[Tuple[int, int, float, float]]:
         return self._q('SELECT ix, iy, center_x, center_y FROM grid_cells WHERE map_id = %s', (self.map_id,))
+
+    def last_seq(self, robot_id, run_id):
+        return self._q('SELECT max(seq) FROM net_samples WHERE robot_id = %s AND run_id = %s',
+                       (robot_id, run_id))[0][0]     # 미수신과 seq 0을 구분
+
+    def run_map(self, run_id):
+        rows = self._q('SELECT map_id FROM runs WHERE run_id = %s', (run_id,))
+        return rows[0][0] if rows else None
+
+    def write_samples(self, samples):
+        """run_id 0은 호출 쪽에서 제외. 다른 지도·없는 회차를 현재 회차로 바꾸지 않는다."""
+        if not samples:
+            return 0
+        ids = self._cell_ids()
+        invalid = {run for run in {s['run_id'] for s in samples} if self.run_map(run) != self.map_id}
+        if invalid:
+            raise SampleRunMismatch(invalid)
+        vals = []
+        for s in samples:
+            stamp = datetime.fromtimestamp(s['stamp_sec'], timezone.utc) + timedelta(
+                microseconds=s['stamp_nanosec'] / 1000)
+            index = (math.floor((s['x'] - self.map.origin[0]) / self.cell),
+                     math.floor((s['y'] - self.map.origin[1]) / self.cell))
+            vals.append((s['robot_id'], s['run_id'], s['seq'], stamp, s['x'], s['y'], s['yaw'],
+                         s['pose_ok'], self.ap_id, s['rssi_dbm'],
+                         ids.get(index) if s['pose_ok'] else None,
+                         s['detected'], s['resent'], s['stamp_sec'], s['stamp_nanosec']))
+        return self._q(
+            'INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, '
+            'rssi_dbm, cell_id, detected, resent, stamp_sec, stamp_nanosec) '
+            'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) '
+            'ON CONFLICT (robot_id, run_id, seq) DO NOTHING', many=vals)
 
 
 def open_store(backend: str, map_yaml, cell_size: float = 0.5, out_dir='~/scv_cellmap', dsn_env: str = 'SCV_DB_DSN',

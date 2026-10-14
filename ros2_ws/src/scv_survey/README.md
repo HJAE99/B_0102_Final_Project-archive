@@ -10,7 +10,27 @@
 | `manual` | RViz 에서 클릭한 점 | 노트북만 들고 잴 때 |
 | `tf` | 로봇 TF `map → base_link` (AMCL) | 노트북을 TurtleBot4 위에 올리고 teleop 으로 움직이며 잴 때 |
 
-`manual_tagger` 는 로봇 PC 의 `survey_buffer` 자리를 대신하는 **시험용** 노드다. 나머지(`rssi_scanner`, `network_map_engine`)는 실제 구성에서 그대로 쓸 수 있게 IF-02·IF-08 형식을 따른다.
+`manual_tagger` 는 노트북에서 위치를 찍는 **시험용** 노드다. 10/14부터 launch의 tf 모드는 이를 상속한 `survey_buffer`를 실행한다. 기존 TF 위치 결합에 회차·CSV 선저장·번호 복원·IF-09 재전송을 더했고, `rssi_scanner`와 `network_map_engine`의 토픽 형식은 유지한다.
+
+### 로봇 tf 모드의 버퍼 (10/14, PLAN 12번)
+
+- 실행: 기존 `pose_source:=tf` 명령을 그대로 사용한다. 이때 `manual_tagger`를 동시에 실행하지 않는다.
+- `{ns}/status`의 `RobotStatus.run_id`를 읽는다. status 전에는 run_id 0으로 기록하며, TF를 기다리는 동안 회차가 바뀌어도 원본을 받은 때의 회차를 유지한다.
+- 기본 선저장 파일: `~/scv_survey_logs/{ns}_buffer.csv`. `buffer_csv_path:=`로 변경 가능. 원래 엔진의 `{ns}_tf.csv`(히트맵에 사용한 샘플 기록)와 다른 파일이다.
+- `stamp_sec/nanosec`, 로봇·회차·seq, x/y/yaw, pose_ok, detected, rssi_dbm을 flush·fsync한 뒤 NetSample을 발행한다. 미검출·위치 불확실 샘플도 버퍼에는 보관하고, 지도는 기존 pose_ok 조건으로 제외한다.
+- seq는 회차마다 초기화하지 않고 CSV 마지막 번호 다음부터 계속한다. 재시작 시 같은 측정 시각의 NetRaw 캐시를 새 샘플로 중복 저장하지 않는다.
+- 같은 CSV에 두 버퍼를 띄우거나 헤더·행이 손상되면 오류로 중단한다. 파일을 지우거나 번호를 조용히 초기화하지 않는다. 기록 실패 시 미저장 샘플을 발행하지 않는다.
+- `survey/sync`는 지정 회차의 `seq >= from_seq`를 원래 번호·시각·위치 그대로 `resent=true`로 재발행한다. 기본 20 Hz 이하, 서비스는 큐 예약 후 응답하므로 긴 replay가 상태 수신을 막지 않는다. CSV에는 재전송 줄을 추가하지 않는다.
+- 수동 복구 예: `ros2 service call /robot3/survey/sync scv_msgs/srv/SyncSamples '{run_id: 3, from_seq: 0}'`. 있는 회차는 `ok=true`, `last_seq`는 그 회차의 마지막 번호, `count`는 요청 범위의 원본 대상 수이며 이미 큐에 있는 대상도 포함한다. 중복 예약은 막지만 저장 ACK는 아니다.
+- 실기 Wi-Fi 30초 차단 검증은 미실시. `backend:=db`의 cell_map_writer에 자동 sync·원본 DB 저장을 연결했다(PLAN 13번). 로봇 없는 PostgreSQL/ROS 검증과 실기 완료는 구분한다.
+
+### 관제 DB 수신 (10/14, PLAN 13번)
+
+- `cell_map_writer`의 db 모드는 1초마다 최대 1,000건을 `net_samples`에 저장한다. 중복은 `(robot_id, run_id, seq)` 유일키로 막고, run 0은 회차 원본에서 제외한다. 위치 불확실·미검출도 보존하며 pose_ok=false는 cell_id를 비운다.
+- 처음 수신·관제 재시작·번호 빈틈·3초 이상 수신 단절은 전체 sync(from_seq=0)로 확인한다. 전체 대상 수와 고유 번호가 맞으면 마지막 스냅샷 다음부터 주기적으로 요청한다. 최대 번호만 보면 선두·중간 누락을 놓칠 수 있어 전체 수를 대조한다.
+- 원본 DB 저장과 sync가 끝나야 commit 성공. 실패하면 관제가 재측정·점검 단계로 진행하지 않고 재시도한다. 긴 replay는 기본 8초 commit 대기 뒤 재시도하므로 로봇 버퍼가 계속 살아 있어야 한다.
+- DB 장애 시 큐를 유지하고 DB_UNAVAILABLE을 발행하며 연결 복구 후 재시도한다. 큐 상한 100,000건 이후는 로봇 CSV에서 복구한다. 관제 큐는 메모리이고 영구 원본은 로봇 CSV다.
+- 실제 관제 PC에서는 갱신된 `01_schema.sql` 적용, psycopg, SCV_DB_DSN, 기준 지도·0.5m 격자·AP가 필요하다. DB 격자 번호가 기준 지도와 다르면 시작을 거절한다.
 
 ## 전체 흐름
 
@@ -40,6 +60,8 @@ scv_survey/
 │   ├── heatmap.py             칸 계산·색·위치 판정 (ROS 무관, pytest 대상)
 │   ├── rssi_scanner.py        노드: RSSI 측정 → NetRaw
 │   ├── manual_tagger.py       노드(시험용): NetRaw + 위치 → NetSample
+│   ├── survey_buffer.py       노드(tf): 위치 결합·회차·선저장·sync 재발행
+│   ├── sample_buffer.py       CSV 복원·단일 작성자 잠금·재발행 큐 (ROS 무관)
 │   ├── network_map_engine.py  노드: NetSample → 히트맵 마커·CSV·회피 마스크
 │   └── survey_keys.py         노드(시험용): 키 s·r 로 측정 끝·새 측정 서비스 호출
 ├── launch/laptop_test.launch.py
@@ -370,11 +392,11 @@ ros2 launch scv_survey laptop_test.launch.py ssid:="csh의 iPhone"
 - 로봇 방향에 따라 RSSI 가 몇 dB 달라질 수 있다 (같은 칸을 반대 방향으로도 지나 보기).
 - scan 은 몇 개의 비콘·probe 응답 값이라 link(드라이버 평균)보다 더 튈 수 있다. 칸 중앙값으로 누른다.
 - 엔진은 시간 구분 없이 샘플을 쌓는다. 한 번 주행 중 핫스팟을 껐다 켜면 같은 칸에 두 상태가 섞인다 (UC-08 은 최근 N 초 창이 필요).
-- 노드를 재시작할 때는 launch 전체를 함께. `manual_tagger` 만 재시작하면 `seq` 가 0 부터 다시 시작해 엔진이 중복으로 버린다.
+- 수동 시험의 `manual_tagger`는 재시작 시 seq가 0부터라 엔진도 같이 초기화해야 한다. 로봇 tf 모드의 `survey_buffer`는 CSV에서 seq를 복원한다. 엔진만 재시작해 지난 히트맵을 다시 만들려면 해당 회차 전체 범위를 sync로 요청해야 한다.
 - `/survey/heatmap` 은 `docs/interfaces.md` 에 없는 관제 PC 내부 토픽이다. 관제 웹에서 쓰려면 PM 에 등록 요청.
 - 회피 마스크는 노트북 코스트맵으로만 확인했다. 점검 로봇 Nav2 에 넣으려면 전역·지역 코스트맵에 `filters: [keepout_filter]` 와 `costmap_filter_info_server` 를 그 로봇 PC 에만 (주행 팀·PM 과 `scv_bringup` 에서 협의). launch 의 `_keepout_costmap` 설정이 축소판이다.
 - 다음 작업 후보
   - launch 인자 `max_pose_cov`, `init_pose:=0,0,3.14` (시작할 때 작은 공분산으로 AMCL 초기위치 자동 설정)
-  - `manual_tagger` 의 tf 모드를 실제 `survey_buffer` (로봇 PC, 버퍼·`survey/sync` 재발행)로 옮기기
+  - `survey_buffer`와 DB 원본 저장·자동 sync의 실제 PC Wi-Fi 차단 시험 (PLAN 12·13번)
   - RPi 에서 `rssi_scanner` (`iface:=wlan0`) 로 바꾸기 — RPi 에도 `setcap`, 한 채널 스캔 시간·검출률·ROS 통신 영향 다시 확인
   - 칸 사이를 부드럽게 채우는 표시 (NetSpot 식 보간)

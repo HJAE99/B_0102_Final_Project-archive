@@ -744,6 +744,12 @@ class InspectionManager(Node):
             self.store.close_run(run_id, "done" if all_ok else "partial")
         except RuntimeError as exc:
             self.get_logger().error(f"회차를 닫지 못했습니다: {exc}")
+            if not getattr(self, 'db_close_error', False):
+                self.publish_alert(level=Alert.LEVEL_ERROR, code='DB_UNAVAILABLE', robot_id='',
+                                   message='DB에 회차 종료를 저장하지 못했습니다 — 복구 후 재시도합니다.')
+            self.db_close_error = True
+            return
+        self.db_close_error = False
         # 회차가 끝난 뒤 손으로 몰 때 막히지 않게 마스크를 비운다
         for robot_id in self.core.robots:
             self.publish_mask(robot_id, set())
@@ -768,9 +774,27 @@ class InspectionManager(Node):
         if pending and time.monotonic() < self.commit_deadline:
             return
         if pending:
-            self.get_logger().warning(
-                "칸 맵 확정 응답이 없어 지금 저장된 값으로 진행합니다."
-            )
+            for future in pending:
+                future.cancel()
+            self.publish_alert(level=Alert.LEVEL_ERROR, code='DB_UNAVAILABLE', robot_id='',
+                               message='칸 맵 확정 응답 시간 초과 — 다음 단계 진행 없이 재요청합니다.')
+            self.commit_futures = [client.call_async(Trigger.Request())
+                                   for client in self.writer_commit_clients.values()]
+            self.commit_deadline = time.monotonic() + float(self.get_parameter('commit_timeout_sec').value)
+            return
+        try:
+            results = [f.result() for f in self.commit_futures]
+        except Exception:
+            results = [None]
+        failed = [r for r in results if r is None or not r.success]
+        if failed:
+            if time.monotonic() >= self.commit_deadline:
+                self.publish_alert(level=Alert.LEVEL_ERROR, code='DB_UNAVAILABLE', robot_id='',
+                                   message='칸 맵 확정 실패 — 저장·복구 후 다시 시도합니다.')
+                self.commit_futures = [client.call_async(Trigger.Request())
+                                       for client in self.writer_commit_clients.values()]
+                self.commit_deadline = time.monotonic() + float(self.get_parameter('commit_timeout_sec').value)
+            return
         for future in self.commit_futures:
             if future.done() and future.result() is not None:
                 self.get_logger().info(

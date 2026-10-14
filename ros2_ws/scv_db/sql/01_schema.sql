@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS net_samples (
 );
 -- ⑩ 업그레이드 — 이전 판 net_samples에 task 칼럼 (새 DB는 위에서 이미 있음). 이전 표본 채우기는 파일 끝 ⑩
 ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS task_id VARCHAR(40) REFERENCES tasks (task_id);
+-- ROS IF-08 원본 보존. 기존 웹 표본은 검출값이므로 true 기본값으로 호환.
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS detected BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS resent BOOLEAN NOT NULL DEFAULT false;
+-- TIMESTAMPTZ는 microsecond까지만 저장하므로 ROS 원래 시각 성분도 보존한다.
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS stamp_sec BIGINT;
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS stamp_nanosec INTEGER
+    CHECK (stamp_nanosec >= 0 AND stamp_nanosec < 1000000000);
 CREATE INDEX IF NOT EXISTS net_samples_run_cell_idx   ON net_samples (run_id, cell_id);
 CREATE INDEX IF NOT EXISTS net_samples_robot_stamp_idx ON net_samples (robot_id, stamp);
 CREATE INDEX IF NOT EXISTS net_samples_task_idx       ON net_samples (task_id, cell_id);
@@ -924,14 +931,18 @@ COMMENT ON COLUMN tasks.ended_at IS '끝난 시각';
 COMMENT ON TABLE net_samples IS 'RSSI 표본 (NetSample) — RSSI 원시 표본. 실시간 히트맵, 보고서의 칸 통계·기준선, 후보의 근거 데이터가 모두 여기서 나옵니다.';
 COMMENT ON COLUMN net_samples.robot_id IS '측정한 로봇(NetSample.robot_id)';
 COMMENT ON COLUMN net_samples.run_id IS '회차(NetSample.run_id)';
-COMMENT ON COLUMN net_samples.seq IS '제어 PC가 로봇·회차마다 1씩 올리는 번호. 같은 번호가 다시 오면 무시, 빠진 번호는 유실';
+COMMENT ON COLUMN net_samples.seq IS '로봇 표본 번호. ROS survey_buffer는 회차 변경·재시작에도 계속 증가; 웹 client는 기존 회차 규칙 유지. (robot_id, run_id, seq) 중복 무시';
 COMMENT ON COLUMN net_samples.stamp IS '로봇 rssi_scanner가 측정한 시각(NetSample.stamp). 수신 시각이 아님';
 COMMENT ON COLUMN net_samples.x IS '측정 시각의 로봇 위치 x(m). 제어 PC가 AMCL 위치를 붙임';
 COMMENT ON COLUMN net_samples.y IS '측정 시각의 로봇 위치 y(m)';
 COMMENT ON COLUMN net_samples.yaw IS '측정 시각의 로봇 방향(rad)';
 COMMENT ON COLUMN net_samples.pose_ok IS '위치 추정이 믿을 만한지(AMCL 공분산 기준). false면 통계에서 제외(E5)';
-COMMENT ON COLUMN net_samples.ap_id IS '측정 대상 AP. 관제 PC api가 NetSample.ap_ssid로 aps.ssid를 찾아 채움(등록되지 않은 SSID면 저장하지 않음)';
-COMMENT ON COLUMN net_samples.rssi_dbm IS '수신 신호 세기(dBm). 대상 AP가 안 보이면 −100';
+COMMENT ON COLUMN net_samples.ap_id IS '측정 대상 AP. 웹 API 또는 ROS DbStore가 지도·SSID로 찾음(ROS는 ap_ssid 인자)';
+COMMENT ON COLUMN net_samples.rssi_dbm IS '수신 신호 세기(dBm). ROS 미검출 원본의 0은 detected=false로 구분하고 신호 통계에서 제외; 기존 웹 규칙은 유지';
+COMMENT ON COLUMN net_samples.detected IS '대상 AP 검출 여부. false 원본도 보존하되 RSSI 평균·중앙값에서 제외';
+COMMENT ON COLUMN net_samples.resent IS '처음 DB에 저장된 표본이 ROS 재전송인지. 같은 PK 재수신으로 원본을 덮지 않음';
+COMMENT ON COLUMN net_samples.stamp_sec IS 'ROS 측정 시각의 초 원본. 기존 웹 표본은 NULL';
+COMMENT ON COLUMN net_samples.stamp_nanosec IS 'ROS 측정 시각의 나노초 원본. TIMESTAMPTZ의 microsecond 반올림과 별도 보존';
 COMMENT ON COLUMN net_samples.cell_id IS 'x, y가 속한 격자 칸. pose_ok가 false이거나 격자 밖이면 NULL';
 COMMENT ON COLUMN net_samples.received_at IS '관제 PC가 받은 시각. stamp와 크게 차이 나면 재연결 뒤 늦게 받은 표본';
 COMMENT ON COLUMN net_samples.task_id IS '표본을 모은 측정 task(SURVEY_SEGMENT, 3-3차). 제어 PC가 표본마다 붙임. 이력 「자세히」에서 task가 거친 칸 · 칸별 측정값을 이것으로 조회. 3-3차 이전 표본은 수행 시간으로 채움(못 찾으면 NULL)';

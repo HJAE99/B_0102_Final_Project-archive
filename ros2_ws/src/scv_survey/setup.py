@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'rssi_scanner = scv_survey.rssi_scanner:main',
             'manual_tagger = scv_survey.manual_tagger:main',
+            'survey_buffer = scv_survey.survey_buffer:main',
             'network_map_engine = scv_survey.network_map_engine:main',
             'survey_keys = scv_survey.survey_keys:main',
             'cell_map_writer = scv_survey.cell_map_writer:main',

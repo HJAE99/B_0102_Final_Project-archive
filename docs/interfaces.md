@@ -117,6 +117,8 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | 네트워크 후보의 `robot_id` | 측정한 로봇의 이름 (10/12: 두 로봇이 각자 섹터를 측정) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
 | `resent` | sync 요청으로 다시 보낸 샘플만 true | RSSI A · 관제 B |
+| seq 규칙 (10/14, PLAN S-3) | ROS `survey_buffer`의 seq는 회차 변경 시 초기화하지 않음. 로봇별 CSV 마지막 번호 다음부터 재시작하고, 원본 재발행은 같은 seq를 유지. 기존 `(robot_id, seq)` 격자 중복 검사와 DB `(robot_id, run_id, seq)` 키에 맞춤 | RSSI A · 관제 A |
+| sync 응답 (10/14) | 요청 회차의 `seq >= from_seq`를 20 Hz 이하로 예약 발행. `last_seq`는 해당 회차의 마지막 저장 번호, `count`는 요청 범위의 원본 대상 수(이미 예약된 대상도 포함, 중복 예약은 방지). 없는 회차는 `ok=false`, 범위 뒤 요청은 `ok=true, count=0`. 저장 확인 ACK는 아님. db 모드 cell_map_writer가 전체 수와 수신 고유 번호를 대조하고 DB 저장까지 끝난 뒤 확정(PLAN DB-4·5) | RSSI A · 관제 A |
 | 자세 보정 "뒤로" (`adjust_forward_m` < 0) | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
 
 ## 설정 파일 (형식 초안)

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from concurrent.futures import Future
 
 from scv_msgs.action import ExecuteTask
 from scv_msgs.msg import Candidate
@@ -293,3 +294,46 @@ def test_start_is_rejected_without_cell_map_store():
 
     assert result.success is False
     assert core.tasks == {}
+
+
+def test_failed_or_pending_cell_commit_does_not_advance():
+    manager = FakeInspectionManager(ManagerCore(['robot3']))
+    manager.core.patrol_phase = PatrolPhase.WAITING_CANDIDATES
+    manager.commit_deadline = 0
+    pending = Future()
+    manager.commit_futures = [pending]
+    retry = Future()
+    manager.writer_commit_clients = {'Z1': SimpleNamespace(call_async=lambda req: retry)}
+    InspectionManager.advance_waiting_phase(manager)
+    assert manager.core.patrol_phase == PatrolPhase.WAITING_CANDIDATES
+    assert pending.cancelled() and manager.commit_futures == [retry]
+    retry.set_result(SimpleNamespace(success=False, message='DB unavailable'))
+    manager.commit_deadline = 0
+    retry = Future()
+    manager.writer_commit_clients = {'Z1': SimpleNamespace(call_async=lambda req: retry)}
+    InspectionManager.advance_waiting_phase(manager)
+    assert manager.commit_futures == [retry]
+    assert manager.alerts[-1]['code'] == 'DB_UNAVAILABLE'
+    assert manager.core.patrol_phase == PatrolPhase.WAITING_CANDIDATES
+
+
+def test_run_close_failure_keeps_run_open_until_db_recovers():
+    core = ManagerCore(['robot3'])
+    run = core.start_run(timestamp_sec=1000)
+    core.create_task(task_id='dock', run_id=run, task_type=ExecuteTask.Goal.DOCK,
+                     priority=1, target_ref='', preferred_robot_id='robot3')
+    core.finish_task('dock', ok=True, reason='')
+    core.patrol_phase = PatrolPhase.FACILITY
+    manager = FakeInspectionManager(core)
+
+    def fail(*args):
+        raise RuntimeError('DB unavailable')
+
+    manager.store.close_run = fail
+    InspectionManager.complete_run_if_ready(manager)
+    assert core.run_state.value == 'RUNNING'
+    assert manager.alerts[-1]['code'] == 'DB_UNAVAILABLE'
+    manager.store.close_run = lambda *args: None
+    InspectionManager.complete_run_if_ready(manager)
+    assert core.run_state.value == 'COMPLETED'
+    assert manager.alerts[-1]['code'] == 'RUN_COMPLETED'

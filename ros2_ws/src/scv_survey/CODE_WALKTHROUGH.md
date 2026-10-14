@@ -2,6 +2,16 @@
 
 2026-10-12 · `feature/survey` 기준 (`fcfa487`)
 
+10/14 `feature/control` 갱신: launch의 tf 모드는 `survey_buffer`를 실행하고 manual 모드는 기존 `manual_tagger`를 유지한다. 아래 시험용 tf 설명의 위치 결합 로직은 상속해 재사용한다. 새 저장·재전송 경로는 다음과 같다.
+
+1. `survey_buffer.on_raw`: 로봇 ID와 기존 CSV·TF 대기열의 측정 시각을 검사해 원본 중복을 제외하고, 수신 당시 회차를 보관한다.
+2. `ManualTagger.flush_pending/tf_pose_ok`: 기존 측정 시각 TF와 공분산 검사로 위치·pose_ok를 정한다.
+3. `survey_buffer.publish`: `SampleBuffer.append`로 모든 원본 필드를 CSV에 쓰고 flush·fsync 후 발행한다. seq는 CSV 복원 번호에서 전 회차에 걸쳐 증가한다.
+4. `on_sync`: 회차·from_seq 범위를 선택해 `ReplayQueue`에 예약한다. `send_replay`는 steady timer·monotonic 간격으로 최대 20 Hz, 원래 필드를 유지하고 resent만 true로 발행한다.
+5. 재시작 시 CSV에서 기록과 원본 측정 시각을 복원한다. RAW_QOS의 과거 캐시는 새 번호로 저장하지 않는다. 저장 실패·손상 CSV·동일 파일의 두 작성자는 오류로 중단한다.
+
+시험: `test_cellmap_store.py`에 CSV 복원·회차 범위·파일 손상·쓰기 실패·큐 제한을 추가했고, `test_survey_buffer.py`는 별도 ROS domain에서 가짜 TF·상태·RSSI로 노드 재시작·수동 sync·히트맵 중복 제거·launch 분기를 확인한다. 실제 로봇 동작은 없다. 자동 누락 감지와 DB 저장은 PLAN 13번이다.
+
 README 의 「파일별 동작」은 사용법 위주다. 이 문서는 **코드가 실제로 어떤 순서로, 무엇을 판단해서 움직이는지**를 함수 단위로 적는다.
 
 ---

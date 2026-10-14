@@ -44,10 +44,10 @@ def yaw_from_quat(q) -> float:
 
 
 class ManualTagger(Node):
-    def __init__(self):
-        super().__init__('manual_tagger')
-        self.pose_source = self.declare_parameter('pose_source', 'manual').value
-        self.run_id = self.declare_parameter('run_id', 1).value
+    def __init__(self, node_name='manual_tagger', pose_source='manual', run_id=1):
+        super().__init__(node_name)
+        self.pose_source = self.declare_parameter('pose_source', pose_source).value
+        self.run_id = self.declare_parameter('run_id', run_id).value
         self.seq = 0
         self.pose = (0.0, 0.0, 0.0)
 

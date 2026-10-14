@@ -24,6 +24,7 @@ def _nodes(context):
     return [
         Node(package='scv_survey', executable='cell_map_writer', output='screen',
              parameters=[{'sample_topics': [f'/{r}/survey/sample' for r in robots],
+                          'robot_ids': robots, 'zone_ids': [ZONE_OF[r] for r in robots],
                           'backend': arg('backend'), **store}]),
         Node(package='scv_manager', executable='inspection_manager', output='screen',
              parameters=[{'robot_ids': robots, 'zone_ids': [ZONE_OF[r] for r in robots],
