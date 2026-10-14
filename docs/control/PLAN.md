@@ -12,6 +12,8 @@ v0.4 (10/13 20:20): 남은 일을 순서대로 4절 맨 위 「지금 남은 일
 
 v0.5 (10/14 새벽): 10/13 밤 robot3 실기 결과와 새 측정 경로 계획을 넣었습니다 (4절 「새 측정 경로」). 「지금 남은 일」을 그 순서로 다시 짰습니다.
 
+v0.6 (10/14 오후): 통합에 빠진 `survey_buffer`(IF-08·09)와 DB 연결(2-10 · D4 · 4-7 · 4-4)을 작업 표로 넣었습니다 (4절 「survey_buffer 추가」 · 「DB 연결」, 「지금 남은 일」 12 · 13번). 로봇 PC 는 지금 시험용 `manual_tagger` 가 그 자리를 대신하고, `backend:=db` 는 실제 DB 로 돌린 적이 없습니다.
+
 ## 0. 한눈에
 
 1. `feature/control` 의 `inspection_manager` 는 **두 로봇 동시 측정 → Dock → 대기**까지만 갑니다. 그 뒤 단계(재측정 · 회피 마스크 · 설비 점검 · 회차 종료)는 이 브랜치에 없습니다.
@@ -127,9 +129,11 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 | 6 | 코드리뷰 준비 (단계 흐름 그림, 경로 그림, 시험 결과) | 6-1 | 10/14 10:30 | 3 · 4번 결과 |
 | 7 | 핫스팟을 켠 채 한 대 완주: 칸 확정 · 재측정 → 마스크 → 설비 | 2-6 · 2-7 · 2-8 | 10/14 통합 중 | 3번 |
 | 8 | 빈 칸 메우기 — 재측정과 다른 단계로. 측정 직후 Dock 전에 미측정 칸을 지나가며 잼 (칸 안의 다른 점, 5칸 제한 없이). 10/14: 재측정 대상에서 미측정 칸을 뺌(`include_unmeasured` 기본 false) | N-8 · 3-4 | 한 대 완주 뒤 | 7번 |
-| 9 | 두 대 동시, 이어서 DB 백엔드 | 2-9 · 2-10 | 10/14 통합 중 | 7번 · D4 |
+| 9 | 두 대 동시, 이어서 DB 백엔드 | 2-9 · 2-10 (DB-1 – DB-3) | 10/14 통합 중 | 7번 · D4 |
 | 10 | 단계를 로봇마다 따로 (D5), 마스크 반영 대기 | 3-1 · 3-2 | 한 대 완주 뒤 | 7번 |
 | 11 | 예외 시험 (통로에 상자 5-3 포함), 웹과 잇기 | 단계 5 · 단계 4 | 10/14 통합 중 | D2 · D4 · D6 |
+| 12 | survey_buffer 추가 — run_id · 버퍼 · `survey/sync` · CSV, 끊김 복구 시험 | S-1 – S-4 | 10/14 통합 중 | 7번 · 로봇 · RSSI A 합의 |
+| 13 | DB 연결 — 시험 DB · 지도 0.5 m 격자 · db 한 회차 · 원본 샘플 · 끊김 복구 | DB-1 – DB-6 | 10/14 통합 중 | 12번 · D4 · 정섭 (지도 등록) |
 
 ### 새 측정 경로 (칸 기준 · 줄 묶기 · 구간 나누기)
 
@@ -149,12 +153,43 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 | N-6 | robot3 실기 | — | 구간 1이 막다른 끝에 도착, 구간 2가 이어서 나감, 진행률이 끝까지, Dock 복귀. 회차 시간 기록 | **끝 (10/14 11:20, run_id=3, robot3 한 대 · 핫스팟 turtle09)** — 첫 완주. 측정 구간 1(6점) 59초 → 구간 2(막다른 한 점) 33초 → 구간 3(6점) 41초, 건너뛴 점 0. Dock 40초 → 칸 확정 Z2 28칸(음영 0 · 미검출 0 · low 0) → 미측정 칸 1개 (4,10) 를 30초 정밀 측정(median −49 dBm · n 30) → Dock → 회피 칸 0 → 종료. **음영 후보의 재측정은 이 회차에 없었음** — 문서의 재측정(음영 · 미검출 후보의 30초 정밀 측정, `TEST_PLAN.md`)은 아직 실기 미확인 (2-6, 핫스팟을 끄고). 시작부터 종료까지 4분 29초. `mission_executor` 기동 멈춤 없음. Nav2 경고 없음 |
 | N-7 | 문서 | `BUNDLE_TEST.md` · `CONTROL_MANAGER_STATUS.md` · 이 문서 | 측정 설명이 코드와 같음 | |
 | N-9 | 측정 줄 간격 0.25 m · 한 줄 건너 돌기 (칸 한 줄을 1/4 · 3/4 높이로 두 번) | `route_builder.py` · `inspection_manager.py`(`survey_spacing_m`) · `test_bundle_logic.py` | 칸마다 두 줄, 줄 사이 0.5 m, 다음 점이 0.35 m 안이면 그 점을 혼자 한 작업으로 | 구현 · 시험(94 passed) · mock 한 회차 끝 (10/14) — 실제 지도 Z1 29.0 m · 27점 · 6작업, Z2 27.0 m · 28점 · 8작업. mock 두 로봇 `RUN_COMPLETED`, 칸 확정 Z1 29칸 · Z2 28칸. **실기 끝 (10/14 12:02, run_id=4, robot3)** — 측정 작업 8개 모두 `ok=True`, 건너뛴 점 0, 측정 4분 26초(0.5 m 때 2분 13초) · 회차 5분 19초. 칸 확정 Z2 29칸 전부 정상 → 재측정 0칸(미측정 칸 제외 확인) → 회피 칸 0 → 종료. 칸당 표본 수 중앙값 4 → 8, 0개인 칸 1 → 0, 2개 이하 2 → 1 (run 3 대비) |
-| N-10 | 모서리 처리 비교 시험: 지움 반경을 줄여 모서리 파먹기를 줄이되 못 지울 모서리를 구간 끝으로(2번 `corner_mode:=angle`) vs 모서리 뒤 0.2 m 에 보조 점(3번 `corner_mode:=guide`) | `route_builder.py` · `inspection_manager.py`(`corner_mode` · `passed_goal_radius_m` · `rpp_lookahead_m` · `corner_guide_m`) · 시험 3개 | robot3 · 0.25 m 간격으로 A(none, 지움 0.35) · B(angle, 지움 0.15 — BT 를 시험용으로 바꿈) · C(guide, 지움 0.35) 세 회차. 회차마다 `/robot3/amcl_pose` bag → 점에 가장 가까이 간 거리 · 모서리 이탈 · 줄 이탈, 측정 시간, 작업 수, 칸별 표본 수 | 구현 · 시험(97 passed) · mock 끝 (10/14) — Z2 경로: A 28점 · 8작업, B 45점 · 24작업, C 44점 · 8작업 (길이 모두 27.0 m). mock 두 로봇 B · C 모두 `RUN_COMPLETED`. **A 끝 (12:24, run_id=5)**: 측정 작업 8개 모두 성공, 건너뛴 점 0, 시작부터 종료 5분 28초. 점에 가장 가까이 간 거리 최대 0.32 m (0.15 m 넘는 점 5 / 28), 모서리 0.5 m 안 계획 경로 이탈 평균 0.14 · 최대 0.32 m, 줄 가운데 계획 줄과의 거리 중앙값 0.135 m (처음 적은 0.074 는 0.125 m 넘게 벗어난 점을 버린 계산이라 작게 나옴 — 구간 순서대로 짝지어 다시 잼). 칸 29 · 표본 중앙값 7 · 최소 4. bag `~/scv_logs/bags/2026-10-14_N10_A_none`. **B 끝 (12:34, run_id=6, BT 지움 반경 0.15)**: 측정 작업 24개 모두 성공, 건너뛴 점 0, 측정 6분 13초(A 4분 47초). 마지막 Dock 은 `DOCK_FAILED`(undock 자리까지는 감, Create3 도킹 단계에서 실패 — 원인 미확인). bag 은 기록기를 Ctrl-C 없이 닫아 0 바이트 → 궤적은 RSSI 샘플 CSV(1 Hz) 로 A 와 같은 방식 비교: 점에 가장 가까이 간 거리 최대 0.10 m(A 0.32), 모서리 이탈 평균 0.10 m(A 0.12), 줄 가운데 계획 줄과의 거리 중앙값 0.048 m(A 0.135). 칸 28 · 표본 중앙값 13 · 최소 5. **C 끝 (12:48, run_id=7, guide 0.2 · 지움 0.35)**: 측정 작업 8개 모두 성공, 건너뛴 점 0, 측정 4분 39초, Dock 성공. 기준 28점 기준 가장 가까이 간 거리 최대 0.25 m(0.15 m 넘는 점 5 / 28), 모서리 이탈 평균 0.12 m, 줄 가운데 계획 줄과의 거리 중앙값 0.092 m. 칸 29 · 표본 중앙값 7 · 최소 5. bag `~/scv_logs/bags/2026-10-14_N10_C_guide020`. **비교 (CSV 1 Hz, 기준 28점)**: A 0.32 m · 6점 · 0.12 · 0.135 · 4:47 / B 0.10 m · 0점 · 0.10 · 0.048 · 6:13 / C 0.25 m · 5점 · 0.12 · 0.092 · 4:39 (가장 가까이 간 거리 최대 · 0.15 m 넘는 점 · 모서리 이탈 평균 · 줄 가운데 계획 줄과의 거리 중앙값 · 측정 시간). B 의 +86.5 초 = 작업 사이 대기 +13 초(작업 8 → 24개) + 모서리 정지 · 정렬 +73 초. **결론 (10/14 확정): B 채택** — BT `RemovePassedGoals radius` 0.15, 관제 기본값 `corner_mode` angle · `passed_goal_radius_m` 0.15. 3번(guide)은 효과가 없어 코드에서 지움. 남은 것: B 회차의 Dock 실패(Create3 도킹 단계, 1회) 재현 확인, 작업 사이 대기(배정 타이머 0.5 초) 줄이기 |
+| N-10 | 모서리 처리 비교 시험: 지움 반경을 줄여 모서리 파먹기를 줄이되 못 지울 모서리를 구간 끝으로(2번 `corner_mode:=angle`) vs 모서리 뒤 0.2 m 에 보조 점(3번 `corner_mode:=guide`) | `route_builder.py` · `inspection_manager.py`(`corner_mode` · `passed_goal_radius_m` · `rpp_lookahead_m` · `corner_guide_m`) · 시험 3개 | robot3 · 0.25 m 간격으로 A(none, 지움 0.35) · B(angle, 지움 0.15 — BT 를 시험용으로 바꿈) · C(guide, 지움 0.35) 세 회차. 회차마다 `/robot3/amcl_pose` bag → 점에 가장 가까이 간 거리 · 모서리 이탈 · 줄 이탈, 측정 시간, 작업 수, 칸별 표본 수 | 구현 · 시험(97 passed) · mock 끝 (10/14) — Z2 경로: A 28점 · 8작업, B 45점 · 24작업, C 44점 · 8작업 (길이 모두 27.0 m). mock 두 로봇 B · C 모두 `RUN_COMPLETED`. **A 끝 (12:24, run_id=5)**: 측정 작업 8개 모두 성공, 건너뛴 점 0, 시작부터 종료 5분 28초. 점에 가장 가까이 간 거리 최대 0.32 m (0.15 m 넘는 점 5 / 28), 모서리 0.5 m 안 계획 경로 이탈 평균 0.14 · 최대 0.32 m, 줄 가운데 계획 줄과의 거리 중앙값 0.135 m (처음 적은 0.074 는 0.125 m 넘게 벗어난 점을 버린 계산이라 작게 나옴 — 구간 순서대로 짝지어 다시 잼). 칸 29 · 표본 중앙값 7 · 최소 4. bag `~/scv_logs/bags/2026-10-14_N10_A_none`. **B 끝 (12:34, run_id=6, BT 지움 반경 0.15)**: 측정 작업 24개 모두 성공, 건너뛴 점 0, 측정 6분 13초(A 4분 47초). 마지막 Dock 은 `DOCK_FAILED`(undock 자리까지는 감, Create3 도킹 단계에서 실패 — 원인 미확인). bag 은 기록기를 Ctrl-C 없이 닫아 0 바이트 → 궤적은 RSSI 샘플 CSV(1 Hz) 로 A 와 같은 방식 비교: 점에 가장 가까이 간 거리 최대 0.10 m(A 0.32), 모서리 이탈 평균 0.10 m(A 0.12), 줄 가운데 계획 줄과의 거리 중앙값 0.048 m(A 0.135). 칸 28 · 표본 중앙값 13 · 최소 5. **C 끝 (12:48, run_id=7, guide 0.2 · 지움 0.35)**: 측정 작업 8개 모두 성공, 건너뛴 점 0, 측정 4분 39초, Dock 성공. 기준 28점 기준 가장 가까이 간 거리 최대 0.25 m(0.15 m 넘는 점 5 / 28), 모서리 이탈 평균 0.12 m, 줄 가운데 계획 줄과의 거리 중앙값 0.092 m. 칸 29 · 표본 중앙값 7 · 최소 5. bag `~/scv_logs/bags/2026-10-14_N10_C_guide020`. **비교 (CSV 1 Hz, 기준 28점)**: A 0.32 m · 6점 · 0.12 · 0.135 · 4:47 / B 0.10 m · 0점 · 0.10 · 0.048 · 6:13 / C 0.25 m · 5점 · 0.12 · 0.092 · 4:39 (가장 가까이 간 거리 최대 · 0.15 m 넘는 점 · 모서리 이탈 평균 · 줄 가운데 계획 줄과의 거리 중앙값 · 측정 시간). B 의 +86.5 초 = 작업 사이 대기 +13 초(작업 8 → 24개) + 모서리 정지 · 정렬 +73 초. **결론 (10/14 확정): B 채택** — 관제 기본값 `corner_mode` angle. 3번(guide)은 효과가 없어 코드에서 지움. 남은 것: B 회차의 Dock 실패(Create3 도킹 단계, 1회) 재현 확인, 작업 사이 대기(배정 타이머 0.5 초) 줄이기. **바로잡음 (10/14 오후)**: B 경로는 90도 모서리마다 구간이 끝나 작업 24개가 모두 직선 하나(시작점 + 끝점)였다 → 지울 중간 점이 없어 BT 지움 반경 0.15 는 효과가 없었고, 개선은 줄마다 골 하나로 멈췄다 정렬한 덕. 반면 0.15 는 lookahead 0.4 보다 짧아 구간 가운데 점을 한 번 놓치면 되돌아가도 못 지운다 — `course_run`(90도 모서리 4개를 한 번에) 반경 0.15 로 1회차 성공 46 초, 2회차 (2.2, 4.2) 를 0.152 m 로 놓친 뒤 y 4.5↔5.1 을 90 초 왕복(취소). 그래서 BT 는 주행 원본(반경 0.35, 3 초 주기 안)으로 되돌리고, 관제는 지움 반경 대신 꺾는 각으로 끊는다(`corner_break_deg` 90, `passed_goal_radius_m` 0.35 — `rpp_lookahead_m` 은 지움). Z2 경로는 B 와 같은 점·같은 줄(0.25 m 짧은 줄 바꿈 한 곳이 점 하나짜리 작업이 되어 44점 · 24작업). 시험 37 passed. bag `~/scv_logs/bags/2026-10-14_course_tick_1`(1·2회차) · `_tick_2`(2회차) |
 | N-8 | 빈 칸 메우기 (이번 범위 밖, 완주 뒤) | `inspection_manager.py` · `route_builder.py` | 장애물이나 벽 때문에 빠진 칸을 다시 방문 | |
 
 이번에 바꾸지 않는 것: 주행 코드(`scv_nav`), 메시지(`scv_msgs`), 설비 점검, 재측정 칸 선택. 지도 없이 쓰는 예전 줄 방식은 남겨 둡니다 (실기 확인 뒤 정리).
 
 위험: 순서 규칙(가까운 줄부터)이 지도에 따라 어색한 경로를 낼 수 있음 → N-4 그림으로 먼저 확인. 구간 사이에 한 번 멈췄다 출발해 시간이 늘어남 → N-6 에서 기록. 점 위치가 달라져 주행 시험 조건과 달라짐 → 열린 방에서는 지금과 같은 지그재그가 나오게 하고 시험으로 고정.
+
+### survey_buffer 추가 (IF-08·09) — 통합에 빠진 것
+
+`survey_buffer` 노드는 어느 브랜치에도 없습니다. 로봇 PC 는 `robot_pc.launch.py` 가 `laptop_test.launch.py` 를 tf 모드로 불러 **시험용 `manual_tagger`** 를 그 자리에 쓰고 있습니다. `manual_tagger` 에 없는 것: run_id 가 파라미터 고정값(기본 1), 버퍼 · 디스크 저장 없음, `survey/sync` 서비스 없음, 재시작하면 seq 가 0 부터라 수신 쪽이 중복으로 버림 (`scv_survey/README.md` 「알려진 한계」). 받는 쪽(`cell_map_writer` · `network_map_engine`)은 `(robot_id, seq)` 로 중복을 걸러서 재발행 샘플을 그대로 받을 수 있습니다. `sync` 를 부를 `ros_bridge`(관제 B)는 아직 없습니다 (4-7). 웹 `scv_app` 의 `SurveyBuffer` 클래스는 웹 흐름(D2)이라 별개입니다. 주인은 `interfaces.md` 상 RSSI A (성현 · 희재) — 통합 bringup 이 `feature/control` 에 있어 관제 A 가 하되 5절에서 확인.
+
+| # | 할 일 | 파일 | 완료 기준 | 우선 |
+| --- | --- | --- | --- | --- |
+| S-1 | `survey_buffer` 노드 — `ManualTagger` tf 모드를 상속해 ① run_id 를 `{ns}/status`(`RobotStatus.run_id`) 에서 읽음 ② 보낸 샘플을 메모리에 쌓고 CSV 에 append (`~/scv_survey_logs/{ns}_buffer.csv`) ③ 시작할 때 CSV 마지막 seq 다음부터 ④ `survey/sync`: run_id 같고 from_seq 이상인 샘플을 `resent=True` 로 20 Hz 이하 재발행(depth 50 안), `ok` · `last_seq` · `count` 응답 | `scv_survey/survey_buffer.py`(새) · `setup.py` | 로봇 PC 에서 샘플 `run_id` 가 작업 회차와 같음, CSV 줄이 늚, 수동 sync 호출로 재발행됨 | P2 |
+| S-2 | launch 교체 — tf 모드일 때 `manual_tagger` 대신 `survey_buffer`. `manual_tagger` 는 노트북 manual 모드용으로 남김 | `laptop_test.launch.py` | `robot_pc.launch.py` 를 바꾸지 않고 뜸 | P2 |
+| S-3 | seq 규칙 결정 — 회차마다 0 부터가 아니라 노드 수명 동안 이어짐 (0 부터 다시 하면 수신 쪽이 새 회차 샘플을 중복으로 버림. sync 는 run_id + from_seq 라 지장 없음). PM 에 `interfaces.md` IF-08 비고 한 줄 요청 | `docs/interfaces.md` | IF-08 비고에 적힘 | P2 |
+| S-4 | 시험 — 단위: seq 복원 · sync 범위 함수를 기존 시험 파일에 더함. 실기: 관제 PC 에서 `ros2 topic echo` 받다가 Wi-Fi 30 초 차단 → 복구 → `ros2 service call /robot3/survey/sync scv_msgs/srv/SyncSamples "{run_id: N, from_seq: K}"` → 받은 seq 집합과 CSV 비교 누락 0 · 중복 0 (`docs/TEST_PLAN.md` survey_buffer 행) | `test/` · 일지 | `✅ 단위테스트 통과` 블록 | P2 |
+| S-5 | sync 호출 주체 — 설계는 `ros_bridge`(관제 B). 10/14 통합은 관제 A 의 `cell_map_writer` 가 임시로 맡음 (DB-5), `ros_bridge` 가 생기면 넘김 | — | 4-7 · DB-5 에 연결 | P2 |
+| S-6 | 문서 · 주인 — README · CODE_WALKTHROUGH 의 `manual_tagger` 설명 고침, 5절에 RSSI A 와 파일 주인 확인 | `scv_survey/README.md` · 이 문서 | — | P3 |
+
+위험: `status` 가 오기 전 샘플은 run_id 0 (`cell_map_writer` 는 자기 run 을 쓰므로 무해). 재발행이 depth 50 을 넘지 않게 속도 제한.
+
+### DB 연결 (2-10 · D4 · 4-7 · 4-4 를 한 줄로)
+
+확인한 것 (10/14): `inspection_manager` · `cell_map_writer` 는 이미 `backend:=db` 로 `cellmap_store.DbStore`(psycopg, `SCV_DB_DSN`)를 써서 `runs` · `grid_stats` · `aps` 에 직접 씁니다 — 실제 PostgreSQL 로는 한 번도 안 돌림 (2-10). `DbStore` 는 `maps.is_active` 지도와 그 `grid_cells` 를 전제로 하는데, 격자는 웹 서버가 지도 업로드 때 만들고 **기본 격자가 1.0 m** 라 0.5 m 로 올려야 `cellmap_store` 의 (ix, iy) 와 맞습니다. 웹의 섹터는 ix 절반 규칙, 관제 A 는 `zones.yaml` 폴리곤이라 서로 다릅니다. 원본 샘플 표 `net_samples`(PK robot_id · run_id · seq) 는 ROS 경로에서 아무도 쓰지 않고 웹 경로(`client_page` → `/api/agent/samples`)만 씁니다 — 이 PK 가 그대로 「중복 0」 장치이고 `last_seq` 조회가 sync 호출 근거라 4-7 · S-5 를 여기서 한 번에 풉니다. `runs` 는 `DbStore.open_run` 과 웹 `POST /api/runs` 둘이 만듭니다 (4-4 · D2 · D4).
+
+| # | 할 일 | 파일 · 명령 | 완료 기준 | 우선 |
+| --- | --- | --- | --- | --- |
+| DB-1 | 관제 PC DB 준비 — `ros2_ws/scv_db/docker/setup_db.sh --test` 로 시험 DB, `SCV_DB_DSN` 환경변수(값은 `scv_db/README.md` 의 접속 정보, 문서에 적지 않음), psycopg 설치 확인 | `ros2_ws/scv_db` | `python3 -c` 접속 · `maps` 조회 | P2 |
+| DB-2 | 지도 · 격자 · AP 등록 — 웹 `/api/maps/upload` 로 `testbed_v1` 을 `grid_size_m=0.5` 로 올리고 격자 생성 · 활성, `aps` 에 핫스팟 SSID(측정 AP). `grid_cells` 의 (ix, iy) · 원점 · 칸 수가 `cellmap_store.free_cells` 와 같은지 비교 (5절 「칸 원점」 질문을 여기서 닫음). 섹터 열은 웹 표시용으로만 두고 관제 A 는 `zones.yaml` 만 씀 | `server_page.py` · `cellmap_store.py` | 칸 수 · 원점 일치. 어긋나면 정섭 님과 규칙 합의 | P2 |
+| DB-3 | `backend:=db ap_ssid:=<SSID>` 한 회차 (2-10) — mock 먼저, 그다음 robot3. `runs` 열림 → 닫힘(done / partial), `grid_stats` 칸 수가 파일 백엔드와 같음, 재측정 `update_cell` 반영. DB 를 끄면 `DB_UNAVAILABLE` 알림 | `control_pc.launch.py` | 회차 1건이 DB 에 완결 | P2 |
+| DB-4 | 원본 샘플 저장 — db 백엔드일 때 `cell_map_writer` 가 NetSample 을 `net_samples` 에 그대로 INSERT … ON CONFLICT DO NOTHING (`ap_id` · `cell_id` 는 `DbStore` 가 붙임, `task_id` 비움, 1초 묶음). `DbStore.write_samples` · `last_seq(robot_id, run_id)` 추가 | `cellmap_store.py` · `cell_map_writer.py` · `test_cellmap_store.py` | 로봇 CSV 줄 수 = `net_samples` 줄 수, 같은 seq 두 번 보내도 1건 | P2 |
+| DB-5 | 끊김 복구 — `cell_map_writer` 가 seq 빈틈을 보거나 샘플이 N 초 끊겼다 다시 오면 `survey/sync(run_id, last_seq+1)` 호출. S-5 의 호출 주체를 당분간 관제 A 가 맡음 (관제 B `ros_bridge` 가 생기면 넘김) | `cell_map_writer.py` | Wi-Fi 30 초 차단 뒤 누락 0 · 중복 0 (TEST_PLAN survey_buffer 행, T6-3 ②③) | P2 |
+| DB-6 | run 의 원본 하나 (4-4 · D2 · D4) — 권장: 통합 시연은 `inspection_manager` 의 `DbStore` 가 `runs` 를 열고 닫고, 웹은 `runs WHERE status='running'` 을 읽어 표시만, 웹 `POST /api/runs` · client 흐름은 끔. 「DB 쓰기는 관제 API 로」(v0.2.9)는 `ros_bridge` 뒤로 미룸 — PM · 정섭 확인 | — | D4 상태를 「10/14: DbStore 직접 쓰기」로 | P2 |
+| DB-7 | 보고서용 나머지 표(`tasks` · `precise_measures` · `inspections`)는 4-5 · 4-6 에서. 10/14 에는 넣지 않음 | — | — | P3 |
+
+위험: `DbStore` 가 질의마다 접속을 열므로 재발행 20 Hz 는 묶어서 넣음. DB 가 죽어도 `cell_map_writer` 는 메모리 격자로 계속 (칸 확정은 파일처럼 되지 않으므로 `DB_UNAVAILABLE` 로 알림).
 
 ### 단계 0. 인수 정리
 
@@ -195,7 +230,7 @@ robot4 한 대, 관제 PC = VICTUS, 로봇 PC = MSI, 칸 맵은 파일로 돌렸
 | 2-7 | 회피 마스크 | 핫스팟을 끈 채 재측정까지 → 관제 로그 `회피 칸 N개`, RViz 의 global costmap 에 그 칸이 장애물로 보임, 5초 안에 재계획 | 2-6 | P2 |
 | 2-8 | 설비 점검 | SHT-01·SHT-02 두 건이 robot4 에 가고 결과 알림이 옴. 관측 자리가 회피 칸이면 `KEEPOUT_BLOCKED` | 2-7 · 비전 서버(가짜 또는 실제) | P2 |
 | 2-9 | 두 대 동시 | 두 로봇이 함께 출발해 각자 Dock 으로 돌아오고 회차가 `RUN_COMPLETED` 로 끝남 | 2-3 을 로봇마다 | P2 |
-| 2-10 | DB 백엔드 | `backend:=db` 로 한 회차. `runs` 에 회차가 열리고 닫히며 `grid_stats` 에 칸이 들어감 (임시 문서: "db 쪽은 아직 실제 DB 로 돌려 보지 못했다") | D4 · 관제 PC 의 PostgreSQL 에 `testbed_v1` 0.5 m 격자가 활성 | P2 |
+| 2-10 | DB 백엔드 | `backend:=db` 로 한 회차. `runs` 에 회차가 열리고 닫히며 `grid_stats` 에 칸이 들어감 (임시 문서: "db 쪽은 아직 실제 DB 로 돌려 보지 못했다") | D4 · 관제 PC 의 PostgreSQL 에 `testbed_v1` 0.5 m 격자가 활성 → 절차는 DB-1 – DB-3 | P2 |
 | 2-11 | 측정이 진행률 50 % 에서 완료로 끝난 원인 (10/12 밤 시험) | 원인이 관제 · 주행 중 어느 쪽인지 찾아 고치거나 기록. 12점을 다 돈 뒤에 완료가 옴 **10/13 robot3 실기에서 찾은 원인**: 경로 점이 안쪽 벽 조각에 붙어 있었음 (Z2 0번 0.08 m, Z1 · Z2 6번 0.18 m — 로봇 반경 0.19 m 안). 그 점의 0.35 m 안에 못 들어가 waypoint 가 지워지지 않고 되돌아감. Z1 6번은 12점 중 절반이라 10/12 밤의 50 % 와 맞음 (추정). 3-3 으로 고침 | 2-3 | P1 |
 | 2-12 | 측정 뒤 DOCK 작업이 로봇 PC 쪽에서 취소된 원인 (10/12 밤 시험) | 측정 뒤 DOCK 이 성공하고 재측정 작업이 나감. 주행 10/13 수정(「BLOCKED 뒤 Nav2 취소 버그」)으로 풀렸는지 확인 | 2-3 | P1 |
 
@@ -232,7 +267,7 @@ D2·D4 가 정해져야 시작할 수 있습니다. 아래는 권장안 (가)일
 | 4-4 | run_id 를 한 곳에서만 만듦 (지금은 임시 저장소와 웹 서버가 각자 `runs` 에 넣음) | 관제 A · B | 한 회차에 `runs` 줄 하나 | P2 |
 | 4-5 | 작업 상태(PENDING · ACTIVE · DONE …)를 DB `tasks` 에 남길지, 남긴다면 누가 쓰는지 | 관제 A · B | 결정과 구현 또는 "남기지 않음" 기록 | P2 |
 | 4-6 | 보고서 · 점검표에 필요한 값이 DB 에 다 있는지 확인 (칸 상태, 재측정 결과, 판정 · 사진) | 관제 B, 관제 A 는 값 제공 | 한 회차 뒤 지도 · 보고서(HTML) · 점검표(CSV)가 저장되고 화면에 보임 (T6-6) | P2 |
-| 4-7 | 측정 샘플 저장과 sync (IF-08·09) | 관제 B (`ros_bridge`) · RSSI A | 같은 (robot_id, run_id, seq) 는 1건만 저장, seq 누락 뒤 sync 로 누락 0 (T6-3 완료 기준 ②③). 지금 임시 구조에서는 `cell_map_writer` 가 샘플을 칸으로만 모으므로 누가 원본 샘플을 저장하는지부터 확인 | P2 |
+| 4-7 | 측정 샘플 저장과 sync (IF-08·09) | 관제 B (`ros_bridge`) · RSSI A | 같은 (robot_id, run_id, seq) 는 1건만 저장, seq 누락 뒤 sync 로 누락 0 (T6-3 완료 기준 ②③). 지금 임시 구조에서는 `cell_map_writer` 가 샘플을 칸으로만 모으므로 누가 원본 샘플을 저장하는지부터 확인 → 10/14 통합은 DB-4 · DB-5 (관제 A 가 `cell_map_writer` 로 `net_samples` 저장 · sync 호출), `ros_bridge` 가 생기면 넘김 | P2 |
 | 4-8 | 셔터 SHT-01·SHT-02 표시 규칙 (T6-6) | 관제 B | 저장은 두 건 그대로, 점검표 · 보고서에서는 「방화셔터」 한 줄 — 하나라도 이상이면 이상, 이상 없이 미확인이 있으면 미확인, 둘 다 정상이면 정상 | P2 |
 
 알림 코드 (`/inspection/alerts` 의 `code`, 임시 브랜치 포함):
@@ -274,8 +309,8 @@ D2·D4 가 정해져야 시작할 수 있습니다. 아래는 권장안 (가)일
 | 누구 | 내용 |
 | --- | --- |
 | PM (도윤) | D1(인계 시점)·D2·D4·D6·D8. 10/12 밤 시험의 50 % 완료 · Dock 취소 로그. BLOCKED 재방문과 E8 의 범위. `facilities.yaml` 의 `zone_id` 추가 |
-| 정섭 (관제 B) | D2·D4. 웹과 `inspection_manager` 를 잇는 `ros_bridge` 를 누가 언제 만드는지. 알림 코드 표 전달 |
-| RSSI (성현 · 희재) | D3. `cellmap_store`·`cell_map_writer`·`precise_server` 를 `feature/survey` 로 가져갈지. 칸 원점이 지도 origin(−0.150, −0.250)과 같은지. low 칸을 줄일 측정 속도 |
+| 정섭 (관제 B) | D2·D4. 웹과 `inspection_manager` 를 잇는 `ros_bridge` 를 누가 언제 만드는지. 알림 코드 표 전달. DB 연결: `testbed_v1` 을 0.5 m 격자로 등록(DB-2), 웹 섹터 규칙(ix 절반)과 `zones.yaml` 의 차이, `runs` 원본을 `inspection_manager` 로(DB-6) |
+| RSSI (성현 · 희재) | D3. `cellmap_store`·`cell_map_writer`·`precise_server` 를 `feature/survey` 로 가져갈지. 칸 원점이 지도 origin(−0.150, −0.250)과 같은지. low 칸을 줄일 측정 속도. `survey_buffer`(S-1 – S-3)를 관제 A 가 `feature/control` 에 만들어도 되는지, seq 규칙(S-3) |
 | 비전 (동준 · 재민) | D7. 두 로봇용 `inspect_facility` 서버와 IF-19 발행이 어디에 있고 언제 로봇 PC 에 올라가는지. `facilities.yaml` 의 EXT-01·EXL-01·RCK-01 좌표 |
 | 주행 (본인) | 배터리 30 % 거절 · 20 % 자동 dock 과 관제 정책(3-7 · 3-8)을 맞춤. 마스크 반영 뒤 재계획 시간 측정(3-2) |
 
@@ -314,6 +349,8 @@ ros2 topic info /robot4/keepout_mask -v
 | `scv_manager` 가 `scv_survey` 의 임시 파일 세 개에 기댐 | 빌드 · 팀 브랜치 병합 | D1·D3 로 주인을 정함 |
 | 관제를 늦게 켜거나 죽으면 주행의 costmap 이 준비되지 않음 | 모든 주행 시험 | 실행 순서를 `BUNDLE_TEST.md` 대로 지킴. 관제는 저장소를 못 열어도 빈 마스크는 냄 |
 | 설비 좌표가 셔터 두 건뿐 | 설비 점검 시연, robot3 의 점검 단계 | 비전 팀의 좌표를 기다리되 흐름은 SHT-01·02 로 확인 |
+| 로봇 PC 가 시험용 `manual_tagger` 로 샘플을 냄 — run_id 고정 · 버퍼 없음 · 끊기면 그 구간 샘플이 사라짐 | T6-3 완료 기준 ②③ (누락 0 · 중복 0), DB 의 `net_samples` | S-1 – S-4 · DB-4 · DB-5 |
+| `backend:=db` 가 실제 DB 로 검증된 적 없고 웹 격자 기본값(1.0 m)이 칸 맵(0.5 m)과 다름 | DB 회차 · 보고서 | DB-1 – DB-3 을 mock 으로 먼저, 격자는 0.5 m 로 등록 |
 
 ## 8. 저장소 메모
 
