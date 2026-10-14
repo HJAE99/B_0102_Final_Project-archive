@@ -1,3 +1,5 @@
+import math
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -323,17 +325,19 @@ def remeasure_targets(
     reachable: set,
     limit: int,
     include_unmeasured: bool = True,
+    blocked: set = frozenset(),
 ) -> list[tuple[int, int]]:
     """재측정할 칸: 미검출 → 음영(중앙값 낮은 것부터) → 미측정.
 
     cells 는 {(ix, iy): 줄(state, median, …)}, reachable 은 그 로봇이 갈 수 있는 칸.
+    blocked 는 이번 회차 측정 중 장애물로 못 간 칸 — 미측정이면 채우러 가지 않는다 (값이 있으면 그대로 후보).
     """
     miss = sorted(c for c in reachable if c in cells and cells[c].state == "miss")
     shadow = sorted(
         (c for c in reachable if c in cells and cells[c].state == "shadow"),
         key=lambda c: (cells[c].median, c),
     )
-    unmeasured = sorted(reachable - set(cells)) if include_unmeasured else []
+    unmeasured = sorted(reachable - set(cells) - set(blocked)) if include_unmeasured else []
     return (miss + shadow + unmeasured)[:limit]
 
 
@@ -362,4 +366,33 @@ def mask_cells(
         if not near_dock:
             out.add((ix, iy))
 
+    return out
+
+
+def blocked_cells(
+    waypoints: tuple,
+    reason: str,
+    origin: tuple[float, float],
+    cell: float,
+) -> set[tuple[int, int]]:
+    """측정 작업 결과 reason(mission_executor: "BLOCKED skipped=[…] shortened=[…]")의 막힌 점이 든 칸.
+
+    skipped 는 그 점의 칸, shortened(골을 장애물 앞까지 줄임)는 앞 점 → 골 직선이 지나는 칸 (줄인 자리를 모르므로 그 구간 전체).
+    """
+    def indices(key: str) -> list[int]:
+        found = re.search(key + r"=\[([\d,\s]*)\]", reason)
+        return [int(v) for v in found.group(1).split(",") if v.strip()] if found else []
+
+    def index(x: float, y: float) -> tuple[int, int]:
+        return math.floor((x - origin[0]) / cell), math.floor((y - origin[1]) / cell)
+
+    out = set()
+    for i in indices("skipped"):
+        if 0 <= i < len(waypoints):
+            out.add(index(waypoints[i].x, waypoints[i].y))
+    for i in indices("shortened"):
+        if 0 < i < len(waypoints):
+            a, b = waypoints[i - 1], waypoints[i]
+            steps = max(int(math.dist((a.x, a.y), (b.x, b.y)) / (cell / 4)), 1)
+            out.update(index(a.x + (b.x - a.x) * k / steps, a.y + (b.y - a.y) * k / steps) for k in range(1, steps + 1))
     return out

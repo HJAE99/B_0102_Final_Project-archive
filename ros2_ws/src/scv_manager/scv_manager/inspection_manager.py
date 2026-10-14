@@ -30,6 +30,7 @@ from .manager_core import (
     RunState,
     TaskState,
     Waypoint,
+    blocked_cells,
     mask_cells,
     remeasure_targets,
 )
@@ -101,11 +102,13 @@ class InspectionManager(Node):
         self.declare_parameter("obstacle_clearance_m", 0.30)
         # 측정 줄 간격. 칸(cell_size)보다 작으면 칸 한 줄을 여러 번 지난다 (0.25 = 칸마다 두 줄)
         self.declare_parameter("survey_spacing_m", 0.25)
-        # 모서리 처리: angle = RPP 가 지울 만큼 다가가지 못할 모서리를 작업 끝점으로 (10/14 채택, PLAN N-10).
-        # 지움 반경 · lookahead 는 주행 설정(BT RemovePassedGoals · nav2_rpp.yaml)과 같게
+        # 모서리 처리: angle = corner_break_deg 이상 꺾는 점을 작업 끝점으로 (10/14 채택, PLAN N-10).
+        # 지움 반경은 주행 설정(BT RemovePassedGoals)과 같게
         self.declare_parameter("corner_mode", "angle")
-        self.declare_parameter("passed_goal_radius_m", 0.15)
-        self.declare_parameter("rpp_lookahead_m", 0.4)
+        self.declare_parameter("corner_break_deg", 90.0)
+        # 측정 줄을 이 간격의 중간 점으로 나눔 (0 이면 안 나눔). 막힌 점만 건너뛰고 나머지를 잼 (10/14)
+        self.declare_parameter("survey_split_m", 0.5)
+        self.declare_parameter("passed_goal_radius_m", 0.35)
         self.declare_parameter("shadow_dbm", -72.0)
         self.declare_parameter("max_remeasure_per_robot", 5)
         # 재측정은 음영·미검출 후보의 30초 정밀 측정이다 (TEST_PLAN). 미측정 칸은 넣지 않는다
@@ -165,7 +168,8 @@ class InspectionManager(Node):
             line_spacing=float(self.get_parameter("survey_spacing_m").value),
             corner_mode=str(self.get_parameter("corner_mode").value),
             passed_goal_radius=float(self.get_parameter("passed_goal_radius_m").value),
-            lookahead=float(self.get_parameter("rpp_lookahead_m").value),
+            corner_break_deg=float(self.get_parameter("corner_break_deg").value),
+            split=float(self.get_parameter("survey_split_m").value) or None,
         )
 
         # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는
@@ -230,6 +234,8 @@ class InspectionManager(Node):
         self.canceling_task_ids = set()
         self.seen_candidate_ids = set()
         self.pending_candidates = {}
+        # 이번 회차 측정 작업에서 장애물로 못 간 칸 (mission_executor 결과 reason). 미측정이면 채우기(재측정 후보)에서 뺀다
+        self.blocked_cells = set()
         self.seen_inspection_results = set()
         self.unavailable_action_servers = set()
         self.unready_robot_reasons = {}
@@ -410,6 +416,7 @@ class InspectionManager(Node):
             return response
 
         run_id = self.core.start_run(run_id=run_id)
+        self.blocked_cells = set()
         self.writer_reset_client.call_async(Trigger.Request())
         for robot_id in self.core.robots:
             self.publish_mask(robot_id, set())
@@ -700,6 +707,14 @@ class InspectionManager(Node):
         else:
             message = f"작업 실패: {result.reason or '사유 없음'}"
             self.publish_task_failure(robot_id, task_id, message)
+            if task.task_type == ExecuteTask.Goal.SURVEY_SEGMENT:
+                cells = blocked_cells(task.waypoints, result.reason, self.map.origin, self.cell_size)
+                if cells:
+                    self.blocked_cells |= cells
+                    self.get_logger().warning(
+                        f"{robot_id}: {task_id}: 장애물로 못 간 칸 {sorted(cells)} "
+                        "— 미측정이면 채우기에서 뺌"
+                    )
 
         self.complete_run_if_ready()
 
@@ -805,6 +820,7 @@ class InspectionManager(Node):
                 self.route_builder.reachable_cells(zone_id, grid_cells),
                 int(self.get_parameter("max_remeasure_per_robot").value),
                 bool(self.get_parameter("include_unmeasured").value),
+                self.blocked_cells,
             )
 
             for ix, iy in targets:

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from scv_survey.cellmap_store import CellRow
 
-from scv_manager.manager_core import mask_cells, remeasure_targets
+from scv_manager.manager_core import Waypoint, blocked_cells, mask_cells, remeasure_targets
 from scv_manager.route_builder import RouteBuilder, wall_points
 
 ZONES = """
@@ -154,16 +154,38 @@ def test_two_lines_per_cell_row_every_other_line_first(tmp_path):
     assert (w[0].x, w[-1].x) == (2.6, 2.6) and w[-1].y < 1.0
 
 
-def test_corner_mode_angle_ends_segments_only_where_the_corner_cannot_be_cleared(tmp_path):
-    def segments(radius):
+def test_corner_mode_angle_ends_segments_at_sharp_corners(tmp_path):
+    def segments(mode, break_deg=90.0):
         rb = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30,
-                     corner_mode="angle", passed_goal_radius=radius, lookahead=0.4)
+                     corner_mode=mode, corner_break_deg=break_deg)
         return rb.build_survey_routes()[0].segments
 
-    # 지움 반경 0.35: 90도 모서리는 0.17 m 까지 가므로 지워진다 → 지금과 같은 한 구간
-    assert [len(s) for s in segments(0.35)] == [12]
-    # 0.15: 90도 모서리를 못 지운다 → 모서리마다 구간이 끝나 줄(과 줄 바꿈) 하나씩
-    assert all(len(s) <= 2 for s in segments(0.15))
+    # none: 90도 모서리는 구간 가운데 점으로 지나간다 → 한 구간
+    assert [len(s) for s in segments("none")] == [12]
+    # angle: 90도 이상 꺾는 점마다 구간이 끝나 줄(과 줄 바꿈) 하나씩
+    assert all(len(s) <= 2 for s in segments("angle"))
+    # 기준을 90도보다 크게 잡으면 90도 모서리는 끊지 않는다
+    assert [len(s) for s in segments("angle", 100.0)] == [12]
+
+
+def test_split_puts_points_every_cell_on_straight_lines(tmp_path):
+    whole = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30, corner_mode="angle")
+    split = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30, corner_mode="angle", split=0.5)
+    a, b = whole.build_survey_routes()[0], split.build_survey_routes()[0]
+
+    # 구간 수 · 구간 끝점은 그대로, 사이에 점이 늘어난다
+    assert len(a.segments) == len(b.segments)
+    assert [s[-1] for s in a.segments] == [s[-1] for s in b.segments]
+    assert len(b.waypoints) > len(a.waypoints)
+    assert [p for s in b.segments for p in s] == list(b.waypoints)
+    for s in b.segments:
+        steps = [math.dist((p.x, p.y), (q.x, q.y)) for p, q in zip(s, s[1:])]
+        # 0.5 m 마다, 끝점 앞 마지막 간격은 지움 반경(0.35) 이상
+        assert all(d <= 0.5 + 0.35 + 1e-6 for d in steps) and all(d >= 0.35 - 1e-6 for d in steps)
+        # 중간 점은 그 구간의 직선 위에 있다
+        for p in s[1:-1]:
+            ax, ay, bx, by = s[0].x, s[0].y, s[-1].x, s[-1].y
+            assert abs((bx - ax) * (p.y - ay) - (by - ay) * (p.x - ax)) < 1e-2
 
 
 def test_unknown_corner_mode_is_rejected(tmp_path):
@@ -221,6 +243,23 @@ def test_remeasure_targets_order_limit_and_reachable():
     ]
     assert remeasure_targets(cells, reachable, 2) == [(4, 1), (3, 1)]
     assert (5, 1) not in remeasure_targets(cells, reachable, 10, False)
+    # 측정 중 장애물로 못 간 칸: 미측정 (5, 1) 은 채우러 가지 않고, 값이 있는 음영 (2, 1) 은 그대로 후보
+    assert remeasure_targets(cells, reachable, 10, True, {(5, 1), (2, 1)}) == [(4, 1), (3, 1), (2, 1)]
+
+
+def test_blocked_cells_from_executor_reason():
+    w = tuple(Waypoint(x=0.6 + 0.5 * k, y=5.375, yaw=0.0) for k in range(5))   # 0.6 … 2.6
+    origin = (-0.15, -0.25)
+
+    def ix(x):
+        return math.floor((x - origin[0]) / 0.5)
+
+    iy = math.floor((5.375 - origin[1]) / 0.5)
+    # 중간 점 2 (1.6) 를 건너뜀, 골 4 (2.6) 를 줄임 → 1.6 칸 + 2.1 → 2.6 구간이 지나는 칸
+    cells = blocked_cells(w, "BLOCKED skipped=[2] shortened=[4]", origin, 0.5)
+    assert cells == {(ix(1.6), iy)} | {(ix(x), iy) for x in (2.2, 2.4, 2.6)}
+    assert blocked_cells(w, "BLOCKED skipped=[] shortened=[]", origin, 0.5) == set()
+    assert blocked_cells(w, "CANCELED", origin, 0.5) == set()
 
 
 def test_mask_cells_skip_normal_low_confidence_and_dock():

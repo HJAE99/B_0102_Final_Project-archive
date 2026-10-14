@@ -12,6 +12,8 @@
 #   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 30초
 #   DOCK:           waypoints(없으면 undock 위치)로 가서 dock
 # 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
+#   향하던 점이 global costmap 에서 장애물·inscribed 칸이 되면(지도에 없는 장애물이 점 위에 있음) 다가가기 전에 바로 건너뜀
+#   (그대로 두면 RPP 가 장애물에 2–5 cm 까지 붙어 돌지도 못하고 갇힘 — 10/14 시뮬, BackUp 복구 없음)
 # 배터리(E2): 30 % 이하 새 작업 거절(DOCK 제외), DOCK_PCT 이하 작업 취소 후 dock
 import math
 import threading
@@ -25,7 +27,9 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
-from geometry_msgs.msg import PoseWithCovarianceStamped, TwistStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TwistStamped
+from nav2_msgs.msg import Costmap
+from nav_msgs.msg import OccupancyGrid
 from nav2_simple_commander.robot_navigator import TaskResult
 from rcl_interfaces.srv import SetParameters
 from scv_msgs.action import ExecuteTask, InspectFacility, PreciseMeasure
@@ -44,6 +48,11 @@ KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_
 DOCK_BACKOFF = 0.3   # dock 명령 내리는 자리: undock 위치보다 dock 에서 이만큼 더 먼 곳 (m, 10/12 hhj 요청)
 DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
 HOME = {'/robot3': (2.806, 4.610, 179.9), '/robot4': (2.863, 0.948, 175.8)}
+INSCRIBED_COST = 253   # nav2 costmap: 로봇 중심이 여기 오면 부딪힘 (254 장애물, 255 모름)
+BACKOFF = 0.25         # 막힌 점 대신 갈 줄 위의 점: 줄이 inscribed 칸에 닿는 곳에서 이만큼 앞 (장애물과 약 0.44 m, 로봇 가장자리 25 cm).
+                       # inflation 비용으로 고르면(100 미만) 6 cm 까지 붙어 돌지 못하고 55 초 서 있었음 (10/14 시뮬)
+NEAR_GOAL = 0.5        # 골 둘레 이 안에 새 장애물(지도엔 빈칸, costmap 엔 장애물)이 보여야 줄 막힘을 골 막힘으로 봄 (m)
+MIN_STEP = 0.15        # 대신 갈 점이 앞 점(또는 지금 위치)에서 이보다 가까우면 그냥 뺌 (m)
 
 
 class MissionExecutor(Node):
@@ -59,6 +68,10 @@ class MissionExecutor(Node):
         self.warning = ''
         self.battery = 100.0
         self.pose = None   # (x, y, yaw rad, 위치 표준편차 m)
+        self.costmap = None   # 마지막 global costmap (nav2_msgs/Costmap, map 프레임)
+        self.static_map = None   # 지도 (map_server). costmap 장애물 중 지도에 없는 것을 가리는 데 씀
+        self.goal_index, self.skipped, self.shortened = -1, set(), set()   # 작업 중 막힌 점 기록 (follow_loop)
+        self.blocked_spots = []   # 이번 회차에 장애물로 못 간 waypoint 자리 (x, y). 다음 작업이 같은 자리에서 시작하면 뺌
         self.robot_id = self.get_namespace().strip('/')
         self.pose_std_max = self.declare_parameter('pose_std_max', 0.15).value   # PLAN 2-3: 정상 9–11 cm, 틀림 52 cm (docs/driving/data/2026-10-11_robot4_pose_ok.csv)
 
@@ -67,6 +80,9 @@ class MissionExecutor(Node):
         self.status_pub = self.create_publisher(RobotStatus, 'status', 10)
         self.create_subscription(BatteryState, 'battery_state', self.on_battery, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.on_pose,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_subscription(Costmap, 'global_costmap/costmap_raw', self.on_costmap, 1)
+        self.create_subscription(OccupancyGrid, 'map', self.on_map,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.param_cli = self.create_client(SetParameters, 'controller_server/set_parameters', callback_group=cb)
         self.inspect_cli = ActionClient(self, InspectFacility, 'inspect_facility', callback_group=cb)
@@ -80,6 +96,92 @@ class MissionExecutor(Node):
     # ---------- 상태 (IF-12) ----------
     def on_battery(self, msg):
         self.battery = msg.percentage * 100.0   # Create 3 는 0–1
+
+    def on_costmap(self, msg):
+        self.costmap = msg
+
+    def on_map(self, msg):
+        self.static_map = msg
+
+    def new_obstacle_near(self, pose, radius=NEAR_GOAL):
+        # pose 둘레 radius 안에 지도에 없는 장애물 칸(costmap 254, 지도는 빈칸)이 있는가
+        m = self.costmap
+        if m is None:
+            return False
+        md = m.metadata
+        x0, y0 = xy(pose)
+        r = int(radius / md.resolution) + 1
+        cx, cy = int((x0 - md.origin.position.x) / md.resolution), int((y0 - md.origin.position.y) / md.resolution)
+        for row in range(max(cy - r, 0), min(cy + r + 1, md.size_y)):
+            for col in range(max(cx - r, 0), min(cx + r + 1, md.size_x)):
+                if m.data[row * md.size_x + col] != 254:
+                    continue
+                x = md.origin.position.x + (col + 0.5) * md.resolution
+                y = md.origin.position.y + (row + 0.5) * md.resolution
+                if math.dist((x, y), (x0, y0)) <= radius and not self.on_static_map(x, y):
+                    return True
+        return False
+
+    def on_static_map(self, x, y):
+        # 지도(map_server)에서 점유 칸인가 (지도를 못 받았으면 지도에 있는 것으로 봄 → 새 장애물로 세지 않음)
+        g = self.static_map
+        if g is None:
+            return True
+        gi = g.info
+        col, row = int((x - gi.origin.position.x) / gi.resolution), int((y - gi.origin.position.y) / gi.resolution)
+        if not (0 <= col < gi.width and 0 <= row < gi.height):
+            return True
+        return g.data[row * gi.width + col] >= 50 or g.data[row * gi.width + col] < 0
+
+    def cost(self, x, y):
+        # global costmap 비용. 모르는 칸·costmap 밖·아직 못 받음은 0
+        m = self.costmap
+        if m is None:
+            return 0
+        md = m.metadata
+        col = int((x - md.origin.position.x) / md.resolution)
+        row = int((y - md.origin.position.y) / md.resolution)
+        if not (0 <= col < md.size_x and 0 <= row < md.size_y):
+            return 0
+        c = m.data[row * md.size_x + col]
+        return 0 if c == 255 else c
+
+    def occupied(self, pose):
+        # 점이 장애물·inscribed 칸인가 (지도에 없는 장애물이 점 위에 있음)
+        return self.cost(pose.pose.position.x, pose.pose.position.y) >= INSCRIBED_COST
+
+    def line_hit(self, start, pose):
+        # start(x, y) → pose 직선이 처음 inscribed 칸에 닿는 거리 (안 닿으면 None)
+        x0, y0 = start
+        x1, y1 = pose.pose.position.x, pose.pose.position.y
+        length = math.dist((x0, y0), (x1, y1))
+        step = self.costmap.metadata.resolution / 2 if self.costmap else 0.025
+        return next((k * step for k in range(1, int(length / step) + 1)
+                     if self.cost(x0 + (x1 - x0) * k * step / length,
+                                  y0 + (y1 - y0) * k * step / length) >= INSCRIBED_COST), None)
+
+    def blocked(self, before, pose):
+        # 점이 장애물 칸이거나, 앞 waypoint(before) 에서 그 점까지의 측정 줄이 막혔고 점 둘레 NEAR_GOAL 안에 지도에 없는
+        # 장애물이 보임. 앞에서만 보면 줄 가운데만 막은 장애물(돌아가면 골에 감)과 골을 덮은 장애물(안쪽은 라이다가 못 봐
+        # 빈칸으로 남고, 돌아가다 모서리에 붙어 갇힘)이 구분되지 않아 막힘 쪽으로 봄 — 잘못 봐도 골 앞 한 칸만 잃음 (10/14 시뮬:
+        # 세 쪽이 막혀야 골 막힘으로 보면 큰 상자에서 갇혀 이후 작업을 모두 잃음)
+        return self.occupied(pose) or (before is not None and self.line_hit(xy(before), pose) is not None
+                                       and self.new_obstacle_near(pose))
+
+    def last_free(self, start, pose):
+        # start(x, y) → pose 직선이 처음 inscribed 칸에 닿는 곳에서 BACKOFF 만큼 앞의 점 (막힌 끝점 대신 그 줄을 장애물 앞까지 잼).
+        # 그 점이 start 에서 MIN_STEP 안이면 None
+        x0, y0 = start
+        x1, y1 = pose.pose.position.x, pose.pose.position.y
+        length = math.dist((x0, y0), (x1, y1))
+        hit = self.line_hit(start, pose)
+        best = (length if hit is None else hit) - BACKOFF
+        if best < MIN_STEP:
+            return None
+        p = PoseStamped(header=pose.header)
+        p.pose.position.x, p.pose.position.y = x0 + (x1 - x0) * best / length, y0 + (y1 - y0) * best / length
+        p.pose.orientation = pose.pose.orientation
+        return p
 
     def on_pose(self, msg):
         p, q, c = msg.pose.pose.position, msg.pose.pose.orientation, msg.pose.covariance
@@ -108,6 +210,8 @@ class MissionExecutor(Node):
 
     def execute(self, gh):
         g = gh.request
+        if g.run_id != self.run_id:
+            self.blocked_spots = []
         self.task, self.run_id, self.progress, self.warning = g, g.run_id, 0.0, ''
         measured = None   # REINSPECTION 의 PreciseMeasure 결과 (interfaces v0.2.10)
         if self.state == S.STATE_DOCKED and g.type != T.DOCK:
@@ -156,18 +260,24 @@ class MissionExecutor(Node):
             # 정밀 값으로 못 바꾸면 일반 오차로 도착해 버리므로 출발하지 않음 (원복은 finally)
             if precise and not self.set_tolerance(*PRECISE_TOL):
                 return False, 'TOLERANCE_FAILED'
-            return self.follow_loop(gh, list(waypoints))
+            return self.follow_loop(gh, list(waypoints), shorten=not precise)
         finally:
             if precise:
                 self.set_tolerance(*NORMAL_TOL)
 
-    def follow_loop(self, gh, waypoints):
+    def follow_loop(self, gh, waypoints, shorten=True):
+        # 막힌 점 처리 (10/14, 관제가 측정 줄을 0.5 m 마다 중간 점으로 나눠 보냄):
+        #   중간 점이 장애물 칸이면 그 점만 빼고 다음 점으로 (플래너가 돌아감). 여러 개가 막혀도 하나씩 뺌
+        #   마지막 점(골)이 장애물 칸이거나 앞 점에서의 줄이 막히면 줄 위 마지막 빈 점까지만 가고 작업을 끝냄 (없으면 뺌)
+        #   (shorten=False — 설비·재측정처럼 정확한 자리가 필요하면 골은 줄이지 않고 장애물 칸일 때 뺌)
+        #   결과 reason 에 원래 번호를 남김: BLOCKED skipped=[…] shortened=[…] → 관제가 그 칸을 채우기(미측정 재측정)에서 뺌
         n = len(waypoints)
+        self.goal_index = n - 1 if shorten else -1
+        self.skipped, self.shortened = set(), set()
         left = self.drop_unreachable(list(enumerate(waypoints)))   # (원래 번호, pose)
-        skipped = n - len(left)
         while left:
             self.nav.goThroughPoses([w for _, w in left])
-            fb, last_xy, last_t = None, None, time.time()
+            fb, last_xy, last_t, moved = None, None, time.time(), False
             while not self.nav.isTaskComplete():
                 if gh.is_cancel_requested or self.battery <= DOCK_PCT:
                     self.nav.cancelTask()
@@ -178,53 +288,105 @@ class MissionExecutor(Node):
                     i = left[min(len(left) - fb.number_of_poses_remaining, len(left) - 1)][0]
                     self.progress = i / n
                     gh.publish_feedback(ExecuteTask.Feedback(waypoint_index=i, progress=self.progress))
+                    k = max(len(left) - fb.number_of_poses_remaining, 0)
+                    if k < len(left) and self.must_change(left[k - 1][1] if k else None, *left[k]):
+                        self.get_logger().warn(f'waypoint {left[k][0]} 가 장애물에 막힘 → 다가가지 않음')
+                        moved = True
+                        break
                     q = fb.current_pose.pose.orientation
-                    xy = (fb.current_pose.pose.position.x, fb.current_pose.pose.position.y,
-                          2 * math.atan2(q.z, q.w))
+                    xy_yaw = (fb.current_pose.pose.position.x, fb.current_pose.pose.position.y,
+                              2 * math.atan2(q.z, q.w))
                     # 5 cm 또는 0.3 rad 바뀌면 움직임 (제자리 회전을 막힘으로 세지 않게)
-                    if last_xy is None or math.dist(xy[:2], last_xy[:2]) > 0.05 or \
-                            abs(math.remainder(xy[2] - last_xy[2], math.tau)) > 0.3:
-                        last_xy, last_t = xy, time.time()
+                    if last_xy is None or math.dist(xy_yaw[:2], last_xy[:2]) > 0.05 or \
+                            abs(math.remainder(xy_yaw[2] - last_xy[2], math.tau)) > 0.3:
+                        last_xy, last_t = xy_yaw, time.time()
                         if self.state == S.STATE_BLOCKED:
                             self.state, self.warning = S.STATE_EXECUTING, ''
                     elif time.time() - last_t > 10.0:
                         break   # 막힘 10초
                     elif time.time() - last_t > 5.0 and self.state != S.STATE_BLOCKED:
                         self.state, self.warning = S.STATE_BLOCKED, 'BLOCKED'   # 5초: Nav2 가 재계획하는 중
-                        rest = left[max(len(left) - fb.number_of_poses_remaining, 0):]
-                        if len(self.drop_unreachable(rest)) < len(rest):
+                        k = max(len(left) - fb.number_of_poses_remaining, 0)
+                        rest = left[k:]
+                        # 여기서는 검사만 (바꾼 점은 쓰지 않으므로 기록도 되돌림)
+                        saved = set(self.skipped), set(self.shortened), list(self.blocked_spots)
+                        dropped = len(self.drop_unreachable(rest, left[k - 1][1] if k else None)) < len(rest)
+                        self.skipped, self.shortened, self.blocked_spots = saved
+                        if dropped:
                             break   # 길이 사라진 점이 있으면 10초를 기다리지 않고 바로 뺌
                 time.sleep(0.2)
             else:
                 res = self.nav.getResult()
                 if res == TaskResult.SUCCEEDED:
-                    return (True, '') if not skipped else (False, f'BLOCKED skipped={skipped}')
+                    return self.result()
                 if res != TaskResult.FAILED:
                     return False, str(res)
             # 막힘 10초 또는 Nav2 실패: 지난 점을 버리고, 남은 점 중 길 없는 점만 뺌. 다 갈 수 있으면(사람·상자 같은 일시 막힘) 지금 향하던 점을 뺌
-            self.nav.cancelTask()
-            left = left[max(len(left) - fb.number_of_poses_remaining, 0):] if fb else left
-            kept = self.drop_unreachable(left)
-            if len(kept) == len(left):
+            self.cancel_nav()
+            k = max(len(left) - fb.number_of_poses_remaining, 0) if fb else 0
+            before = left[k - 1][1] if k else None
+            left = left[k:]
+            kept = self.drop_unreachable(left, before)
+            if len(kept) == len(left) and not moved:   # 장애물에 막힌 점은 drop_unreachable 이 바꾸거나 뺐음
                 kept = left[1:]
             gone = [i for i, _ in left if all(i != j for j, _ in kept)]
             self.get_logger().warn(f'BLOCKED → waypoint {gone} 건너뜀')
-            skipped += len(gone)
+            self.skipped.update(gone)
             left = kept
             self.state = S.STATE_EXECUTING
-        return False, f'BLOCKED skipped={skipped}'   # 남은 waypoint 가 모두 막힘
+        return self.result()   # 남은 waypoint 가 모두 막힘
 
-    def drop_unreachable(self, left):
-        # 앞 점 → 다음 점 경로가 없는 waypoint 를 뺌 (첫 구간은 지금 위치에서). 플래너 tolerance(0.5 m) 안이면 갈 수 있는 것으로 봄
+    def cancel_nav(self):
+        # 취소가 실제로 끝날 때까지 기다림. 바로 다음 goal 을 보내면 bt_navigator 가 늦게 받은 취소를 새 goal 에 적용해
+        # 새 작업이 0 초에 실패함 (10/14 시뮬: 다음 작업의 점을 모두 건너뜀)
+        self.nav.cancelTask()
+        deadline = time.time() + 3.0
+        while not self.nav.isTaskComplete() and time.time() < deadline:
+            time.sleep(0.05)
+
+    def result(self):
+        if not self.skipped and not self.shortened:
+            return True, ''
+        return False, f'BLOCKED skipped={sorted(self.skipped)} shortened={sorted(self.shortened)}'
+
+    def must_change(self, before, i, w):
+        # 중간 점은 장애물 칸일 때만, 골은 앞 점에서의 줄이 막혀도 (골을 줄 위 빈 점으로 줄임)
+        return self.blocked(before, w) if i == self.goal_index else self.occupied(w)
+
+    def drop_unreachable(self, left, before=None):
+        # 앞 점 → 다음 점 경로가 없는 waypoint 를 뺌 (첫 구간은 지금 위치에서). 플래너 tolerance(0.5 m) 안이면 갈 수 있는 것으로 봄.
+        # 장애물에 막힌 점(must_change)은: 중간 점은 뺌, 골은 앞 점(없으면 지금 위치)에서 골로 가는 직선 위의 마지막 빈 점으로
+        # 바꾸고 그런 점이 없으면 뺌. 작업의 첫 점이 앞서 막혔던 자리면 뺌 (앞 작업 골을 줄였으면 다음 작업은 그 자리에서
+        # 시작하므로). before 는 left 앞에 이미 지난 점 (줄 검사용).
+        # 앞 점에서 길이 없으면 지금 위치에서 한 번 더 봄 — 앞 점이 장애물 가장자리면 거기서 출발하는 경로가 막혀
+        # 갈 수 있는 다음 점까지 버리던 것 (10/14 시뮬)
         kept, prev = [], None
         saved = self.nav.goal_handle, self.nav.result_future   # getPath 가 이 둘을 덮어써 cancelTask·isTaskComplete 가 주행 goal 을 못 봄 (10/13)
         for i, w in left:
+            line_from = prev or before
+            if line_from is None and any(math.dist(xy(w), b) < 0.05 for b in self.blocked_spots):
+                self.get_logger().warn(f'waypoint {i} 는 앞서 장애물로 못 간 자리 → 뺌')
+                self.skipped.add(i)
+                continue
+            if self.must_change(line_from, i, w):
+                self.blocked_spots.append(xy(w))
+                start = xy(line_from) if line_from else self.pose[:2] if self.pose else None
+                w = self.last_free(start, w) if i == self.goal_index and start else None
+                if w is None:
+                    self.get_logger().warn(f'waypoint {i} 가 장애물에 막힘 → 뺌')
+                    self.skipped.add(i)
+                    continue
+                self.get_logger().warn(f'골 {i} 가 장애물에 막힘 → 줄 위 ({w.pose.position.x:.2f}, {w.pose.position.y:.2f}) 로 줄임')
+                self.shortened.add(i)
             path = self.nav.getPath(prev or w, w, use_start=prev is not None)
+            if not (path and path.poses) and prev is not None and not self.occupied(w):
+                path = self.nav.getPath(w, w, use_start=False)
             if path and path.poses:
                 kept.append((i, w))
                 prev = w
             else:
                 self.get_logger().warn(f'waypoint {i} 로 가는 길 없음')
+                self.skipped.add(i)
         self.nav.goal_handle, self.nav.result_future = saved
         return kept
 
@@ -333,6 +495,10 @@ class MissionExecutor(Node):
             time.sleep(0.05)
 
 
+def xy(pose):
+    return pose.pose.position.x, pose.pose.position.y
+
+
 def localize(nav, home):
     # setInitialPose 는 공분산 0 이라 AMCL 이 몇 도 틀린 것도 못 고침 (10/12 robot3 6° 틀어짐)
     # → 위치 0.15 m, 각도 10° 불확실성을 넣어 보내고 amcl_pose 가 올 때까지 반복
@@ -347,7 +513,12 @@ def localize(nav, home):
     while not nav.initial_pose_received:
         msg.header.stamp = nav.get_clock().now().to_msg()
         nav.initial_pose_pub.publish(msg)
-        rclpy.spin_once(nav, timeout_sec=1.0)
+        # spin_once 는 메시지가 하나라도 오면 바로 돌아온다 (이 노드가 initialpose 도 받음) → 1초 동안은
+        # 다시 보내지 않고 기다림. 그러지 않으면 초기 pose 를 수천~수십만 번 보내 AMCL 이 계속 초기화돼
+        # amcl_pose 가 안 나오고 기동이 멈춘다 (10/14 robot3: 25만 번)
+        deadline = time.time() + 1.0
+        while not nav.initial_pose_received and time.time() < deadline:
+            rclpy.spin_once(nav, timeout_sec=0.1)
 
 
 def settle(nav):
