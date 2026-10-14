@@ -100,7 +100,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 | --- | --- |
 | Nav2 를 띄운 뒤 | `ros2 topic info /robot4/keepout_mask -v` — 발행은 `inspection_manager` 하나, 구독은 global·local costmap 둘. costmap 이 `/robot4/global_costmap/keepout_mask` 에 붙어 있으면 설정이 틀린 것 |
 | 시작 | 관제 로그에 두 로봇 `작업 전송` 이 함께 나온다 |
-| 측정 | 섹터당 12점. x 0.53 ↔ 2.73, y 0.5 간격. 2–4분. 지도의 벽에서 0.30 m(`obstacle_clearance_m`) 안에 드는 줄 끝은 안쪽으로 당겨진다 (Z2 첫 점 x 1.68, Z1 6번 x 0.73, Z2 6번 x 1.43) |
+| 측정 | 칸(0.5 m) 한 줄을 1/4 · 3/4 높이로 두 번 (줄 간격 `survey_spacing_m` 0.25, 한 줄 건너 돌기). 지도의 벽에서 0.30 m(`obstacle_clearance_m`) 안에는 점을 두지 않는다. 모서리마다 작업이 끝나 로봇이 서고 방향을 맞춘 뒤 다음 줄로 간다(`corner_mode` angle — 주행 BT 지움 반경 0.15 와 짝). Z2 기준 점 45 · 작업 24 · 약 6분 |
 | 칸 확정 | 관제 로그 `칸 맵 확정: Z1: N칸 (음영 a · 미검출 b · low c)` 가 로봇 PC 히트맵과 맞는지 |
 | 재측정 | 로봇마다 최대 5칸(`max_remeasure_per_robot`). 알림 `CLEARED`(해제) · `REMAINS`(남음) |
 | 마스크 | 관제 로그 `회피 칸 N개 [...]`. RViz 의 `/{robot}/global_costmap/costmap` 에 그 칸이 장애물로 보인다 |

@@ -13,7 +13,7 @@
         <RateController hz="0.333">
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
-              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.35"/>  <!-- 원본 0.7: 코너를 0.7 m 앞에서 지워 안쪽으로 질러감. 0.2 는 RPP 코너 최근접 0.21 m 라 못 지워 반복 (2026-10-12) -->
+              <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.15"/>  <!-- 원본 0.7 → 0.35(10/12, 코너를 0.7 m 앞에서 지워 질러감) → 0.15(10/14, 관제가 못 지울 모서리를 작업 끝점으로 보내므로(corner_mode=angle) 작게 해서 모서리 파먹기를 줄임. 관제 passed_goal_radius_m 과 같게. 근거 docs/control/PLAN.md N-10) -->
               <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
             </ReactiveSequence>
             <Sequence>

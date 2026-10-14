@@ -101,6 +101,11 @@ class InspectionManager(Node):
         self.declare_parameter("obstacle_clearance_m", 0.30)
         # 측정 줄 간격. 칸(cell_size)보다 작으면 칸 한 줄을 여러 번 지난다 (0.25 = 칸마다 두 줄)
         self.declare_parameter("survey_spacing_m", 0.25)
+        # 모서리 처리: angle = RPP 가 지울 만큼 다가가지 못할 모서리를 작업 끝점으로 (10/14 채택, PLAN N-10).
+        # 지움 반경 · lookahead 는 주행 설정(BT RemovePassedGoals · nav2_rpp.yaml)과 같게
+        self.declare_parameter("corner_mode", "angle")
+        self.declare_parameter("passed_goal_radius_m", 0.15)
+        self.declare_parameter("rpp_lookahead_m", 0.4)
         self.declare_parameter("shadow_dbm", -72.0)
         self.declare_parameter("max_remeasure_per_robot", 5)
         # 재측정은 음영·미검출 후보의 30초 정밀 측정이다 (TEST_PLAN). 미측정 칸은 넣지 않는다
@@ -158,6 +163,9 @@ class InspectionManager(Node):
             ),
             cell_size=self.cell_size,
             line_spacing=float(self.get_parameter("survey_spacing_m").value),
+            corner_mode=str(self.get_parameter("corner_mode").value),
+            passed_goal_radius=float(self.get_parameter("passed_goal_radius_m").value),
+            lookahead=float(self.get_parameter("rpp_lookahead_m").value),
         )
 
         # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는

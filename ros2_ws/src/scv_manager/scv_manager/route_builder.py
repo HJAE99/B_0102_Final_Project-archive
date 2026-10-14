@@ -11,8 +11,9 @@ from scv_survey.cellmap_store import in_polygon
 from .manager_core import Waypoint
 
 
-# 주행 BT(navigate_through_poses_scv.xml) 의 RemovePassedGoals radius. 바뀌면 같이 바꾼다
-PASSED_GOAL_RADIUS = 0.35
+# 주행 설정과 맞추는 값 (기본값). 바뀌면 관제 파라미터로 같이 바꾼다
+PASSED_GOAL_RADIUS = 0.15   # navigate_through_poses_scv.xml 의 RemovePassedGoals radius (10/14 0.35 → 0.15)
+RPP_LOOKAHEAD = 0.4         # nav2_rpp.yaml 의 FollowPath.lookahead_dist
 
 
 @dataclass(frozen=True)
@@ -62,11 +63,20 @@ class RouteBuilder:
         obstacle_clearance: float = 0.0,
         cell_size: float | None = None,
         line_spacing: float | None = None,
+        corner_mode: str = "none",
+        passed_goal_radius: float = PASSED_GOAL_RADIUS,
+        lookahead: float = RPP_LOOKAHEAD,
     ):
         self.zones_file = Path(zones_file)
         # RSSI 칸 크기와 측정 줄 간격. 줄 간격이 칸보다 작으면 칸 한 줄을 여러 번 지난다
         self.cell_size = cell_size
         self.line_spacing = line_spacing
+        # 모서리 처리: none · angle(못 지울 모서리를 구간 끝으로, 10/14 비교 시험으로 채택 — PLAN N-10)
+        if corner_mode not in ("none", "angle"):
+            raise ValueError(f"corner_mode 는 none · angle 중 하나: {corner_mode}")
+        self.corner_mode = corner_mode
+        self.passed_goal_radius = passed_goal_radius
+        self.lookahead = lookahead
         self.facilities_file = Path(facilities_file)
         # 벽 안쪽 사각형 (xmin, ymin, xmax, ymax). 주면 경로를 벽에서
         # wall_clearance 만큼 안쪽으로 자르고 y 줄을 칸 중심에 맞춘다.
@@ -295,9 +305,25 @@ class RouteBuilder:
             turn = math.atan2(c[1] - b[1], c[0] - b[0]) - math.atan2(b[1] - a[1], b[0] - a[0])
             return abs(math.remainder(turn, math.tau)) > math.radians(120.0)
 
+        def unreachable_corner(a, b, c) -> bool:
+            """RPP 가 b 를 지울 만큼 가까이 못 갈 모서리인가 (corner_mode=angle).
+
+            lookahead 거리에서 돌기 시작하는 원호로 보면 꺾는 각 θ 의 모서리에 가장 가까이 가는 거리는
+            lookahead · (1/cos(θ/2) − 1). 근사라 지움 반경의 80 % 를 넘으면 못 지우는 것으로 본다.
+            """
+            turn = abs(math.remainder(
+                math.atan2(c[1] - b[1], c[0] - b[0]) - math.atan2(b[1] - a[1], b[0] - a[0]),
+                math.tau,
+            ))
+            if turn >= math.pi - 1e-6:
+                return True
+            closest = self.lookahead * (1.0 / math.cos(turn / 2.0) - 1.0)
+            return closest >= 0.8 * self.passed_goal_radius
+
         # 구간을 끊는 점: 앞이나 뒤 직선이 벽에 걸리거나, 120도 넘게 되돌아가거나, 다음 점이 0.35 m
         # 안인 점. 경로 가운데 점은 0.35 m 안에 들어오면 지워지는데(주행 BT 의 RemovePassedGoals),
         # 이런 점은 RPP 가 닿기 전에 돌아서거나 다음 점과 함께 지워져 줄 끝을 덜 간다
+        radius = self.passed_goal_radius
         segments: list[list[Waypoint]] = [[]]
         for index, (point, yaw) in enumerate(route):
             before = route[index - 1][0] if index else dock
@@ -308,15 +334,20 @@ class RouteBuilder:
                 (index and not self.line_clear(before, point))
                 or not self.line_clear(point, after)
                 or (before is not None and turns_back(before, point, after))
-                or math.dist(point, after) < PASSED_GOAL_RADIUS
-                or (index and math.dist(before, point) < PASSED_GOAL_RADIUS)
+                or math.dist(point, after) < radius
+                or (index and math.dist(before, point) < radius)
+                or (
+                    self.corner_mode == "angle"
+                    and before is not None
+                    and unreachable_corner(before, point, after)
+                )
             ):
                 # 다음 점까지 곧게 갈 수 있으면 다음 구간도 이 점에서 시작한다 (그 줄이 구간 안에 들게).
                 # 다음 점이 가까우면 그 점을 혼자 한 구간으로 끝까지 가게 한다
                 segments.append(
                     [Waypoint(x=point[0], y=point[1], yaw=route[index + 1][1])]
                     if self.line_clear(point, after)
-                    and math.dist(point, after) >= PASSED_GOAL_RADIUS
+                    and math.dist(point, after) >= radius
                     else []
                 )
         return segments

@@ -1,6 +1,8 @@
 """묶음 시험에서 더한 순수 로직: 벽 여유 경로, 설비 섹터 배정, 재측정 칸 선택, 회피 칸."""
 
 import math
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -129,7 +131,8 @@ def test_cell_route_ends_a_segment_in_a_dead_end(tmp_path):
 
 
 def test_two_lines_per_cell_row_every_other_line_first(tmp_path):
-    rb = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30, cell_size=0.5, line_spacing=0.25)
+    rb = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30, cell_size=0.5, line_spacing=0.25,
+                 passed_goal_radius=0.35)
     z1, _ = rb.build_survey_routes()
 
     lines = sorted({y for y, _, _ in rows(rb, z1)})
@@ -149,6 +152,23 @@ def test_two_lines_per_cell_row_every_other_line_first(tmp_path):
     )
     # 출발한 쪽(Dock, 오른쪽 아래) 근처에서 끝난다
     assert (w[0].x, w[-1].x) == (2.6, 2.6) and w[-1].y < 1.0
+
+
+def test_corner_mode_angle_ends_segments_only_where_the_corner_cannot_be_cleared(tmp_path):
+    def segments(radius):
+        rb = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30,
+                     corner_mode="angle", passed_goal_radius=radius, lookahead=0.4)
+        return rb.build_survey_routes()[0].segments
+
+    # 지움 반경 0.35: 90도 모서리는 0.17 m 까지 가므로 지워진다 → 지금과 같은 한 구간
+    assert [len(s) for s in segments(0.35)] == [12]
+    # 0.15: 90도 모서리를 못 지운다 → 모서리마다 구간이 끝나 줄(과 줄 바꿈) 하나씩
+    assert all(len(s) <= 2 for s in segments(0.15))
+
+
+def test_unknown_corner_mode_is_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        builder(tmp_path, corner_mode="guide")
 
 
 def test_survey_route_keeps_wall_clearance_and_starts_at_dock_side(tmp_path):

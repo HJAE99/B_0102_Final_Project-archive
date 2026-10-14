@@ -30,7 +30,7 @@ TurtleBot4 Jazzy 기본 설정에서 **무엇을 왜 바꿨고, 그 값을 어�
 | 12 | FollowPath (RPP) | `rotate_to_heading_angular_vel` | 1.0 → **0.5** | 10/12 26bab7c | 도착 회전 오버슈트로 방향 오차가 허용값보다 큼 | ★ 0.03 m/3° 에서 방향 오차 평균 3.9 → 2.9° (1.1–4.5°), 위치 변화 없음, 시간 약 +2 s | `tol_check.csv` |
 | 13 | FollowPath (RPP) | `max_robot_pose_search_dist` | 10.0 → **1.0** | 10/12 8034dfd | 내려갔다 올라오는 경로에서 뒤 구간을 "지금 위치"로 잡아 1번 점을 건너뛰고 14 s 제자리 회전 | ○ 4-2 E1 시험에서 재현 안 됨. 정량 데이터 없음 | 10/12 일지 |
 | 14 | FollowPath (RPP) | `allow_reversing` | **false** (RPP 기본) | — | 후진 금지 | — RPP 기본값 그대로 | |
-| 15 | bt_navigator | `default_nav_through_poses_bt_xml` → scv xml, `RemovePassedGoals radius` | 0.7 → **0.35** | 10/12 f8aaffb | 기본 BT 가 waypoint 0.7 m 안에서 지우고 3 s 마다 재계획 → 코너를 0.7 m 앞에서 버림 | ★ robot4 0.7 m: 최대 이탈 38–48 cm → robot3 0.35 m: 20–22 cm. 0.2 m 는 RPP 가 코너에 0.21 m 까지만 접근해 못 지움 (왕복 반복) | `track_check.csv` |
+| 15 | bt_navigator | `default_nav_through_poses_bt_xml` → scv xml, `RemovePassedGoals radius` | 0.7 → 0.35 → **0.15** (10/14) | 10/12 f8aaffb · 10/14 | 기본 BT 가 waypoint 0.7 m 안에서 지우고 3 s 마다 재계획 → 코너를 0.7 m 앞에서 버림 | ★ robot4 0.7 m: 최대 이탈 38–48 cm → robot3 0.35 m: 20–22 cm. 0.2 m 는 RPP 가 코너에 0.21 m 까지만 접근해 못 지움 (왕복 반복) | `track_check.csv` |
 | 16 | bt_navigator · behavior_server | `default_nav_to_pose_bt_xml` → scv xml, 두 BT 의 `BackUp` 제거, `behavior_plugins` 에서 `backup` 삭제 | 있음 → **없음** | 10/13 b839d82 | Create 3 가 후진을 거부해 BackUp 복구가 "backup failed" (10/11 로그 2회). interfaces 「자세 보정 "뒤로"」 | ★ 10/13 bag 5개(E1·dock·E4·E7) cmd_vel x < 0 **0건**. 10/12 작업 종료 후 후진 10 s 는 BackUp 이 아니라 취소 버그(#17 아래 4-7)로 밝혀짐 | `data/2026-10-13_backup_check.csv` |
 | 17 | velocity_smoother | `max_velocity` x | 0.26 → **0.2** | 10/11 5e3c287 | #10 과 같음 (`min_velocity` x 도 이때 −0.26 → −0.2 로 대칭 조정) | — 합의값 | |
 | 18 | velocity_smoother | `min_velocity` x | −0.2 (TB4 원본 −0.26) → **0.0** | 10/13 b839d82 | 후진 금지 (PM step3 리뷰) | ★ dock · undock 322 s bag: cmd_vel x < 0 0건, Dock succeeded 2회 → dock 에 영향 없음 | `backup_check.csv` (bag_t5_dock) |
@@ -54,6 +54,7 @@ TurtleBot4 Jazzy 기본 설정에서 **무엇을 왜 바꿨고, 그 값을 어�
 | 파라미터 | 값 | 확인 |
 | --- | --- | --- |
 | costmap `footprint` 반경 0.189 m · `inflation_radius` 0.45 | 기본 그대로 | 3-1 통로 폭 실측 최소 1.98 m → 로봇 0.38 m 빼도 양쪽 약 0.8 m |
+| bt_navigator `RemovePassedGoals radius` 0.35 → **0.15** (`navigate_through_poses_scv.xml`) | 10/14 변경 | 관제 측정 경로의 모서리를 0.35 m 앞에서 지워 질러가던 것(파먹기). 0.15 로 줄이면 RPP(lookahead 0.4)가 90도 모서리에 0.17 m 까지만 다가가 못 지우므로, 관제가 그런 모서리를 작업 끝점으로 보낸다(`corner_mode=angle`, `passed_goal_radius_m` 0.15 — 둘은 같이 바꾼다). robot3 비교(0.25 m 간격, Z2, 관제 PLAN N-10): 모서리에 가장 가까이 간 거리 최대 0.32 → 0.10 m, 줄 가운데 계획 줄과의 거리 중앙값 0.135 → 0.048 m, 측정 4분 47초 → 6분 13초(+30 %). 지움 반경 0.35 + 모서리 뒤 보조 점(3번)은 효과 없음 |
 | costmap `inflation_radius` 0.45 → **0.30** · `cost_scaling_factor` 4.0 → **10.0** (global · local, `nav2_rpp.yaml` 만) | 10/13 밤 변경 | 관제 측정 경로(줄 간격 0.5 m, 벽 여유 0.30 m)가 벽 조각 옆에서 inflation 에 걸려 계획 경로가 줄에서 휘어 나감. 플래너 계산으로 비교(robot3, 주행 없이): y 4.5 줄 0.30 → 0.15 m, y 6.0 줄 0.21 → 0.06 m, y 4.0 줄 0.13 → 0.00 m. **주행 시험은 아직 안 함** — 벽에 0.30 m(로봇 가장자리 0.11 m)까지 붙을 수 있음 |
 | planner `tolerance` 0.5 | 기본 그대로 | 4-2: waypoint 하나만 막으면 0.5 m 안 근처를 지나가 막힘이 안 생김 → E1 시험은 통로 전체를 막아야 함 |
 | `controller_frequency` 20 Hz · `transform_tolerance` 0.1 | 기본 그대로 | 1-2 cmd_vel→odom 반응 지연 p95 218 ms (약 4주기). 기준 ≤ 250 ms 안이라 미반영 |
