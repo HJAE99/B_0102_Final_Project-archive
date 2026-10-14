@@ -1,3 +1,4 @@
+# ⚠ 10/14 PM 결정으로 IF-05 는 서비스(srv/InspectFacility.srv)로 바뀌었고 자세 보정 피드백도 없앴다. 이 액션은 T2-6 통합 때 mission_executor 를 바꾼 뒤 지운다.
 # IF-05 {ns}/inspect_facility · mission_executor → detection_alert (둘 다 로봇 PC)
 string task_id
 uint32 run_id                   # 순찰 회차. mission_executor 가 ExecuteTask.Goal.run_id 를 그대로 넣고, detection_alert 가 InspectionResult.run_id 로 씀 (10/12)
