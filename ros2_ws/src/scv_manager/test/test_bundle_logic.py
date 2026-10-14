@@ -1,5 +1,6 @@
 """묶음 시험에서 더한 순수 로직: 벽 여유 경로, 설비 섹터 배정, 재측정 칸 선택, 회피 칸."""
 
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -125,6 +126,29 @@ def test_cell_route_ends_a_segment_in_a_dead_end(tmp_path):
         for s in z2.segments
         for a, b in zip(s, s[1:])
     )
+
+
+def test_two_lines_per_cell_row_every_other_line_first(tmp_path):
+    rb = builder(tmp_path, walls=room_walls(), obstacle_clearance=0.30, cell_size=0.5, line_spacing=0.25)
+    z1, _ = rb.build_survey_routes()
+
+    lines = sorted({y for y, _, _ in rows(rb, z1)})
+    # 칸(0.25–0.75, …)마다 1/4 · 3/4 높이에 한 줄씩, 칸 경계에서 0.125 m 안쪽
+    assert lines == [round(0.25 + 0.5 * j + d, 2) for j in range(6) for d in (0.125, 0.375)]
+    # 1/4 높이 줄을 먼저 다 돈 뒤 3/4 높이 줄로 돌아온다 → 줄 사이 이동은 0.5 m, 바꿀 때 한 번만 0.25 m
+    w = z1.waypoints
+    steps = [round(abs(b.y - a.y), 3) for a, b in zip(w, w[1:]) if abs(a.y - b.y) > 1e-6]
+    assert steps.count(0.25) == 1 and set(steps) == {0.25, 0.5}
+    first_band = [round(p.y - 0.25, 3) % 0.5 for p in w[: steps.index(0.25) * 2 + 2]]
+    assert set(first_band) == {0.125}
+    # 0.35 m 보다 가까운 다음 점이 있으면 거기서 구간이 끝난다 (함께 지워지지 않게)
+    assert all(
+        math.dist((a.x, a.y), (b.x, b.y)) >= 0.35
+        for s in z1.segments
+        for a, b in zip(s, s[1:])
+    )
+    # 출발한 쪽(Dock, 오른쪽 아래) 근처에서 끝난다
+    assert (w[0].x, w[-1].x) == (2.6, 2.6) and w[-1].y < 1.0
 
 
 def test_survey_route_keeps_wall_clearance_and_starts_at_dock_side(tmp_path):

@@ -99,9 +99,12 @@ class InspectionManager(Node):
         self.declare_parameter("wall_clearance_m", 0.45)
         # 로봇 반경 0.19 m + 벽과의 간격 0.10 m
         self.declare_parameter("obstacle_clearance_m", 0.30)
+        # 측정 줄 간격. 칸(cell_size)보다 작으면 칸 한 줄을 여러 번 지난다 (0.25 = 칸마다 두 줄)
+        self.declare_parameter("survey_spacing_m", 0.25)
         self.declare_parameter("shadow_dbm", -72.0)
         self.declare_parameter("max_remeasure_per_robot", 5)
-        self.declare_parameter("include_unmeasured", True)
+        # 재측정은 음영·미검출 후보의 30초 정밀 측정이다 (TEST_PLAN). 미측정 칸은 넣지 않는다
+        self.declare_parameter("include_unmeasured", False)
         self.declare_parameter("dock_keepout_radius_m", 0.6)
         self.declare_parameter("writer_node", "cell_map_writer")
         self.declare_parameter("commit_timeout_sec", 10.0)
@@ -153,6 +156,8 @@ class InspectionManager(Node):
             obstacle_clearance=float(
                 self.get_parameter("obstacle_clearance_m").value
             ),
+            cell_size=self.cell_size,
+            line_spacing=float(self.get_parameter("survey_spacing_m").value),
         )
 
         # 노드를 켜자마자 빈 마스크를 낸다. 주행의 keepout_layer 는

@@ -47,7 +47,7 @@ SURVEY
 | --- | --- | --- |
 | `SURVEY` | 구현·ROS 시험 완료 | 두 로봇에 섹터 측정 후 Dock 배정. 경로는 벽에서 0.45 m 안쪽, 줄은 칸 중심 |
 | `WAITING_CANDIDATES` | 구현·mock 시험 완료 (10/13) | 두 로봇의 측정·Dock 종료 후 진입. `cell_map_writer`의 `commit_Z1`·`commit_Z2`를 부르고, 답이 오거나 10초가 지나면 칸 맵을 읽어 재측정 칸을 고른다 |
-| `REINSPECTION` | 구현·mock 시험 완료 (10/13) | 미검출 → 음영 → 미측정 순, 로봇마다 최대 5칸. 결과로 칸 상태를 다시 써서 `CLEARED`·`REMAINS` 알림 |
+| `REINSPECTION` | 구현·mock 시험 완료 (10/13) | 미검출 → 음영 순, 로봇마다 최대 5칸 (미측정 칸은 10/14 부터 대상에서 뺌, `include_unmeasured:=true` 로 되돌릴 수 있음). 결과로 칸 상태를 다시 써서 `CLEARED`·`REMAINS` 알림 |
 | `WAITING_KEEPOUT` | 구현·mock 시험 완료 (10/13) | 재측정·Dock 종료 또는 후보 0건일 때 진입. 다음 dispatch 주기에 바로 `FACILITY`로 |
 | `FACILITY` | 구현·mock 시험 완료 (10/13) | 남은 칸(표본 2개 이상, Dock 반경 0.6 m 제외)을 두 로봇 마스크로 내고, 관측 자리가 든 섹터의 로봇에 점검·Dock 배정 |
 | `COMPLETED` | 구현·mock 시험 완료 (10/13) | 모든 작업 종료 후 회차를 닫고(`done`·`partial`) 마스크를 비운다 |
