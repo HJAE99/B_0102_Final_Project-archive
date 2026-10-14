@@ -398,7 +398,7 @@ const ago = (iso) => {
   return s < 60 ? `${s.toFixed(0)}초 전` : `${(s / 60).toFixed(0)}분 전`;
 };
 
-function RobotPanel({ data, linked, onStart, onAbort }) {
+function RobotPanel({ data, linked, onStart, onAbort, onResume }) {
   const robots = data ? data.robots : [];
   const st = data && data.start;
   const runId = data && data.run_id;
@@ -407,7 +407,8 @@ function RobotPanel({ data, linked, onStart, onAbort }) {
     : !ready.length ? st.robots.map((r) => `${r.robot_id}: ${r.why.join(' · ')}`).join(' / ') : '';
   return html`<div class="rpanel">
     <h3>로봇 상태
-      ${onStart && (runId ? html`<button class="btn small danger" onClick=${() => onAbort(runId)}>순찰 중단 (run ${runId})</button>`
+      ${onStart && (runId ? html`<button class="btn small danger" onClick=${() => onAbort(runId)}>${data.run_owner === 'ros' ? '비상정지' : '순찰 중단'} (run ${runId})</button>
+        ${data.run_owner === 'ros' && html`<button class="btn small" onClick=${onResume}>재개</button>`}`
         : html`<button class="btn small primary" disabled=${!st || !st.can_start} title=${why} onClick=${onStart}>순찰 시작</button>`)}
       <span class=${'live ' + (linked ? 'on' : '')}>${linked ? '실시간' : '연결 중…'}</span></h3>
     ${onStart && !runId && why && html`<p class="startwhy">순찰 시작 불가 — ${why}</p>`}
@@ -441,8 +442,13 @@ function MonitorPage({ onAuthLost }) {
   const [starting, setStarting] = useState(false);
   const [msg, setMsg] = useState('');
   const abort = async (runId) => {
-    if (!confirm(`순찰 run ${runId}을 중단할까요? 로봇은 하던 일을 멈추고 도크로 돌아갑니다.`)) return;
+    const ros = ui && ui.run_owner === 'ros';          // ROS 관제: 중단 = 비상정지(두 로봇 정지, 「재개」로 이어 감)
+    if (!confirm(ros ? `순찰 run ${runId}을 비상정지할까요? 두 로봇이 멈추고 「재개」를 기다립니다.`
+      : `순찰 run ${runId}을 중단할까요? 로봇은 하던 일을 멈추고 도크로 돌아갑니다.`)) return;
     try { await api(`/api/runs/${runId}/abort`, { method: 'POST' }); setMsg(''); } catch (e) { setMsg(e.message); }
+  };
+  const resume = async () => {                        // ROS 관제(SCV_RUN_OWNER=ros) — 비상정지 뒤 /inspection/resume
+    try { await api('/api/runs/resume', { method: 'POST' }); setMsg(''); } catch (e) { setMsg(e.message); }
   };
   useEffect(() => {
     api('/api/maps/active')
@@ -479,7 +485,7 @@ function MonitorPage({ onAuthLost }) {
         : html`<${MapView} m=${m} robots=${ui ? ui.robots : []} />`}
     </div>
     <div class="later">
-      <${RobotPanel} data=${ui} linked=${linked} onStart=${() => setStarting(true)} onAbort=${abort} />
+      <${RobotPanel} data=${ui} linked=${linked} onStart=${() => setStarting(true)} onAbort=${abort} onResume=${resume} />
       <div class="panel"><h3>순찰</h3>${ui && ui.run_id ? html`<p>run ${ui.run_id} 진행 중 — 이력 탭에서 task · 후보 · 탐지 결과를 봅니다.</p>`
         : html`<p class="no">진행 중인 순찰 없음 — 「로봇 상태」의 순찰 시작으로 시작합니다.</p>`}
         ${ui && ui.start && ui.start.target_ap && html`<p class="no">측정 AP ${ui.start.target_ap.ssid} · ${ui.start.target_ap.active ? '활성' : '비활성'}</p>`}

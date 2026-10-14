@@ -36,6 +36,17 @@ from .manager_core import (
 )
 from .route_builder import RouteBuilder, wall_points
 
+# DB tasks 의 상태 · 종류 이름 (01_schema.sql CHECK)
+TASK_DB_STATUS = {
+    TaskState.PENDING: "PENDING", TaskState.ASSIGNED: "ACTIVE", TaskState.RUNNING: "ACTIVE",
+    TaskState.SUCCEEDED: "DONE", TaskState.BLOCKED: "FAILED", TaskState.FAILED: "FAILED",
+    TaskState.CANCELED: "CANCELED",
+}
+TASK_DB_TYPE = {
+    ExecuteTask.Goal.SURVEY_SEGMENT: "SURVEY_SEGMENT", ExecuteTask.Goal.FACILITY_CHECK: "FACILITY_CHECK",
+    ExecuteTask.Goal.REINSPECTION: "REINSPECTION", ExecuteTask.Goal.DOCK: "DOCK",
+}
+
 
 STATUS_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
@@ -297,6 +308,9 @@ class InspectionManager(Node):
             0.5,
             self.dispatch_next_task,
         )
+        # 작업 줄을 DB tasks 에 쓴다 (10/14 ROS 통합 — 작업의 원본은 이 노드, 웹은 읽기만). 파일 저장소면 안 함
+        self.synced_tasks = {}
+        self.task_sync_timer = self.create_timer(1.0, self.sync_tasks)
 
         self.get_logger().info(
             "inspection_manager 시작: "
@@ -463,6 +477,37 @@ class InspectionManager(Node):
         )
         self.get_logger().info(response.message)
         return response
+
+    def sync_tasks(self) -> None:
+        """바뀐 작업만 DB tasks 에 upsert (상태 · 로봇 · 진행률 · 사유). 실패하면 다음 주기에 다시"""
+        if not hasattr(self.store, "sync_tasks"):
+            return
+        rows, keys = [], {}
+        for task in list(self.core.tasks.values()):
+            robot_id = task.robot_id or task.preferred_robot_id
+            if not robot_id:
+                continue
+            status = TASK_DB_STATUS[task.state]
+            key = (status, robot_id, round(task.progress, 2), task.reason)
+            if self.synced_tasks.get(task.task_id) == key:
+                continue
+            keys[task.task_id] = key
+            task_type = TASK_DB_TYPE.get(task.task_type, "SURVEY_SEGMENT")
+            rows.append({
+                "task_id": task.task_id, "run_id": task.run_id, "robot_id": robot_id, "type": task_type,
+                "target_ref": task.target_ref or (None if task_type == "DOCK" else task.task_id),
+                "waypoints": [{"x": w.x, "y": w.y, "yaw": w.yaw} for w in task.waypoints],
+                "status": status, "progress": max(0.0, min(1.0, task.progress)), "reason": task.reason or None,
+                "result_ok": {"DONE": True, "FAILED": False}.get(status),
+            })
+        if not rows:
+            return
+        try:
+            self.store.sync_tasks(rows)
+        except RuntimeError as exc:
+            self.get_logger().warning(f"작업 줄 DB 저장 실패 — 다음 주기에 다시: {exc}")
+            return
+        self.synced_tasks.update(keys)
 
     def dispatch_next_task(self) -> None:
         if self.core.run_state != RunState.RUNNING:

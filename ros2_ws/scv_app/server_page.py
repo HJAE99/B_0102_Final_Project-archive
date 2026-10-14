@@ -23,6 +23,8 @@ SCV server page — 관제 PC (3-3차)
     SCV_DB_DSN     기본 "host=127.0.0.1 port=5432 dbname=robotdb4_postgresql user=rokey password=rokey"
     SCV_MEDIA_DIR  지도 PNG 등 파일 저장 위치 (기본 ./scv_media)
     SCV_HOST / SCV_PORT  기본 0.0.0.0 / 8000
+    SCV_RUN_OWNER  web(기본) / ros — ros 면 순찰 · 작업은 inspection_manager 가 정하고 ros_bridge.py 가 상태 · 알림 ·
+                   판정 · 표본을 받아 이 서버의 저장 함수로 넘김, 순찰 시작 · 중단 · 재개는 /inspection/* 서비스 (10/14)
 
   워커는 1개로만 실행 — 세션 · 로봇 상태 · 제어 PC WebSocket 연결을 이 프로세스 메모리에 두기 때문
   (메모리에는 다시 채울 수 있는 값만 둠 — 세션은 다시 로그인, 나머지는 status 수신 · DB 재집계로 다시 참. 기록은 모두 PostgreSQL)
@@ -70,6 +72,10 @@ DSN = os.environ.get("SCV_DB_DSN",
 MEDIA_DIR = Path(os.environ.get("SCV_MEDIA_DIR", BASE / "scv_media")).resolve()
 HOST = os.environ.get("SCV_HOST", "0.0.0.0")
 PORT = int(os.environ.get("SCV_PORT", "8000"))
+RUN_OWNER = os.environ.get("SCV_RUN_OWNER", "web").lower()
+if RUN_OWNER not in ("web", "ros"):
+    raise ValueError("SCV_RUN_OWNER는 web 또는 ros여야 합니다")
+BRIDGE = None                                  # ros 모드의 ros_bridge.Bridge (lifespan에서 켬)
 
 SESSION_COOKIE = "scv_session"
 SESSION_TTL_S = 8 * 3600                     # 로그인 세션 8 h (요청마다 연장)
@@ -82,6 +88,14 @@ SECTORS = (1, 2)
 ROBOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")     # DB CHECK robots_robot_id_format과 같은 규칙
 # 섹터 ↔ 로봇 기본 배정 (3차). 순찰 시작 때 바꿀 수 있고 run마다 runs.sector_robots에 저장(3-3차)
 DEFAULT_SECTOR_ROBOTS = {"1": "robot3", "2": "robot4"}
+# ros 모드 — 섹터 · 담당 로봇은 inspection_manager 와 같은 zones.yaml (SCV_ZONES, 기본 scv_bringup/config/zones.yaml)
+ZONES: list[tuple[int, list]] = []
+if RUN_OWNER == "ros":
+    _zf = Path(os.environ.get("SCV_ZONES", BASE.parent / "src" / "scv_bringup" / "config" / "zones.yaml"))
+    for _z in (yaml.safe_load(_zf.read_text(encoding="utf-8")) or {}).get("zones", []):
+        _n = int("".join(ch for ch in str(_z["id"]) if ch.isdigit()))
+        ZONES.append((_n, _z["polygon"]))
+        DEFAULT_SECTOR_ROBOTS[str(_n)] = _z.get("robot")
 
 pool = ConnectionPool(DSN, min_size=1, max_size=5, kwargs={"row_factory": dict_row}, open=False)
 # 관제 PC 메모리 상태 (3-2차 — Redis 대신). 요청 처리 스레드 풀과 이벤트 루프가 함께 쓰므로 잠금 하나로 보호
@@ -100,12 +114,25 @@ async def lifespan(_app: FastAPI):
     reset_reported_active()
     restore_memory()                                   # 진행 중 run · 최근 이벤트 · 순찰 중 로봇 대기 상태 (3-3차)
     watchdog = asyncio.create_task(state_watchdog())
+    if RUN_OWNER == "ros":
+        global BRIDGE
+        import sys
+        import ros_bridge
+        BRIDGE = ros_bridge.start(sys.modules[__name__])
     yield
     watchdog.cancel()
     pool.close()
 
 
 app = FastAPI(title="SCV server page", version="3-3", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def guard_ros_owner(request: Request, call_next):
+    """ros 모드 — client_page 기록(REST /api/agent/*)을 받지 않음. 기록은 ros_bridge 가 ROS 에서 받아 넣음"""
+    if RUN_OWNER == "ros" and request.url.path.startswith("/api/agent/") and request.method != "GET":
+        return JSONResponse(status_code=409, content={"detail": "ROS 관제(SCV_RUN_OWNER=ros)에서는 client 기록을 받지 않습니다"})
+    return await call_next(request)
 MAIN_LOOP: asyncio.AbstractEventLoop | None = None       # 동기 API에서 제어 PC로 config를 밀어 보낼 때 씀
 
 # ---------------------------------------------------------------------------
@@ -889,6 +916,29 @@ def split_sectors(cells) -> dict[tuple[int, int], int]:
     return {c: (1 if split is None or c[0] <= split else 2) for c in cells}
 
 
+def zone_sectors(cells, ox: float, oy: float, g: float) -> dict[tuple[int, int], int]:
+    """ros 모드 — 섹터를 inspection_manager 와 같은 zones.yaml 폴리곤으로 (Z1 → 1, Z2 → 2). 칸 중심이 어느 폴리곤에도
+    없으면(벽 바깥 가장자리 칸) 중심이 가장 가까운 폴리곤의 섹터"""
+    cen = [(n, sum(p[0] for p in poly) / len(poly), sum(p[1] for p in poly) / len(poly)) for n, poly in ZONES]
+    out = {}
+    for ix, iy in [(int(a), int(b)) for a, b in cells]:
+        cx, cy = ox + (ix + 0.5) * g, oy + (iy + 0.5) * g
+        out[(ix, iy)] = next((n for n, poly in ZONES if _in_poly(cx, cy, poly)), None) or \
+            min(cen, key=lambda z: (z[1] - cx) ** 2 + (z[2] - cy) ** 2)[0]
+    return out
+
+
+def _in_poly(x: float, y: float, poly) -> bool:
+    """점이 다각형 안인가 (ray casting)"""
+    inside, j = False, len(poly) - 1
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
 def generate_cells(conn, m: dict[str, Any]) -> int:
     """지도 PNG의 흰 부분(빈 공간)이 조금이라도 걸치는 칸은 모두 grid_cells에 넣고 섹터를 정함.
     벽 여유(wall_margin_m)로 빼지 않음 — 벽 가까이 좁게 남은 흰 부분도 칸이 생김 (경로 생성에서만 벽 여유를 씀).
@@ -911,7 +961,7 @@ def generate_cells(conn, m: dict[str, Any]) -> int:
     ix = np.floor((x - ox) / g).astype(np.int64)
     iy = np.floor((y - oy) / g).astype(np.int64)
     cells = np.unique(np.stack([ix, iy], axis=1), axis=0)
-    sector = split_sectors(cells)
+    sector = zone_sectors(cells, ox, oy, g) if RUN_OWNER == "ros" else split_sectors(cells)
     GRID_CACHE.pop(m["map_id"], None)                  # 메모리 격자 비움 (다음 grid_of가 DB에서 다시 읽음)
     with conn.cursor().copy("COPY grid_cells (map_id, ix, iy, center_x, center_y, sector) FROM STDIN") as cp:
         for cx, cy in cells:
@@ -1147,6 +1197,9 @@ async def ws_agent(ws: WebSocket):
     welcome · config · (순찰 중 재접속이면 agent_resync 메시지) 보낸 뒤 받기 반복. 끊기면 AGENTS에서 빼고 비활성.
     인증 없음 — 등록된 robot_id면 받아들임 (등록 안 된 로봇은 error UNKNOWN_ROBOT 후 4404로 닫음)"""
     await ws.accept()
+    if RUN_OWNER == "ros":                             # ros 모드: 로봇 명령 · 상태는 ROS 로만 (client_page 를 쓰지 않음)
+        await ws.close(code=4409, reason="ROS owns runs; web agent disabled")
+        return
     robot_id = None
     try:
         try:                                           # 첫 메시지 = hello 확인
@@ -1302,8 +1355,11 @@ async def state_watchdog():
                     ROBOT_STATE.pop(rid, None)
                 for t in [t for t, s_ in SESSIONS.items() if s_["expires"] < now]:
                     SESSIONS.pop(t, None)
-            for rid in gone:
-                await run_in_threadpool(record_e3, rid)
+            for rid in gone:                           # ros 모드: E3는 inspection_manager 알림(ros_bridge)으로만
+                if RUN_OWNER == "ros":
+                    await run_in_threadpool(set_robot_active, rid, False)
+                else:
+                    await run_in_threadpool(record_e3, rid)
             await run_in_threadpool(expire_aps, limit)     # SSID 값이 끊긴 AP는 비활성
         except asyncio.CancelledError:
             raise
@@ -1331,7 +1387,8 @@ def robots_snapshot() -> list[dict[str, Any]]:
                 state[k] = state[k] == "true"
             state["ttl_s"] = max(0, math.ceil(limit - age))       # E3까지 남은 초
             state["raw"] = dict(sorted(st.items()))           # 받은 status 그대로 (모니터에 전체 표시)
-        out.append({"robot_id": r["robot_id"], "is_active": r["is_active"], "connected": r["robot_id"] in AGENTS,
+        connected = r["robot_id"] in AGENTS or (RUN_OWNER == "ros" and st is not None)
+        out.append({"robot_id": r["robot_id"], "is_active": r["is_active"], "connected": connected,
                     "state": state, "last_e3": LAST_E3.get(r["robot_id"])})
     return out
 
@@ -1641,7 +1698,7 @@ def robot_ready(rid: str) -> tuple[bool, bool]:
     with MEM_LOCK:
         st = ROBOT_STATE.get(rid)
         f = dict(st["fields"]) if st else {}
-    ok = rid in AGENTS and bool(f.get("ts"))
+    ok = (rid in AGENTS or RUN_OWNER == "ros") and bool(f.get("ts"))
     return ok, f.get("is_docked") == "true"
 
 
@@ -1660,7 +1717,7 @@ def start_form(conn) -> dict[str, Any]:
         problems.append("현재 지도에 격자 없음")
     if m and not target:
         problems.append("측정 AP 없음 (정보 › 측정 대상 AP에서 지정)")
-    elif target and not target["is_active"]:
+    elif target and not target["is_active"] and RUN_OWNER == "web":   # ros: 표본은 순찰 중에만 와서 시작 전엔 늘 비활성
         problems.append(f"측정 AP {target['ssid']} 비활성 (client가 그 SSID 값을 받지 못함)")
     out = []
     for r in robots:
@@ -2145,13 +2202,34 @@ async def api_run_start(request: Request):
     """순찰 시작 {sector_robots, run_type?} → start_run → {ok, run_id}"""
     user = current_user(request)
     body = await request.json()
+    if RUN_OWNER == "ros":                             # 섹터 · 로봇은 inspection_manager(zones.yaml)가 정함
+        return await run_in_threadpool(ros_call, "start")
     return await run_in_threadpool(start_run, user, body)
+
+
+def ros_call(name: str) -> dict[str, Any]:
+    """ros 모드 — /inspection/{name} 호출 → {ok, message, run_id}. 실패는 409 (화면에 문구)"""
+    r = BRIDGE.call(name)
+    if not r["ok"]:
+        raise HTTPException(409, r["message"])
+    return {**r, "run_id": CURRENT_RUN["run_id"]}
+
+
+@app.post("/api/runs/resume")
+def api_run_resume(request: Request):
+    """순찰 재개 (ros 모드) — 비상정지 뒤 /inspection/resume"""
+    current_user(request)
+    if RUN_OWNER != "ros":
+        raise HTTPException(409, "재개는 ROS 관제(SCV_RUN_OWNER=ros)에서만 씁니다")
+    return ros_call("resume")
 
 
 @app.post("/api/runs/{run_id}/abort")
 def api_run_abort(run_id: int, request: Request):
     """순찰 중단 (관리자) → abort_run(reason ADMIN_STOP) → {ok, canceled}"""
     current_user(request)
+    if RUN_OWNER == "ros":                             # 비상정지 — 두 로봇 goal 취소 · 정지, 재개 대기
+        return ros_call("estop")
     return abort_run(run_id, "ADMIN_STOP")
 
 
@@ -2329,7 +2407,7 @@ def ui_extra() -> dict[str, Any]:
                            "WHERE m.is_active ORDER BY a.ap_id").fetchall()
         f = start_form(conn)
     return {"aps": aps, "start": {k: f[k] for k in ("can_start", "problems", "running", "target_ap")}
-            | {"robots": f["robots"]}}
+            | {"robots": f["robots"]}, "run_owner": RUN_OWNER}
 
 
 @app.websocket("/ws/ui")

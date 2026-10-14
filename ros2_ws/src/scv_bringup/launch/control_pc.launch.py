@@ -7,7 +7,12 @@
     ros2 launch scv_bringup control_pc.launch.py backend:=db ap_ssid:=<핫스팟>     # 칸 맵을 DB 에 (SCV_DB_DSN 필요)
     … backend:=db ap_ssid:=<핫스팟> close_stale_run:=true    # 관제를 끄면서 남은 running 회차를 닫고 새로 시작
 
-아직 없는 것: ros_bridge · 관제 웹 (관제 B), network_map_engine 은 로봇 PC 쪽 미리보기로 뜬다.
+관제 웹(server_page)은 따로 띄운다 — 순찰 주인은 이 launch 의 inspection_manager 이고(10/14 PM 결정),
+웹은 SCV_RUN_OWNER=ros 로 켜면 ros_bridge(scv_app/ros_bridge.py)가 상태 · 알림 · 판정 · 표본을 받고
+시작 · 비상정지 · 재개 버튼이 /inspection/* 서비스를 부른다. 이때는 backend:=db 와 같은 SCV_DB_DSN 을 쓴다.
+    source /opt/ros/jazzy/setup.bash && source ros2_ws/install/setup.bash
+    SCV_RUN_OWNER=ros python3 ros2_ws/scv_app/server_page.py
+network_map_engine 은 로봇 PC 쪽 미리보기로 뜬다.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction

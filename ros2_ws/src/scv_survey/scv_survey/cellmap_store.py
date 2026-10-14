@@ -214,12 +214,32 @@ class DbStore:
                        'RETURNING run_id', (self.map_id, json.dumps(sector_robots)))[0][0]
 
     def close_run(self, run_id: int, status: str) -> None:
+        # 남은 작업 줄은 취소로 닫는다 (tasks 는 inspection_manager 가 sync_tasks 로 씀, 10/14 ROS 통합)
+        self._q("UPDATE tasks SET status = 'CANCELED', ended_at = now() WHERE run_id = %s AND status IN ('PENDING', 'ACTIVE')",
+                (run_id,))
         self._q("UPDATE runs SET status = %s, ended_at = now() WHERE run_id = %s AND status = 'running'",
                 (status, run_id))
 
     def running_run(self) -> int:
         r = self._q("SELECT run_id FROM runs WHERE status = 'running'")
         return r[0][0] if r else 0
+
+    def sync_tasks(self, rows: List[dict]) -> None:
+        """작업 줄 upsert (10/14 ROS 통합 — 작업의 원본은 inspection_manager, 웹은 이 줄을 읽기만 한다).
+        rows: task_id · run_id · robot_id · type · target_ref · waypoints · status · progress · reason · result_ok.
+        로봇마다 ACTIVE 는 하나(tasks_one_active_per_robot)라 ACTIVE 가 아닌 줄을 먼저 쓴다"""
+        rows = sorted(rows, key=lambda r: r['status'] == 'ACTIVE')
+        self._q("INSERT INTO tasks (task_id, run_id, robot_id, type, target_ref, waypoints, status, progress, reason, "
+                "result_ok, assigned_at, ended_at) VALUES (%(task_id)s, %(run_id)s, %(robot_id)s, %(type)s, %(target_ref)s, "
+                "%(waypoints)s::jsonb, %(status)s, %(progress)s, %(reason)s, %(result_ok)s, "
+                "CASE WHEN %(started)s THEN now() END, CASE WHEN %(ended)s THEN now() END) "
+                "ON CONFLICT (task_id) DO UPDATE SET robot_id = EXCLUDED.robot_id, status = EXCLUDED.status, "
+                "progress = EXCLUDED.progress, reason = EXCLUDED.reason, result_ok = EXCLUDED.result_ok, "
+                "assigned_at = COALESCE(tasks.assigned_at, EXCLUDED.assigned_at), "
+                "ended_at = CASE WHEN EXCLUDED.status IN ('DONE', 'FAILED', 'CANCELED') "
+                "THEN COALESCE(tasks.ended_at, now()) END",
+                many=[dict(r, waypoints=json.dumps(r['waypoints']), started=r['status'] != 'PENDING',
+                           ended=r['status'] in ('DONE', 'FAILED', 'CANCELED')) for r in rows])
 
     def _cell_ids(self) -> Dict[Cell, int]:
         return {(i, j): cid for i, j, cid in
