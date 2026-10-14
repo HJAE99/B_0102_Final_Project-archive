@@ -12,9 +12,10 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/models', ['models/best.pt']),
         ('share/' + package_name, ['README.md', 'rosdep.yaml']),
+        ('share/' + package_name + '/docs', ['docs/shutter_obstacle.md']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
-    install_requires=['setuptools', 'numpy', 'opencv-python', 'torch', 'ultralytics'],
+    install_requires=['setuptools', 'numpy', 'opencv-python', 'torch', 'ultralytics', 'Pillow>=9.2'],
     zip_safe=True,
     maintainer='doyoon-kim',
     maintainer_email='tnduaehowl37@gmail.com',
@@ -23,6 +24,8 @@ setup(
     entry_points={
         'console_scripts': [
             'scv_detection_manager = scv_detection.scv_detection_manager:main',
+            # 패키지 안의 test.py를 독립 명령 test로 등록한다.
+            
         ],
     },
 )
