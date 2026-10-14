@@ -30,7 +30,7 @@ flowchart TD
   Q2 -- 아니오 --> R1["후보 해제"]
   Q2 -- 예 --> M1["회피 구역 · 관제 알림(사람 확인)<br>keepout 마스크 (점검에 들어가는 로봇에)"]
   R1 --> S5
-  M1 --> S5["S5 점검: Undock → 남은 음영을 피해 설비 지점으로<br>inspect_facility · 판정 · 자세 보정 (최대 3회)"]
+  M1 --> S5["S5 점검: Undock → 남은 음영을 피해 설비 지점으로<br>inspect_facility 서비스 · 판정 한 번 (자세 보정 없음)"]
   S5 --> Q3{"음영 때문에<br>못 가는 설비?"}
   Q3 -- 예 --> E1["관제 예외 처리 → 미확인"]
   Q3 -- 아니오 --> S6
@@ -77,17 +77,17 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  A["mission_executor: 설비 관측 자세 도착"] --> B["inspect_facility 요청 (IF-05)"]
-  B --> C["detection_alert: 그때만 OAK-D 영상 구독 → YOLO"]
+  A["mission_executor: 설비 관측 자세 도착"] --> B["inspect_facility 서비스 요청 (IF-05)"]
+  B --> C["detection_alert: 계속 받던 OAK-D 영상으로 이때 판정 → YOLO"]
   C --> D{"검출?"}
   D -- 아니오 --> D1["depth 에 물체 → OCCLUDED<br>없으면 NOT_DETECTED → 후보"]
   D -- 예 --> E{"등록 위치와 일치?"}
   E -- 아니오 --> E1["POSITION_ANOMALY → 후보"]
   E -- 예 --> F{"정면 · 노출 충분?"}
-  F -- 아니오 --> F1["자세 보정 피드백 → Nav2 로 보정 후 재관측<br>3회 실패면 UNCONFIRMED"]
-  F1 --> C
-  F -- 예 --> G["세부 판정: 바늘 녹색 · 유도등 점등<br>셔터 띠 위 물체 (depth, 학습 없음) · 랙 돌출 (OpenCV, 측면)"]
-  G --> H["결과 → mission_executor · 사진 저장 · IF-19 로 관제 PC"]
+  F -- 아니오 --> F1["UNCONFIRMED (E6) — 자세 보정 주행 없음 (10/14)"]
+  F1 --> H
+  F -- 예 --> G["세부 판정: 바늘 녹색 · 유도등 점등<br>셔터 띠 위 물체 (depth, 학습 없음) · 랙 돌출 (yolo26n, 10/14)"]
+  G --> H["서비스 응답 → mission_executor · 사진 저장 · IF-19 로 관제 PC"]
 ```
 
 ## 6. 예외 처리 (E1–E8)
@@ -99,7 +99,7 @@ flowchart TD
 | E3 | 로봇 응답 없음 | status 30초 끊김 | 감지하고 화면에 경보 · 남은 작업 재배정은 추가 기능 — 풀사이클이 돈 뒤에 넣는다 (10/11 PM 결정) |
 | E4 | 관제 PC 연결 끊김 | 로봇 PC 에서 응답 없음 | 받은 작업은 끝까지(설비 판정 포함) · 샘플은 로봇 PC 에 보관 → 재연결 때 전송 |
 | E5 | 위치 불확실 | AMCL 공분산 큼 | 그 샘플을 지도 계산에서 제외 · 오래가면 경보 |
-| E6 | 정면 아님·가림·어두움 | 정면 판별 실패 | 자세 보정 재관측 최대 3회 → 미확인 |
+| E6 | 정면 아님·가림·어두움 | 정면 판별 실패 | 미확인 (UNCONFIRMED) — 자세 보정 재관측 없음 (10/14) |
 | E7 | 비상정지 | 관제 웹 버튼 | 두 로봇 goal 취소·정지, 재개 명령 대기 |
 | E8 | DB 쓰기 실패 | 저장 예외 | 메모리 큐·재시도·경보, 복구 뒤 순서대로 저장 |
 

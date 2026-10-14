@@ -10,7 +10,7 @@ TurtleBot4 두 대를 이동형 인프라 점검 플랫폼으로 써서, 물리 
 
 | 모듈 | 노드 |
 | --- | --- |
-| Detection Alert | `detection_alert` (설비 점검 액션 서버, YOLO · 셔터 띠는 depth · 랙 돌출은 OpenCV) |
+| Detection Alert | `detection_alert` (설비 점검 서비스 서버, 소화기·유도등·랙은 yolo26n · 셔터 띠는 depth) |
 | AMR Controller | Nav2·AMCL, `mission_executor`, `rssi_scanner`, `survey_buffer`, `inspection_manager` |
 | System Monitor | `ros_bridge`, `network_map_engine`, 관제 웹·API, PostgreSQL·Redis (관제 팀 설계, 10/12) |
 
@@ -61,7 +61,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 | `survey_buffer` | `rssi_scanner` 샘플에 같은 시각의 AMCL 위치와 seq 를 붙여 로봇 PC 디스크에 먼저 저장하고 관제 PC 로 발행. 요청이 오면 지정한 seq 부터 다시 발행 |
 | Nav2·AMCL | 저장 지도 위 위치 추정·주행. 관제 PC 가 보낸 keepout 마스크의 칸을 경로에서 뺀다 (측정·재측정 동안은 빈 마스크, 점검 단계에 들어갈 때 남은 칸 · `keepout_layer` 는 빈 마스크 발행을 확인한 뒤 켠다) |
 | `mission_executor` | 받은 작업(측정 구간·설비 점검·재검증·Dock)을 Nav2 로 수행하고 결과를 보고. 상태를 1 Hz 로 발행. 관제 PC 가 끊겨도 받은 작업은 끝낸다 |
-| `detection_alert` | 요청 때만 OAK-D 영상을 구독 → YOLO → 등록 위치와 대조 → 정면 판별(아니면 자세 보정 요청, 최대 3회) → 판정. 셔터 띠 위 물체는 학습 없이 depth 로(띠 영역에 바닥보다 10 cm 이상 솟은 것), 랙 적재물 돌출은 YOLO 없이 OpenCV 로(측면 영상에서 박스가 랙 경계선을 넘는지). 사진은 로봇 PC 에 저장하고 축소본을 결과와 함께 보낸다 |
+| `detection_alert` | OAK-D 영상은 계속 받고, 점검 요청(IF-05 서비스)이 오면 YOLO(yolo26n) → 등록 위치와 대조 → 정면 판별(아니면 UNCONFIRMED — 자세 보정 주행 없음, 10/14) → 판정. 셔터 띠 위 물체는 학습 없이 depth 로(띠 영역에 바닥보다 10 cm 이상 솟은 것), 랙 적재물 돌출도 yolo26n 으로 (10/14, 처음엔 OpenCV). 사진은 로봇 PC 에 저장하고 축소본을 결과와 함께 보낸다 |
 | `inspection_manager` | 작업·후보 상태의 주인. 섹터마다 경로 생성과 작업 배정(측정 → Dock → 재측정 → Dock → 점검 → Dock, Dock 작업도 manager 가 만든다), 후보 → 재측정 작업(그 섹터의 로봇), 재측정 결과를 DB 의 그 칸에 기록, **keepout 마스크 발행(IF-10)** — 시작할 때 빈 마스크, 로봇마다 점검 작업 전에 DB 맵의 남은 칸으로, 음영 때문에 못 가는 설비의 예외 처리, 측정 경로의 웨이포인트를 지도와 벽 여유 0.45 m 로 걸러냄(지도 안 벽 조각), 이탈 감지·경보, 최종 판정, 비상정지 (이탈 시 재배정은 풀사이클 뒤 추가 기능) |
 | `network_map_engine` | 두 로봇의 샘플로 칸 맵(0.5 m 칸 · 중앙값 · 칸 중심 좌표 · 상태 미측정/미검출/음영/정상) → 관제 API 로 DB 에 저장 → 재측정 대상 칸(음영·미검출·미측정)을 후보(IF-15)로 · 기준선 비교 · 보고서 레이어. keepout 마스크는 내지 않는다 (DB 맵을 읽어 inspection_manager 가 낸다, 10/12 회의 뒤) |
 | `ros_bridge` | ROS 로 받은 샘플·상태·판정·알림을 관제 API 로 넘겨 PostgreSQL 에 저장(중복은 DB 유일키가 거름), 실시간 상태는 Redis 로 화면에 전달 |
@@ -118,6 +118,7 @@ ros2 launch scv_bringup control_pc.launch.py                     # 관제 PC
 | D9 | 시험 AP 는 휴대폰 핫스팟 (로봇과 통신하지 않음) |
 | D10 | 측정 지표는 RSSI 만 (BSSID·채널·로밍·지연·손실·처리량 제외) |
 | D11 | 상태 추정은 커버리지 저하 의심 · 판단 불가 두 가지, 회피 기준과 해제 규칙 포함 |
+| 10/14 | 설비 점검 요청(IF-05)은 액션이 아니라 서비스로 한다 (비전 팀 구현 기준) — 판정 노드는 영상을 계속 받고 요청 때 한 번 판정한다. 비전용 자세 보정 주행은 없다 — 판정 못 하면 UNCONFIRMED. 소화기·유도등·랙 판정은 모두 yolo26n 으로 바꿨다 (랙도 OpenCV 대신). mission_executor 쪽 변경은 PM 최종 통합(T2-6) 때 |
 | 10/12 저녁 | RSSI 측정은 로봇 PC 에서 한다 (강사 조언) — 로봇 PC(MSI)를 두 로봇 위에 하나씩 얹고 `rssi_scanner` 를 그 PC 에서 돌린다 · RPi 에는 드라이버만 · IF-02·IF-04 는 로봇 PC 안 · 시연도 이 구성 · 노트북을 얹어 바뀌는 footprint·무게·Dock 진입·센서 시야는 주행 팀이 확인 · 재측정 결과는 `ExecuteTask` 결과 필드로, 설비 점검 목표에 `run_id` (interfaces v0.2.10) |
 | 10/12 회의 뒤 | IF-10 은 inspection_manager 가 DB 맵을 읽어 낸다 (network_map_engine 은 맵을 DB 에 쓰고 후보를 낸다) · DB 쓰기는 모두 관제 API · 왕복 경로 간격 0.5 m · 미측정은 갈 수 있는 칸(섹터 안, 벽·장애물에서 0.45 m 밖) 중 샘플이 없는 칸 · 칸 값과 기준은 `scv_survey` 코드값 (미검출 비율 0.5 · 음영 < −72 dBm · 회피 마스크는 샘플 2개 이상 칸 — 10/12 저녁 정정, 코드 9d3a4cc) |
 | 10/12 회의 | 전체 회의에서 정한 것 — 측정 칸은 0.5 m 정사각형이고, 칸의 값은 그 칸에서 검출된 RSSI 의 중앙값이다 (`scv_survey` 코드 기준) · 칸은 세 가지로 나눈다: 미측정(지나가지 않음) · 미검출(지나갔으나 잡히지 않음) · 음영(잡혔으나 약함) · 재측정 대상은 음영·미검출·미측정 칸이다 (미측정은 로직에만 넣고 시연에는 없다) · RSSI 팀이 측정이 끝난 맵을 DB 에 올려 두고, 재측정과 점검은 그 맵을 꺼내 쓴다 — 요청을 주고받지 않는다 (재측정은 대상 칸을 찾는 데, 점검은 회피에) · 재측정은 그 섹터를 맡은 로봇 · 설비(소화기·유도등·랙) 배치와 좌표는 비전 팀, 핫스팟 연출은 RSSI 팀이 시험하며 정한다 · 시연 시간 목표는 두지 않고 풀사이클 시험에서 잰다 · 관제 DB 인터페이스·스키마는 10/13 까지 확정 |

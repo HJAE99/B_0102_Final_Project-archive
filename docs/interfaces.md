@@ -13,6 +13,7 @@ v0.2.8: keepout 마스크 발행 규칙 (10/12 오후 PM 결정) — 발행자�
 v0.2.9: 맵은 DB 로, IF-10 은 관제가 (10/12 회의 뒤 PM 결정) — network_map_engine(RSSI)은 1차 측정의 칸 맵(칸 중심 좌표 · 중앙값 · 상태 미측정/미검출/음영/정상)을 **관제 API 로 DB 에 쓰고**, 재측정 대상 칸을 후보(IF-15)로 냅니다. 재측정 결과(IF-04 → IF-11 result)는 inspection_manager 가 DB 의 그 칸에 적습니다. **IF-10 은 inspection_manager(관제)가 냅니다** — 시작할 때 두 로봇에 빈 마스크, 로봇마다 점검 작업을 보내기 전에 DB 맵의 남은 칸으로 그 로봇 토픽에 발행합니다. 노드 사이에 요청을 주고받지 않고 DB 를 봅니다. DB 쓰기는 모두 관제 API 로 합니다. 칸 0.5 m · 칸 값은 검출된 RSSI 의 중앙값 · 검출 0개이거나 미검출 비율 ≥ 0.5 이면 미검출 · 중앙값 < −72 dBm 이면 음영 (`SHADOW_DBM`, −75 dBm 은 지도 색 기준) · 회피 마스크는 샘플 2개 이상 칸만 (`min_samples_for_mask`) (`scv_survey` 코드값, 9d3a4cc). 미측정은 갈 수 있는 칸(섹터 안, 벽·장애물에서 0.45 m 밖) 중 샘플이 없는 칸이고, 재측정 대상입니다(로직에만, 시연에는 없음). 왕복 경로 간격(`spacing`)은 0.5 m 입니다.
 v0.2.10: `scv_msgs` 필드 셋·하나 추가 (10/12 저녁 PM 결정) — `ExecuteTask` 결과에 `rssi_median`·`rssi_iqr`·`n_samples` (REINSPECTION 만, PreciseMeasure 결과를 그대로 옮김 · 다른 종류는 0). inspection_manager 가 이 값으로 DB 의 그 칸을 고칩니다 (`reason` 문자열을 읽지 않음). `InspectFacility` 목표에 `run_id` — mission_executor 가 받은 작업의 `run_id` 를 그대로 넣고 detection_alert 가 `InspectionResult.run_id` 로 씁니다. 기존 필드는 그대로라 지금 코드는 다시 빌드만 하면 됩니다 (`colcon build --packages-select scv_msgs`).
 v0.2.11: RSSI 측정은 로봇 PC 에서 (10/12 저녁 PM 결정, 강사 조언) — 로봇 PC(MSI)를 두 로봇 위에 하나씩 얹고 `rssi_scanner` 를 그 PC 에서 돌립니다. RPi 에는 드라이버만 남습니다. IF-02·IF-04 는 같은 로봇 PC 안의 토픽·액션이 되고, `rssi_scanner` 는 `robot_pc.launch.py` 로 띄웁니다. 스캔은 로봇 PC 내장 무선랜으로 하고, 스캔 중 turtle08 통신이 흔들리면 USB 무선랜으로 나눕니다 (D2).
+v0.2.12: IF-05 설비 점검을 액션에서 **서비스**로 (10/14 PM 결정, 비전 팀 구현 기준) — `{ns}/inspect_facility` · `scv_msgs/srv/InspectFacility`. 판정 노드는 OAK-D 영상을 처음부터 계속 받고, 요청이 오면 그때 판정합니다. **비전용 자세 보정 주행은 없습니다** — 관측 자세에서 한 번 판정하고, 판정할 수 없으면 UNCONFIRMED 로 돌려줍니다 (피드백·보정값 필드를 뺌). 그래서 아래 「자세 보정 "뒤로"」 제안은 폐기합니다. 옛 `action/InspectFacility.action` 은 T2-6 통합 때 mission_executor 를 바꾼 뒤 지웁니다.
 v0.2.3: 미검출을 RSSI −100 으로 적지 않습니다 — `NetRaw`·`NetSample` 에 `detected` 추가, 미검출 샘플의 `rssi_dbm` 은 쓰지 않음 (10/10 PM·RSSI 팀)
 
 팀 사이에 오가는 토픽·서비스·액션과 그 타입을 한곳에 모았습니다. 타입 정의는 `ros2_ws/src/scv_msgs/` 에 있습니다. 고칠 것이 있으면 그 약속의 **주인**에게 말하고, 주인이 `scv_msgs` 와 이 문서를 함께 고칩니다.
@@ -63,7 +64,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | --- | --- | --- | --- | --- | --- |
 | 02 | `{ns}/survey/raw` | topic · `scv_msgs/NetRaw` | rssi_scanner → survey_buffer (같은 로봇 PC) | reliable · transient_local · KEEP_LAST 600 · 1 Hz | RSSI A |
 | 04 | `{ns}/survey/precise` | action · `scv_msgs/PreciseMeasure` | mission_executor → rssi_scanner (같은 로봇 PC) | — | RSSI A |
-| 05 | `{ns}/inspect_facility` | action · `scv_msgs/InspectFacility` | mission_executor → detection_alert (같은 로봇 PC) | feedback 보정값은 rad · m | 비전 B |
+| 05 | `{ns}/inspect_facility` | service · `scv_msgs/InspectFacility` (10/14 action → service) | mission_executor → detection_alert (같은 로봇 PC) | 설비마다 1회 · 자세 보정 주행 없음 (판정 못 하면 UNCONFIRMED) | 비전 B |
 | 06 | `{ns}/dock` · `{ns}/undock` | action · `irobot_create_msgs` | mission_executor (로봇 PC) → Create 3 | — | 주행 |
 | 07 | `{ns}/scan` · `odom` · `tf` · `tf_static` / `{ns}/cmd_vel` | topic · 표준 타입 | RPi ↔ Nav2 (로봇 PC) | 센서 best effort · cmd_vel reliable | 주행 |
 | 08 | `{ns}/survey/sample` | topic · `scv_msgs/NetSample` | survey_buffer (로봇 PC) → ros_bridge · network_map_engine (관제 PC) | reliable · depth 50 · 1 Hz (sync 재발행은 depth를 넘지 않게 천천히, 예: 20 Hz 이하) | RSSI A |
@@ -92,7 +93,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `Reassign` (srv) | 한 로봇의 남은 작업을 다른 로봇으로 (받는 로봇 비우면 manager가 고름) |
 | `ExecuteTask` (action) | 작업 한 건: 종류(SURVEY_SEGMENT·FACILITY_CHECK·REINSPECTION·DOCK), 웨이포인트, 대상, 회차 → 결과 ok·사유, REINSPECTION 이면 RSSI 중앙값·IQR·표본 수 |
 | `PreciseMeasure` (action) | 정지 측정: 시간 → RSSI 중앙값·IQR·표본 수 |
-| `InspectFacility` (action) | 설비 점검: 설비·회차 → 판정, 피드백으로 자세 보정 요청 |
+| `InspectFacility` (srv) | 설비 점검: 설비·회차 → 판정 한 번 (자세 보정 없음, 10/14 · 옛 action 은 T2-6 에서 지움) |
 
 필드와 상수는 각 `.msg` · `.srv` · `.action` 파일의 주석을 보세요.
 
@@ -111,13 +112,13 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `Candidate` 위치 | 초안의 `geometry_msgs/Pose2D` 는 폐기 예정 타입이라 `x`·`y`·`yaw` 로 바꿈 | RSSI B · 관제 A |
 | `Candidate` 종류 | 혼잡·로밍 의심은 범위에서 빠져 상수에서 뺌 (1 과 4 만 남김) | RSSI B |
 | `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가. DOCK 작업은 inspection_manager 가 만든다 (측정 → DOCK → 재측정 → DOCK → 점검 → DOCK, 10/12) | 관제 A · 주행 |
-| 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 · 설비 점검은 mission_executor가 `InspectFacility.run_id`로 넘기고 detection_alert가 `InspectionResult.run_id`에 넣음 (10/12) | 관제 A · 주행 · RSSI A |
+| 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 · 설비 점검은 mission_executor가 `InspectFacility` 요청의 `run_id`로 넘기고 detection_alert가 `InspectionResult.run_id`에 넣음 (10/12) | 관제 A · 주행 · RSSI A |
 | 재측정 결과 (10/12) | mission_executor가 `PreciseMeasure` 결과(중앙값·IQR·표본 수)를 `ExecuteTask` 결과의 `rssi_median`·`rssi_iqr`·`n_samples`에 그대로 넣음. inspection_manager가 그 칸을 DB에 고침 — 중앙값 −72 dBm 이상이면 해제, 미만이거나 `n_samples` 0 이면 남음 | 주행 · 관제 A |
 | 근거 사진 축소본 | JPEG, 긴 변 640 px 이하. 원본은 로봇 PC `image_ref` | 비전 B · 관제 B |
 | 네트워크 후보의 `robot_id` | 측정한 로봇의 이름 (10/12: 두 로봇이 각자 섹터를 측정) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
 | `resent` | sync 요청으로 다시 보낸 샘플만 true | RSSI A · 관제 B |
-| 자세 보정 "뒤로" (`adjust_forward_m` < 0) | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
+| ~~자세 보정 "뒤로" (`adjust_forward_m` < 0)~~ — **10/14 폐기: 자세 보정 주행 없음** | 로봇이 후진 명령을 무시한 적이 있고 후진은 지양. mission_executor는 보정값을 cmd_vel로 보내지 않고 **Nav2 목표 위치로 바꿔** 보낸다 (뒤 지점이면 돌아서 갔다가 방향을 다시 맞춤). Nav2 행동 트리의 BackUp 복구 동작은 뺀다. 설비 관측 위치는 1.0–1.2 m로 등록해 뒤로 물러날 일을 줄인다 (OAK-D depth는 약 0.7 m부터 유효) (제안) | 비전 B · 주행 |
 
 ## 설정 파일 (형식 초안)
 
