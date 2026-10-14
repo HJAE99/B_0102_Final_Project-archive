@@ -106,6 +106,7 @@ ros2 service call /inspection/resume std_srvs/srv/Trigger
 | 마스크 | 관제 로그 `회피 칸 N개 [...]`. RViz 의 `/{robot}/global_costmap/costmap` 에 그 칸이 장애물로 보인다 |
 | 설비 | SHT-01·SHT-02. 관측 자리가 회피 칸 안이면 `KEEPOUT_BLOCKED` 알림을 내고 건너뛴다 |
 | 끝 | 알림 `RUN_COMPLETED`, 마스크가 다시 빈 것으로 |
+| 끝난 뒤 | `python3 ros2_ws/src/scv_manager/scripts/cellmap_heatmap.py` — 관제가 확정한 칸 맵(`~/scv_cellmap/Z*.json`)을 지도 위 히트맵 PNG 로. 주행 중 실시간은 RViz 에 `/survey/heatmap`(MarkerArray, Durability Transient Local) 추가 |
 
 ## 알아 둘 것
 
