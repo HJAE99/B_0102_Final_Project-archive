@@ -461,8 +461,8 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       const live = r.connected;
       const color = live ? robotColor(r.robot_id) : '#8a969e';
       // 정면 화살표 — 몸통(폭 7 cm) + 머리(폭 26 cm), 로봇 중심에서 0.55 m (지도 좌표로 만든 뒤 같은 변환)
-      // 도킹 중에는 실행기가 undock 직후 자세(HOME, 도크 반대쪽을 봄)를 대략값으로 주므로 실제 방향(도크 쪽)으로 뒤집어 그림
-      const yaw = (st.yaw || 0) + (st.is_docked ? Math.PI : 0), c = Math.cos(yaw), sn = Math.sin(yaw);
+      // 받은 yaw 그대로 (도크 위에서도 라이다로 AMCL 이 실제 방향을 잡음 — 뒤집으면 반대가 됨, 10/15 PM 확인)
+      const yaw = st.yaw || 0, c = Math.cos(yaw), sn = Math.sin(yaw);
       const at = (f, s2) => P(st.x + c * f - sn * s2, st.y + sn * f + c * s2);
       const head = [at(0, 0.018), at(0.18, 0.018), at(0.18, 0.065), at(0.28, 0), at(0.18, -0.065), at(0.18, -0.018), at(0, -0.018)];
       const tip = `${r.robot_id}${live ? '' : ' (마지막 위치)'}`;
