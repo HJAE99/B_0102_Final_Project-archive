@@ -263,7 +263,36 @@ const freeRect = (m) => new Promise((ok) => {
     const span = (a) => { const lim = Math.max(...a) * 0.3, idx = a.map((v, k) => (v > lim ? k : -1)).filter((k) => k >= 0); return idx.length ? [idx[0], idx[idx.length - 1]] : null; };
     const cr = span(cols), rr = span(rows), r = m.resolution_m;
     if (!cr || !rr) { ok(null); return; }
-    ok({ x0: m.origin_x + cr[0] * r, x1: m.origin_x + (cr[1] + 1) * r, y0: m.origin_y + (h - 1 - rr[1]) * r, y1: m.origin_y + (h - rr[0]) * r });
+    // 안쪽 벽 — 방 안에서 어두운 픽셀이 0.4 m 넘게 이어진 세로 · 가로 줄. 이웃한 줄(기울어진 벽)은 하나로 묶어 곧게
+    const dark = (i, j) => px[(j * w + i) * 4] < 120;
+    const runs = (n, m2, at) => {                      // 줄 k 마다 가장 긴 어두운 구간 [k, a, b]
+      const out = [];
+      for (let k = n[0]; k <= n[1]; k++) {
+        let best = null, a = -1;
+        for (let t = m2[0]; t <= m2[1] + 1; t++) {
+          if (t <= m2[1] && at(k, t)) { if (a < 0) a = t; } else if (a >= 0) { if (!best || t - a > best[1] - best[0]) best = [a, t - 1]; a = -1; }
+        }
+        if (best && best[1] - best[0] + 1 >= 8) out.push([k, best[0], best[1]]);
+      }
+      const segs = [];                                 // 이웃(2줄 안) 묶기 → [가운데 줄, 시작, 끝]
+      out.forEach((q) => {
+        const g = segs.length && segs[segs.length - 1];
+        if (g && q[0] - g.k1 <= 2 && q[1] <= g.b + 2 && q[2] >= g.a - 2) { g.k1 = q[0]; g.ks.push(q[0]); g.a = Math.min(g.a, q[1]); g.b = Math.max(g.b, q[2]); }
+        else segs.push({ k1: q[0], ks: [q[0]], a: q[1], b: q[2] });
+      });
+      return segs.map((g) => [g.ks.reduce((x, y) => x + y, 0) / g.ks.length, g.a, g.b]);
+    };
+    const X = (i) => m.origin_x + (i + 0.5) * r, Y = (j) => m.origin_y + (h - j - 0.5) * r;
+    const walls = [
+      ...runs(cr, rr, (i, j) => dark(i, j)).map(([i, a, b]) => [[X(i), Y(b) - r / 2], [X(i), Y(a) + r / 2]]),     // 세로 벽
+      ...runs(rr, cr, (j, i) => dark(i, j)).map(([j, a, b]) => [[X(a) - r / 2, Y(j)], [X(b) + r / 2, Y(j)]]),     // 가로 벽
+    ];
+    const box = { x0: m.origin_x + cr[0] * r, x1: m.origin_x + (cr[1] + 1) * r, y0: m.origin_y + (h - 1 - rr[1]) * r, y1: m.origin_y + (h - rr[0]) * r };
+    const near = 0.3;                                  // 외벽과 나란히 붙은 줄(기울어진 외벽이 안으로 들어온 것)은 빼고 칸막이만
+    box.walls = walls.filter(([a, b]) => (a[0] === b[0]
+      ? Math.min(a[0] - box.x0, box.x1 - a[0]) > near
+      : Math.min(a[1] - box.y0, box.y1 - a[1]) > near));
+    ok(box);
   };
   img.onerror = () => ok(null);
   img.src = m.image_url;
@@ -310,6 +339,8 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
         if (mapRef.current !== map || !r) return;
         L.rectangle([P(r.x0, r.y0), P(r.x1, r.y1)], { pane: 'floor', color: '#9aa5ae', weight: 5, fillColor: '#ffffff', fillOpacity: 1, interactive: false })
           .addTo(L1.current.plate);
+        (r.walls || []).forEach(([a, b]) => L.polyline([P(...a), P(...b)], { pane: 'floor', color: '#9aa5ae', weight: 5, lineCap: 'square', interactive: false })
+          .addTo(L1.current.plate));
       }).catch(() => {});
     } else {                                           // 지도 이미지 파일이 없음 — 격자 · 등록 정보 범위로 맞추고 알림
       const Note = L.Control.extend({ onAdd: () => {
