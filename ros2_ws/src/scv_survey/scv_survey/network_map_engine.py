@@ -220,7 +220,7 @@ class NetworkMapEngine(Node):
             text.pose.orientation.w = 1.0
             text.scale.z = cell * 0.3
             text.color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
-            med = st.mean
+            med = st.median
             text.text = f'{med:.0f}' if med is not None else 'X'
             out.markers.append(text)
 

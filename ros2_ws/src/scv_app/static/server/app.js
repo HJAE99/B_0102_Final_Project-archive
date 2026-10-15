@@ -1004,7 +1004,7 @@ function TaskDetail({ taskId, m, onClose, onAuthLost }) {
   if (d && m) {
     const heat = {};
     ((d.survey && d.survey.cells) || []).forEach((c) => {
-      heat[c.cell_id] = Object.fromEntries(Object.entries(c.by_ap).map(([ap, v]) => [ap, [v.mean, v.n_detected ?? v.n]]));
+      heat[c.cell_id] = Object.fromEntries(Object.entries(c.by_ap).map(([ap, v]) => [ap, [v.median, v.n_detected ?? v.n]]));
     });
     const cands = d.candidates || (d.candidate ? [d.candidate] : []);
     const ins = (d.inspections || []).map((i) => ({ ...i, facility_id: d.facility.facility_id,

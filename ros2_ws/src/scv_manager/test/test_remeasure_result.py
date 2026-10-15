@@ -41,19 +41,19 @@ def future(res):
 
 
 @pytest.mark.parametrize('error', [False, RuntimeError('test DB unavailable')])
-def test_store_failure_does_not_clear_finish_or_advance_and_retry_saves(error):
+def test_store_failure_keeps_patrol_going_and_retry_saves(error):
     m = Manager(saved=error)
     if isinstance(error, Exception):
         m.store.update_cell.side_effect = error
     m.on_task_result('robot4', 'reinspect', future(result()))
-    assert m.core.tasks['reinspect'].state == TaskState.RUNNING
-    assert m.pending_remeasure_results
-    m.publish_alert.assert_not_called()
-    m.complete_run_if_ready.assert_not_called()
-    m.store.update_cell.side_effect, m.store.update_cell.return_value = None, True
-    assert m.retry_remeasure_results()
-    assert not m.pending_remeasure_results
+    # 순찰은 멈추지 않는다: 작업은 끝나고, 판정 알림 없이 저장만 보류 (10/15 PM)
     assert m.core.tasks['reinspect'].state == TaskState.SUCCEEDED
+    assert m.pending_remeasure_results
+    codes = [c.kwargs.get('code') for c in m.publish_alert.call_args_list]
+    assert 'SAVE_PENDING' in codes and 'CLEARED' not in codes and 'REMAINS' not in codes
+    m.store.update_cell.side_effect, m.store.update_cell.return_value = None, True
+    m.retry_remeasure_results()
+    assert not m.pending_remeasure_results
     assert m.publish_alert.call_args.kwargs['code'] == 'CLEARED'
 
 

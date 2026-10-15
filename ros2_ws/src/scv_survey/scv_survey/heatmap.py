@@ -1,7 +1,7 @@
 """RSSI 샘플을 격자 칸으로 모으고 색을 정한다 (ROS 와 무관, pytest 대상).
 
 - 칸 번호는 지도 원점(origin) 기준: i = floor((x - ox) / cell), j = floor((y - oy) / cell)
-- 칸 대표값·약한 신호 판정은 검출된 RSSI 의 산술평균. 중앙값은 진단용. 미검출 샘플은 통계에 넣지 않고 따로 센다
+- 칸 대표값·약한 신호 판정은 검출된 RSSI 의 중앙값 (1차 · 재측정 같은 기준, 10/15 PM). 평균은 기록용. 미검출 샘플은 통계에 넣지 않고 따로 센다
 - (robot_id, seq) 가 같은 샘플은 한 번만, pose_ok 가 False 인 샘플은 버린다
 - 회피 마스크: 미검출·음영 칸(0.5 m 칸 그대로, margin 을 주면 그만큼 넓혀)은 100, 나머지(정상·측정 안 한 칸) 0 인 OccupancyGrid 값
 """
@@ -116,27 +116,28 @@ def pose_usable(age_s: Optional[float], cov_xy: Optional[float],
     return True, ''
 
 # 칸의 색상 정하는 함수. 다른 함수에서 계산된 값 받아옴.
-# 신호가 안잡히거나 절반 이상 못잡으면 회색. 검출 평균으로 색상 정함
+# 신호가 안잡히거나 절반 이상 못잡으면 회색. 검출 중앙값으로 색상 정함
 def cell_color(stats: CellStats, miss_ratio_thresh: float = 0.5,
                strong: float = STRONG_DBM, weak: float = WEAK_DBM) -> Color:
     if stats.n_detected == 0 or stats.miss_ratio >= miss_ratio_thresh:
         return MISS_COLOR
-    return rssi_to_color(stats.mean, strong, weak)
+    return rssi_to_color(stats.median, strong, weak)
 
-# 약한 신호 후보: 검출 RSSI 산술평균 < -72. 미측정과 미검출을 구분한다.
+# 약한 신호: 검출 RSSI 중앙값 < -72. 미측정과 미검출을 구분한다.
 def cell_status(stats: CellStats, shadow_dbm: float = SHADOW_DBM,
                 miss_ratio_thresh: float = 0.5) -> str:
     """미측정 / 미검출 비율 이상 / 약한 신호 / 정상. 신뢰도(최소 표본)는 호출자가 검사."""
-    return rf_status(stats.mean, stats.n_detected, stats.n_missed, shadow_dbm, miss_ratio_thresh)
+    return rf_status(stats.median, stats.n_detected, stats.n_missed, shadow_dbm, miss_ratio_thresh)
 
 
-def rf_status(mean, n_detected, n_missed, threshold=SHADOW_DBM, miss_ratio=.5):
+def rf_status(rssi, n_detected, n_missed, threshold=SHADOW_DBM, miss_ratio=.5):
+    # rssi: 검출 RSSI 의 대표값(중앙값)
     total = n_detected + n_missed
     if total == 0:
         return UNKNOWN
     if n_detected == 0 or n_missed / total >= miss_ratio:
         return MISS
-    return SHADOW if mean < threshold else NORMAL
+    return SHADOW if rssi < threshold else NORMAL
 
 # Nav2가 피해야할 칸 목록
 # 최소 전체 표본 수 이상인 칸만 판정함

@@ -125,7 +125,7 @@ class InspectionManager(Node):
         self.declare_parameter("passed_goal_radius_m", 0.35)
         self.declare_parameter("shadow_dbm", -72.0)
         self.declare_parameter("max_remeasure_per_robot", 0)  # 0: 전체 후보
-        # 약한 신호·미검출 후보만 10~15초 정지 재점검. 미측정 메우기는 별도 작업이다
+        # 1차 측정에서 미검출된 칸만 10~15초 정지 재측정 (선택 2차 작업, 10/15 PM). 약한 신호 칸 · 미측정 메우기는 넣지 않는다
         self.declare_parameter("include_unmeasured", False)
         self.declare_parameter("dock_keepout_radius_m", 0.6)
         self.declare_parameter("writer_node", "cell_map_writer")
@@ -529,25 +529,18 @@ class InspectionManager(Node):
             return
         self.synced_tasks.update(keys)
 
-    def retry_remeasure_results(self) -> bool:
+    def retry_remeasure_results(self) -> None:
+        """저장 못 한 재측정 결과를 같은 값으로 다시 저장 (다시 재지 않음). 순찰은 멈추지 않는다 (10/15 PM)."""
         for task_id, (robot_id, result) in list(self.pending_remeasure_results.items()):
             task = self.core.tasks.get(task_id)
-            if task is None or task.state in TERMINAL_TASK_STATES or task.state == TaskState.CANCELED:
+            if task is None or self.apply_remeasure(robot_id, task, result):
                 self.pending_remeasure_results.pop(task_id, None)
-                continue
-            if self.apply_remeasure(robot_id, task, result):
-                self.pending_remeasure_results.pop(task_id, None)
-                self.core.finish_task(task_id, ok=True, reason=result.reason)
-        if not self.pending_remeasure_results:
-            self.complete_run_if_ready()
-            return True
-        return False
 
     def dispatch_next_task(self) -> None:
         if self.core.run_state != RunState.RUNNING:
             return
-        if self.pending_remeasure_results and not self.retry_remeasure_results():
-            return
+        if self.pending_remeasure_results:
+            self.retry_remeasure_results()
         if self.core.patrol_phase in {
             PatrolPhase.WAITING_CANDIDATES,
             PatrolPhase.WAITING_KEEPOUT,
@@ -795,8 +788,11 @@ class InspectionManager(Node):
             if state is None or re.fullmatch(r'cell:(-?\d+),(-?\d+)', task.target_ref) is None:
                 result.ok, result.reason = False, 'UNCONFIRMED: invalid or insufficient measurement'
             elif not self.apply_remeasure(robot_id, task, result):
+                # 저장 실패: 판정 알림(CLEARED/REMAINS)은 저장된 뒤에만. 작업은 끝내고 다음으로 진행, 저장은 dispatch 마다 재시도
                 self.pending_remeasure_results[task_id] = (robot_id, result)
-                return  # 저장 성공 전에는 작업 완료·해제·다음 단계로 진행하지 않는다.
+                result.reason = 'SAVE_PENDING'
+                self.publish_alert(level=Alert.LEVEL_WARN, code='SAVE_PENDING', robot_id=robot_id,
+                                   ref=task.target_ref, message='재측정 결과 저장 실패 — 판정은 저장된 뒤 알림, 순찰은 계속')
         if not result.ok and task.task_type == ExecuteTask.Goal.REINSPECTION:
             self.publish_alert(level=Alert.LEVEL_WARN, code='UNCONFIRMED', robot_id=robot_id,
                                ref=task.target_ref, message=result.reason or '재점검 판정 불가')
@@ -926,7 +922,7 @@ class InspectionManager(Node):
             return {}
 
     def queue_cell_candidates(self) -> None:
-        """자기 섹터의 미검출·음영·미측정 칸을 그 로봇의 재측정 후보로 넣는다."""
+        """자기 섹터에서 1차 측정 때 미검출된 칸(include_unmeasured 면 미측정 칸도)을 그 로봇의 재측정 후보로 넣는다."""
         cells = self.read_cells()
         if not cells:
             return
@@ -969,7 +965,7 @@ class InspectionManager(Node):
         valid = (getattr(result, 'measurement_valid', False)
                  and 10 <= getattr(result, 'duration_s', 0) <= 16
                  and total == nd + nm)
-        return classify(getattr(result, 'rssi_mean', None), nd, nm, valid=valid,
+        return classify(getattr(result, 'rssi_median', None), nd, nm, valid=valid,
                         threshold=float(self.get_parameter('shadow_dbm').value))
 
     def apply_remeasure(self, robot_id: str, task, result) -> bool:
@@ -1000,7 +996,7 @@ class InspectionManager(Node):
             code='CLEARED' if state == 'normal' else 'REMAINS', robot_id=robot_id,
             ref=task.target_ref,
             message=f'{task.target_ref} 재점검: {state} '
-                    f'(mean={result.rssi_mean if result.n_samples else None}, '
+                    f'(median={result.rssi_median if result.n_samples else None}, '
                     f'detected={result.n_samples}, missed={result.n_missed}, total={result.n_total})')
         return True
 

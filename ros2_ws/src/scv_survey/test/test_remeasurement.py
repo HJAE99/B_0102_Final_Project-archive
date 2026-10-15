@@ -4,14 +4,14 @@ from scv_survey.remeasurement import MeasurementWindow, classify
 
 
 @pytest.mark.parametrize('values,missed,expected', [
-    ([-90,-65,-65], 0, 'shadow'),  # 평균 -73.33, 중앙값 -65
+    ([-90,-65,-65], 0, 'normal'),  # 중앙값 -65 로 판정 (10/15 PM: 1차·재측정 모두 중앙값). 평균이면 -73.33
     ([-72]*3, 0, 'normal'), ([-73]*3, 0, 'shadow'),
     ([-60]*3, 3, 'miss'), ([-60]*4, 2, 'normal'),
     ([], 3, 'miss'), ([-60], 29, 'miss'),
 ])
 def test_same_policy_in_survey_and_reinspection(values, missed, expected):
     st = CellStats(values, missed)
-    assert classify(st.mean, st.n_detected, st.n_missed) == expected
+    assert classify(st.median, st.n_detected, st.n_missed) == expected
     assert cell_status(st) == expected
 
 

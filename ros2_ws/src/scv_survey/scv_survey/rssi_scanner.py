@@ -134,9 +134,8 @@ class RssiScanner(Node):
 
     def measure_scan(self):
         freqs = self.tracker.next_freqs(time.monotonic())
-        if freqs == []:                                # 전체 대역 스캔 간격 사이 — 스캔 없이 미검출로 보냄
-            self.publish(self.get_clock().now(), False, None)
-            # 측정 창(상태 요약의 「최근 측정 N (검출/미검출)」)과 측정 로그에도 미검출로 남김 — 건너뛰면 집계에서 빠짐 (10/15 PM)
+        if freqs == []:                                # 전체 대역 스캔 간격 사이 (채널을 아직 못 찾음) — 스캔을 안 했으니 NetRaw 를 보내지 않는다
+            # 보내면 DB · 재측정이 스캔하지 않은 tick 을 진짜 미검출로 센다 (RSSI 재점검 수정, 10/15). 로그에는 남김
             wait = self.tracker.full_scan_interval - (time.monotonic() - self.tracker.last_full)
             self.log_sample(f"'{self.tracker.ssid or self.pattern}' 미검출 (채널 모름 — 다음 전체 스캔까지 {max(0.0, wait):.0f} s, 이번엔 스캔 안 함)",
                             None, None)

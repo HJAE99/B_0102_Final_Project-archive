@@ -25,7 +25,7 @@ ON CONFLICT (robot_id) DO NOTHING;
 -- ---------------------------------------------------------------------
 INSERT INTO settings (key, value, unit, source, description) VALUES
     -- 로봇이 실시간 판단에 쓰는 값 (순찰 시작 때 두 제어 PC로 전달)
-    ('rssi_suspect_dbm',     '-72',  'dBm', 'BR-T04', '후보·확정 RSSI 기준 — 검출 RSSI 산술평균이 이 값 미만이면 후보, 재검증 정지 측정도 같은 기준으로 CONFIRMED/CLEARED'),
+    ('rssi_suspect_dbm',     '-72',  'dBm', 'BR-T04', '약한 신호 기준 — 검출 RSSI 중앙값이 이 값 미만이면 약한 신호, 재검증 정지 측정도 같은 기준으로 CONFIRMED/CLEARED'),
     ('min_samples',          '3',    NULL,  'SR-06',  '후보 판단 최소 표본 수 — 칸 표본이 이보다 적으면 후보를 내지 않음(보고서 신뢰도 「낮음」 기준과 같음)'),
     ('precise_duration_s',   '15',   's',   'SR-08',  '재검증 정지 측정 시간 — 재검증 로봇이 후보 칸에 멈춰 RSSI를 재는 시간'),
     ('max_pose_retry',       '3',    NULL,  'SR-21',  '설비 정면 자세 보정 최대 횟수 — 넘기면 미확인(E6)'),

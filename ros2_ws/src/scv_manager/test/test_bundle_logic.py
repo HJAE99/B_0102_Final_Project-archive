@@ -238,13 +238,12 @@ def test_remeasure_targets_order_limit_and_reachable():
     }
     reachable = {(1, 1), (2, 1), (3, 1), (4, 1), (5, 1)}
 
-    assert remeasure_targets(cells, reachable, 10) == [
-        (4, 1), (3, 1), (2, 1), (5, 1),
-    ]
-    assert remeasure_targets(cells, reachable, 2) == [(4, 1), (3, 1)]
-    assert (5, 1) not in remeasure_targets(cells, reachable, 10, False)
-    # 측정 중 장애물로 못 간 칸: 미측정 (5, 1) 은 채우러 가지 않고, 값이 있는 음영 (2, 1) 은 그대로 후보
-    assert remeasure_targets(cells, reachable, 10, True, {(5, 1), (2, 1)}) == [(4, 1), (3, 1), (2, 1)]
+    # 재측정은 1차 측정에서 미검출된 칸만 (약한 신호 칸은 넣지 않음, 10/15 PM). 갈 수 없는 (9, 9) 는 뺀다
+    assert remeasure_targets(cells, reachable, 10) == [(4, 1), (5, 1)]
+    assert remeasure_targets(cells, reachable, 1) == [(4, 1)]
+    assert remeasure_targets(cells, reachable, 10, False) == [(4, 1)]
+    # 측정 중 장애물로 못 간 미측정 칸 (5, 1) 은 채우러 가지 않는다
+    assert remeasure_targets(cells, reachable, 10, True, {(5, 1)}) == [(4, 1)]
 
 
 def test_blocked_cells_from_executor_reason():
@@ -274,11 +273,12 @@ def test_mask_cells_skip_normal_low_confidence_and_dock():
 
 
 def test_candidate_filter_preserves_low_sample_vs_unmeasured_and_all_candidates():
-    cells = {(1,1): CellRow('shadow', -80, 1, 'low', -80),
-             (2,1): CellRow('shadow', -80, 3, 'ok', -75),
-             (3,1): CellRow('shadow', -70, 3, 'ok', -85)}
+    cells = {(1,1): CellRow('miss', None, 1, 'low'),
+             (2,1): CellRow('miss', None, 3, 'ok'),
+             (3,1): CellRow('shadow', -80, 3, 'ok')}
     reachable = {(1,1),(2,1),(3,1),(4,1)}
-    assert remeasure_targets(cells,reachable,0,False,min_samples=3) == [(3,1),(2,1)]
-    assert remeasure_targets(cells,reachable,0,True,min_samples=3) == [(3,1),(2,1),(4,1)]
+    # 표본 부족 미검출 (1,1) 은 후보가 아니지만 미측정으로 바뀌지도 않는다. 약한 신호 (3,1) 은 후보 아님
+    assert remeasure_targets(cells,reachable,0,False,min_samples=3) == [(2,1)]
+    assert remeasure_targets(cells,reachable,0,True,min_samples=3) == [(2,1),(4,1)]
     many = {(i,0): CellRow('miss',None,3,'ok') for i in range(7)}
     assert len(remeasure_targets(many,set(many),0,False,min_samples=3)) == 7

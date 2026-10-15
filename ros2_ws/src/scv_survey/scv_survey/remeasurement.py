@@ -7,15 +7,15 @@ from scv_survey.heatmap import MIN_SAMPLES, CellStats, rf_status
 DURATION_S = 15
 
 
-def classify(mean, n_detected, n_missed, *, valid=True, min_samples=MIN_SAMPLES,
+def classify(rssi, n_detected, n_missed, *, valid=True, min_samples=MIN_SAMPLES,
              threshold=-72.0, miss_ratio=.5):
-    """None은 판정 불가. 무표본을 미검출 이상으로 바꾸지 않는다."""
+    """rssi 는 검출 중앙값. None은 판정 불가. 무표본을 미검출 이상으로 바꾸지 않는다."""
     total = n_detected + n_missed
     if not valid or min(n_detected, n_missed) < 0 or total < min_samples:
         return None
-    if n_detected and (mean is None or not math.isfinite(mean) or not -127 <= mean <= 0):
+    if n_detected and (rssi is None or not math.isfinite(rssi) or not -127 <= rssi <= 0):
         return None
-    return rf_status(mean, n_detected, n_missed, threshold, miss_ratio)
+    return rf_status(rssi, n_detected, n_missed, threshold, miss_ratio)
 
 
 @dataclass

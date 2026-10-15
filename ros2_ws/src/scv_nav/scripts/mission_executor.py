@@ -465,8 +465,14 @@ class MissionExecutor(Node):
         target = re.fullmatch(r'cell:(-?\d+),(-?\d+)', gh.request.target_ref)
         if target is None or self.pose is None:
             return False, 'INVALID_MEASUREMENT_TARGET', None
-        cell, start = tuple(map(int, target.groups())), self.pose
+        cell = tuple(map(int, target.groups()))
         self.stop()
+        # 남은 속도로 바로 실패하지 않게 멈출 때까지 최대 2초 기다린 뒤 그 자리를 기준으로 삼는다 (10/15 통합 브랜치)
+        until = time.monotonic() + 2
+        while time.monotonic() < until and not gh.is_cancel_requested and not (
+                self.odom and time.monotonic() - self.odom[0] <= 1 and self.odom[1] <= .02 and self.odom[2] <= .05):
+            time.sleep(.1)
+        start = self.pose
         # 새 창을 열기 전에 1초간 정지 확인. 측정 중에도 동일한 조건을 계속 확인한다.
         until = time.monotonic() + 1
         while time.monotonic() < until:
