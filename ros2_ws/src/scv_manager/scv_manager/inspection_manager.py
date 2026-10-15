@@ -534,8 +534,10 @@ class InspectionManager(Node):
 
             ready, reason = self.robot_readiness(robot_id)
             status = self.core.robots[robot_id].status
+            # 로봇 자신이 하는 일이 없을 때만 (status.task_id 비어 있음) — 점검 판정을 기다리는 중에 끼어들면
+            # 그 작업이 취소되고, 동시에 보낸 DOCK 도 executor 안에서 함께 취소된다 (10/15 5회차 SHT-02 · facility-dock)
             if not ready and status is not None and self.core.robots[robot_id].online \
-                    and not status.accepting_tasks \
+                    and not status.accepting_tasks and not status.task_id \
                     and status.state in {RobotStatus.STATE_IDLE, RobotStatus.STATE_DOCKED}:
                 # mission_executor 는 배터리가 낮으면 DOCK 만 받는다. 남은 작업을 기다리면 DOCK 도 영영 안 나가므로
                 # 그 로봇 몫을 실패로 닫고 바로 귀환시킨다 (10/15 실기: robot4 27% 에서 서서 교착)
