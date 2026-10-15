@@ -69,3 +69,41 @@ def test_pair_selection_rejects_out_of_tolerance_depth():
     node = _selector([10.000, 10.100], [10.050], now)
     message, _, depth, _ = module.ScvDetectionManager._select_shutter_pair(node, 'current', now)
     assert message == 'current' and depth is None and list(node._shutter_pair_results) == [False]
+
+
+def _compressed_depth(depth_mm, encoding='16UC1', header=(0, 0.0, 0.0)):
+    """compressedDepth png 형식(12바이트 압축 정보 + 16비트 PNG)의 가짜 메시지를 만든다."""
+    from sensor_msgs.msg import CompressedImage
+    import cv2
+    message = CompressedImage()
+    message.format = f'{encoding}; compressedDepth png'
+    ok, png = cv2.imencode('.png', depth_mm.astype(np.uint16))
+    assert ok
+    message.data = np.array([header], dtype='<i4,<f4,<f4').tobytes() + png.tobytes()
+    return message
+
+
+def test_compressed_depth_16uc1_matches_raw_millimeters():
+    """16UC1 압축 Depth는 원본 밀리미터 값을 손실 없이 미터로 돌려주고 0은 무효로 남긴다."""
+    depth_mm = np.array([[0, 1000, 1234], [5000, 65535, 200]], dtype=np.uint16)
+    depth = module.decode_compressed_depth(_compressed_depth(depth_mm))
+    assert depth.dtype == np.float64 and np.array_equal(depth, depth_mm * 0.001)
+
+
+def test_compressed_depth_32fc1_restores_quantized_distance():
+    """32FC1 압축 Depth는 역수 양자화 값을 상수로 다시 거리(m)로 되돌린다."""
+    quant_a, quant_b = 100.0, 10.0
+    distance = np.array([[1.0, 2.0], [4.0, 0.0]])
+    encoded = np.where(distance > 0, quant_a / np.where(distance > 0, distance, 1) + quant_b, 0)
+    depth = module.decode_compressed_depth(
+        _compressed_depth(np.round(encoded), '32FC1', (0, quant_a, quant_b)))
+    assert np.allclose(depth, distance)
+
+
+def test_compressed_depth_rejects_unknown_format():
+    """rvl 같은 다른 압축 방식이나 컬러 형식은 잘못 해석하지 않고 오류로 알린다."""
+    import pytest
+    message = _compressed_depth(np.ones((2, 2)))
+    message.format = '16UC1; compressedDepth rvl'
+    with pytest.raises(ValueError):
+        module.decode_compressed_depth(message)

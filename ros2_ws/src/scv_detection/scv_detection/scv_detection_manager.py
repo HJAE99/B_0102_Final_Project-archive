@@ -71,6 +71,33 @@ def normalize_yolo_name(name):
     return '_'.join(str(name).strip().lower().replace('-', ' ').replace('_', ' ').split())
 
 
+def decode_compressed_depth(message: CompressedImage) -> np.ndarray:
+    """compressedDepth 토픽의 PNG 압축 Depth를 풀어 미터 단위 실수 배열로 반환한다.
+
+    message.format은 '16UC1; compressedDepth png' 또는 '32FC1; compressedDepth png' 형식이다.
+    data 앞 12바이트는 압축 정보(형식 번호, 32FC1 복원용 상수 2개)이고 그 뒤가 PNG다.
+    16UC1은 밀리미터 정수를 그대로 미터로 바꾸며 PNG는 손실이 없으므로 원본 Depth와 값이 같다.
+    32FC1은 역수로 양자화된 값을 원래 거리로 되돌린다. 0은 측정 없음(무효)으로 0을 유지한다.
+    다른 압축 방식(rvl 등)이나 깨진 데이터는 ValueError로 알린다.
+    """
+    encoding, _, compression = (part.strip() for part in message.format.partition(';'))
+    if compression != 'compressedDepth png' or encoding not in ('16UC1', '32FC1'):
+        raise ValueError(f'unsupported compressedDepth format: {message.format!r}')
+    data = bytes(message.data)
+    if len(data) <= 12:
+        raise ValueError('compressedDepth message is too short')
+    _, quant_a, quant_b = np.frombuffer(data[:12], dtype='<i4,<f4,<f4')[0]
+    image = cv2.imdecode(np.frombuffer(data[12:], np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None or image.ndim != 2 or image.dtype != np.uint16:
+        raise ValueError('compressedDepth PNG must decode to a single-channel 16-bit image')
+    if encoding == '16UC1':
+        return image.astype(np.float64) * 0.001
+    depth = np.zeros(image.shape, dtype=np.float64)
+    valid = image > 0
+    depth[valid] = quant_a / (image[valid].astype(np.float64) - quant_b)
+    return depth
+
+
 class ScvDetectionManager(Node):
     @staticmethod
     def _find_default_weights() -> str:
@@ -123,7 +150,9 @@ class ScvDetectionManager(Node):
         self.declare_parameter('aruco_enabled', True)
         self.declare_parameter('exit_sign_enabled', True)
         self.declare_parameter('shutter_enabled', True)
-        self.declare_parameter('shutter_depth_topic', 'oakd/stereo/image_raw')
+        # 원본 Depth(약 600KB/장)는 Wi-Fi에서 지연·누락이 커서 손실 없는 PNG 압축 Depth(약 160KB/장)를 기본으로 받는다.
+        # 이름이 compressedDepth로 끝나지 않으면 원본 Image 토픽으로 구독한다.
+        self.declare_parameter('shutter_depth_topic', 'oakd/stereo/image_raw/compressedDepth')
         self.declare_parameter('shutter_camera_info_topic', 'oakd/rgb/camera_info')
         self.declare_parameter('shutter_depth_camera_info_topic', 'oakd/stereo/camera_info')
         self.declare_parameter('shutter_tf_topic', 'tf')
@@ -133,6 +162,30 @@ class ScvDetectionManager(Node):
         # 기본 실행은 자동 조회한다. true는 기존 수동 정렬 확인 실행과의 호환용이다.
         self.declare_parameter('shutter_depth_aligned', False)
         self.declare_parameter('shutter_rgb_rectified', False)
+        # Depth 화면 배율·이동 보정(depth_x = scale_x*rgb_x + offset_x). 1, 0, 1, 0 이면 보정 없음.
+        # 2026-10-15 오전 카메라 설정(RGB 640x480)에서는 Depth 가 RGB 보다 넓은 시야를 담아 약 2/3 크기로 어긋났다.
+        # 10:40 무렵 카메라 설정을 바꾼 뒤(RGB·Depth 704x704, 둘 다 10Hz) 녹화 shutter_1015_1043 에서는
+        # 배율 약 0.98 로 거의 1:1이었고 남은 차이는 RGB 렌즈 왜곡이라 depth_for_rgb 가 이미 보정한다.
+        # 그래서 기본값은 보정 없음이다. 카메라 설정이 다시 바뀌면 tools/measure_depth_alignment.py 로 다시 잰다.
+        # 바닥 평면 방식: 'ransac' 은 매 프레임 RANSAC, 'fixed' 는 아래 미리 잰 평면을 검증만 하고 쓴다(연산량 절감).
+        # 고정 평면은 카메라 광학 좌표계 [nx, ny, nz, d](높이 = p·n + d, d = 카메라의 바닥 위 높이)다.
+        # 값은 녹화 shutter_1015_1043 을 초점 거리 1036px(아래 shutter_focal_length_px)로 계산한 RANSAC 48장 중앙값이며
+        # d=0.237m 로 TF 카메라 높이 0.244m 와 맞는다(법선 흔들림 최대 0.43°). 초점 거리 569.95 로 쟀던
+        # [-0.0017, -0.9994, 0.0334, 0.4237] 과 그 이전 [0.0040, -0.9996, 0.0292, 0.4610] 은 높이가 약 1.8배 부풀려진 값이다.
+        # 초점 거리·카메라 설정·장착이 바뀌면 다시 잰다: ransac 모드 로그의 plane= 값을 옮겨 적는다.
+        self.declare_parameter('shutter_floor_plane_mode', 'ransac')
+        self.declare_parameter('shutter_fixed_floor_plane', [-0.0061, -0.9999, 0.0162, 0.2371])
+        self.declare_parameter('shutter_depth_pixel_scale_x', 1.0)
+        self.declare_parameter('shutter_depth_pixel_offset_x', 0.0)
+        self.declare_parameter('shutter_depth_pixel_scale_y', 1.0)
+        self.declare_parameter('shutter_depth_pixel_offset_y', 0.0)
+        # 초점 거리 덮어쓰기(픽셀). 0이면 CameraInfo 값을 그대로 쓴다. 2026-10-15 카메라 설정(RGB 1080P → ISP 2/3 =
+        # 1280x720 → 가운데 704x704 잘라냄)에서 CameraInfo 는 fx=fy=569.95 를 내지만, 이는 1280→704 로 줄였다고 본 값이고
+        # 실제로는 잘라낸 영상이라 569.95 x 1280/704 = 약 1036 이다. 녹화 shutter_1015_1043 에서 569.95 를 쓰면
+        # 바닥 평면 카메라 높이 0.43m(TF 0.244m), 상자 높이 약 357mm(실측 185mm)로 약 1.8배 크게 나왔다.
+        # 1036 이면 카메라 높이 약 0.237m, 상자 앞면 높이 약 197mm 다(초점 1030~1060 에서 198~192mm). 카메라 해상도·ISP 설정이 바뀌면 다시 정한다.
+        # 실행 중 로그·화면의 '카메라 높이 확인' 비율이 1에서 크게 벗어나면 이 값이 틀린 것이다.
+        self.declare_parameter('shutter_focal_length_px', 1036.0)
         self.declare_parameter('shutter_depth_timeout', 0.5)
         self.declare_parameter('shutter_sync_tolerance', 0.03)
         self.declare_parameter('shutter_font_path', '')
@@ -176,6 +229,23 @@ class ScvDetectionManager(Node):
         self.shutter_depth_aligned = bool(self.get_parameter('shutter_depth_aligned').value)
         self._shutter_alignment_manual = self.shutter_depth_aligned
         self.shutter_rgb_rectified = bool(self.get_parameter('shutter_rgb_rectified').value)
+        self.shutter_floor_plane_mode = str(self.get_parameter('shutter_floor_plane_mode').value).strip().lower()
+        if self.shutter_floor_plane_mode not in ('fixed', 'ransac'):
+            raise ValueError("shutter_floor_plane_mode must be 'fixed' or 'ransac'")
+        fixed_plane = np.asarray(self.get_parameter('shutter_fixed_floor_plane').value, dtype=float)
+        if fixed_plane.shape != (4,) or not np.isfinite(fixed_plane).all() or np.linalg.norm(fixed_plane[:3]) < 1e-6:
+            raise ValueError('shutter_fixed_floor_plane must be four finite numbers [nx, ny, nz, d]')
+        fixed_plane[:3] /= np.linalg.norm(fixed_plane[:3])
+        self.shutter_fixed_floor_plane = fixed_plane if self.shutter_floor_plane_mode == 'fixed' else None
+        self.shutter_depth_pixel_mapping = tuple(
+            float(self.get_parameter(name).value) for name in (
+                'shutter_depth_pixel_scale_x', 'shutter_depth_pixel_offset_x',
+                'shutter_depth_pixel_scale_y', 'shutter_depth_pixel_offset_y'))
+        if self.shutter_depth_pixel_mapping[0] <= 0 or self.shutter_depth_pixel_mapping[2] <= 0:
+            raise ValueError('shutter_depth_pixel_scale_x/y must be positive')
+        self.shutter_focal_length_px = float(self.get_parameter('shutter_focal_length_px').value)
+        if not np.isfinite(self.shutter_focal_length_px) or self.shutter_focal_length_px < 0:
+            raise ValueError('shutter_focal_length_px must be 0 (use CameraInfo) or a positive pixel value')
         self.shutter_depth_timeout = float(self.get_parameter('shutter_depth_timeout').value)
         self.shutter_sync_tolerance = float(self.get_parameter('shutter_sync_tolerance').value)
         self.shutter_ground_frame = str(self.get_parameter('shutter_ground_frame').value).strip()
@@ -369,7 +439,8 @@ class ScvDetectionManager(Node):
                                      reliability=ReliabilityPolicy.BEST_EFFORT)
             sensor_group = MutuallyExclusiveCallbackGroup()
             self.shutter_depth_subscription = self.create_subscription(
-                Image, depth_topic, self._shutter_depth_callback, shutter_qos, callback_group=sensor_group)
+                CompressedImage if depth_topic.rstrip('/').endswith('compressedDepth') else Image,
+                depth_topic, self._shutter_depth_callback, shutter_qos, callback_group=sensor_group)
             self.shutter_info_subscription = self.create_subscription(
                 CameraInfo, info_topic, self._shutter_camera_info_callback, shutter_qos, callback_group=sensor_group)
             self.shutter_depth_info_subscription = self.create_subscription(
@@ -423,6 +494,12 @@ class ScvDetectionManager(Node):
             'height/area thresholds are initial, uncalibrated values')
         self.get_logger().info(
             'Camera preview ready. Call ~/inspect_yolo, ~/inspect_rack or ~/inspect_shutter to toggle detection.')
+        self.get_logger().info('Shutter floor plane mode=%s; fixed plane [nx, ny, nz, d]=%s'
+                               % (self.shutter_floor_plane_mode, np.round(self.shutter_fixed_floor_plane, 4).tolist()
+                                  if self.shutter_fixed_floor_plane is not None else None))
+        self.get_logger().info('Shutter depth pixel correction (scale_x, offset_x, scale_y, offset_y)=%s; 1,0,1,0 means none'
+                               % (self.shutter_depth_pixel_mapping,))
+        self.get_logger().info('Shutter focal length override=%s px (0 means CameraInfo)' % self.shutter_focal_length_px)
 
     def _set_shutter_alignment(self, confirmed, status, detail, checked_at=None) -> None:
         """정렬 확인 여부와 사유를 보관하고 확인이 취소되면 지난 셔터 판정을 지운다.
@@ -520,22 +597,32 @@ class ScvDetectionManager(Node):
             if not confirmed:
                 self._set_shutter_alignment(False, 'pending', f'camera parameter query failed: {error}')
 
-    def _shutter_depth_callback(self, message: Image) -> None:
-        """셔터용 Depth를 미터 배열로 바꿔 촬영 시각·수신 시각·좌표계와 함께 최근 사진 목록에 보관한다."""
+    def _shutter_depth_callback(self, message) -> None:
+        """셔터용 Depth를 미터 배열로 바꿔 촬영 시각·수신 시각·좌표계와 함께 최근 사진 목록에 보관한다.
+
+        message는 원본 Depth(Image, 16UC1·32FC1) 또는 압축 Depth(CompressedImage, compressedDepth png)다.
+        수신 시각은 압축 해제 전에 기록해 해제 시간이 도착 지연으로 섞이지 않게 한다.
+        """
         if self._stop_event.is_set():
             return
+        received = time.monotonic()
         try:
-            if message.encoding not in ('16UC1', '32FC1'):
-                raise ValueError('Depth encoding must be 16UC1 (mm) or 32FC1 (m)')
-            image = self._shutter_bridge.imgmsg_to_cv2(message, desired_encoding='passthrough')
-            if image is None or image.ndim != 2 or image.size == 0:
+            if isinstance(message, CompressedImage):
+                depth = decode_compressed_depth(message)
+            else:
+                if message.encoding not in ('16UC1', '32FC1'):
+                    raise ValueError('Depth encoding must be 16UC1 (mm) or 32FC1 (m)')
+                image = self._shutter_bridge.imgmsg_to_cv2(message, desired_encoding='passthrough')
+                if image is None or image.ndim != 2 or image.size == 0:
+                    raise ValueError('Depth must be a nonempty single-channel image')
+                depth = np.asarray(image, dtype=np.float64).copy()
+                if message.encoding == '16UC1':
+                    depth *= 0.001
+            if depth.size == 0:
                 raise ValueError('Depth must be a nonempty single-channel image')
-            depth = np.asarray(image, dtype=np.float64).copy()
-            if message.encoding == '16UC1':
-                depth *= 0.001
             record = {'depth': depth, 'stamp': message.header.stamp,
                       'stamp_ns': message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec,
-                      'frame_id': message.header.frame_id, 'received': time.monotonic()}
+                      'frame_id': message.header.frame_id, 'received': received}
             with self._state_lock:
                 self._shutter_depth_frames.append(record)
         except (ValueError, CvBridgeError, cv2.error, RuntimeError) as error:
@@ -931,13 +1018,32 @@ class ScvDetectionManager(Node):
                         rotation = shutter_obstacle.rotation_matrix(
                             (quaternion.x, quaternion.y, quaternion.z, quaternion.w))
                         up = rotation.T @ np.array([0.0, 0.0, 1.0])
+                        # 초점 거리·화면 어긋남 보정은 복사본에만 적용하고 원본 보정값은 변경 감지용으로 그대로 둔다.
+                        # RGB와 Depth는 같은 픽셀 격자이므로 초점 거리는 둘 다 같은 값으로 바꾼다.
+                        rgb_calibration = shutter_obstacle.override_focal_length(
+                            calibration, self.shutter_focal_length_px)
+                        focal_calibration = shutter_obstacle.override_focal_length(
+                            depth_calibration, self.shutter_focal_length_px)
+                        mapped_depth_calibration = shutter_obstacle.scale_depth_calibration(
+                            focal_calibration, *self.shutter_depth_pixel_mapping)
                         depth, rays = shutter_obstacle.depth_for_rgb(
-                            record['depth'], frame.shape, calibration, depth_calibration, self.shutter_rgb_rectified)
+                            record['depth'], frame.shape, rgb_calibration, mapped_depth_calibration,
+                            self.shutter_rgb_rectified)
                         reading = shutter_obstacle.inspect(frame, depth, rays, up,
                                                            geometry_state=geometry, observation_time=observation_time,
+                                                           fixed_plane=self.shutter_fixed_floor_plane,
                                                            **self.shutter_options)
                         reading['ground_frame'] = self.shutter_ground_frame
-                        reading['depth_pixel_mapping'] = 'rgb_and_depth_camera_info'
+                        used_focal = float(np.asarray(rgb_calibration['k'], dtype=float)[0])
+                        reading['focal_length_px'] = used_focal
+                        reading['camera_info_focal_px'] = float(np.asarray(calibration['k'], dtype=float)[0])
+                        # 바닥 평면으로 잰 카메라 높이와 TF 카메라 높이를 비교해 초점 거리 오류를 드러낸다.
+                        reading.update(shutter_obstacle.camera_height_check(
+                            reading.get('plane'), float(transform.transform.translation.z), used_focal))
+                        reading['depth_pixel_mapping'] = (
+                            'rgb_and_depth_camera_info' if mapped_depth_calibration is focal_calibration
+                            else 'rgb_and_depth_camera_info+pixel_correction(%.3f,%.1f,%.3f,%.1f)'
+                            % self.shutter_depth_pixel_mapping)
                     except TransformException as error:
                         reading = shutter_obstacle.unconfirmed('tf_unavailable', str(error))
                     except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
@@ -1661,6 +1767,12 @@ class ScvDetectionManager(Node):
                     f"floor_inliers={shutter_report.get('floor_inlier_count', 0)} "
                     f"coverage={shutter_report.get('coverage_ratio')} "
                     f"floor_noise_m={shutter_report.get('floor_noise_m')} "
+                    f"focal_px={shutter_report.get('focal_length_px')} "
+                    f"camera_height_floor_m={shutter_report.get('camera_height_floor_m')} "
+                    f"camera_height_tf_m={shutter_report.get('camera_height_tf_m')} "
+                    f"camera_height_ratio={shutter_report.get('camera_height_ratio')} "
+                    f"suggested_focal_px={shutter_report.get('suggested_focal_px')} "
+                    f"plane={[round(v, 4) for v in shutter_report['plane']] if shutter_report.get('plane') else None} "
                     f"floor_diagnostics={shutter_report.get('floor_diagnostics')} "
                     f"ground_up_camera={shutter_report.get('ground_up_camera')} "
                     f"height_threshold_m={shutter_report.get('effective_height_m')} "

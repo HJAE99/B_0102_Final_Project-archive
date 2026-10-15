@@ -11,12 +11,14 @@
 | 정상 확정 | `정상)장애물이 없습니다` | 초록 |
 | 입력 부족·품질 실패·확인 중 | 미확인 안내 | 회색 |
 
-화면에서는 빨간 경계 안쪽에 있고 RANSAC 평면과의 거리가 계산된 바닥 분류 거리 이내인
-유효 Depth 픽셀에 빨강을 40% 섞어 바닥 검출 결과를 표시한다. 같은 평면에 있어도 구역 밖은 칠하지 않는다.
-빨간 테이프나 구역 다각형 전체를 채우는 방식이 아니며, 장애물·무효 Depth 픽셀은 자동으로 바닥으로 칠하지 않는다.
+화면 표시는 2026-10-15 에 바꿨다. RANSAC 평면 기준으로 바닥을 지우고 남은 픽셀, 즉 빨간 경계 안에서
+바닥 분류 거리보다 높은 유효 Depth 픽셀과 장애물 전체 범위(구역 윗변 위로 넘어간 부분 포함, 같은 거리대로 이어진 픽셀)만
+Depth 색(0.3~4.0m, 가까울수록 파랑·멀수록 빨강)으로 70% 덮어 그린다. 빨간 선 안에서 그 외의 곳(지운 바닥과 빈 Depth)은
+바닥임을 알 수 있게 보라색(`FLOOR_FILL_BGR`, 35%)으로 고르게 채운다. 이전에는 바닥 픽셀마다 빨강을 40% 섞었는데
+빈 Depth 구멍이 잡음처럼 드러나 보기 어려웠다. 이 표시는 그림 전용이며 판정에는 쓰지 않는다.
+바닥보다 분류 거리 넘게 아래로 잰 점은 스테레오 Depth 오차로 보고 바닥과 함께 지운다(관측 범위 계산에는 넣지 않음).
 좌측 상단 두 번째 줄에 `RANSAC 바닥: 검출 (N픽셀)` 또는 `미검출`과 `reason`을 표시한다.
-평면은 잡혔지만 관측 범위 등의 조건이 부족하면 빨간 바닥 표시와 미확인 문구가 함께 나올 수 있다.
-정렬·TF·구역 검출 등 앞 단계에서 실패했거나 RANSAC 평면이 검증을 통과하지 못했으면 빨간 바닥 표시는 없다.
+정렬·TF·구역 검출 등 앞 단계에서 실패했거나 RANSAC 평면이 검증을 통과하지 못했으면 Depth 색 표시도 없다.
 구역을 찾으면 해당 구역 안에서 선택된 빨간 선의 윤곽만 노란색으로 표시한다. 구역을 찾지 못한 경우에는
 원인을 확인할 수 있도록 HSV 색 조건으로 인식한 선의 윤곽을 표시한다. 화면에 빨간 픽셀 수,
 구역 후보 수, 구역 검출 실패 단계도 표시한다. 노란 윤곽은 색 인식 결과이며 바닥 평면 판정과는 별도다.
@@ -79,10 +81,19 @@ DepthAI ROS 소스에서는 [stereo 발행 설정](https://github.com/luxonis/de
 
 모든 기본 토픽은 상대 이름이다. `__ns:=/robot3`이면 `/robot3/` 아래 주소를 구독한다.
 
+Depth는 2026-10-14부터 압축 토픽 `oakd/stereo/image_raw/compressedDepth`(`16UC1; compressedDepth png`)를 기본으로 받는다.
+robot4 실시간 15초 비교에서 같은 촬영 시각의 원본과 압축 Depth는 둘 다 값이 있는 픽셀에서 차이가 0mm였다.
+압축 쪽은 약 10m를 넘는 값(최소 10.07m, 원본의 65.53m 같은 이상값 포함, 약 1%)을 0으로 바꿨는데,
+셔터 검사의 유효 거리(`depth_min_m`~`depth_max_m`, 기본 0.2~5.0m) 밖이라 결과는 같다.
+한 장 크기는 약 160KB로 원본(약 600KB)보다 작고, 15초 동안 원본 125장·압축 136장을 받았으며
+촬영 간격 최대 공백은 원본 0.40초·압축 0.20초였다. 압축 해제는 한 장에 약 4ms다.
+`oakd/rgb/image_raw/compressedDepth`는 컬러 영상이라 Depth 압축이 불가능해 메시지가 나오지 않는다.
+이름이 `compressedDepth`로 끝나지 않는 토픽을 주면 기존처럼 원본 `Image`(16UC1·32FC1)로 구독한다.
+
 | 입력 | 기본 상대 주소 / 설정 |
 |---|---|
 | RGB JPEG | `oakd/rgb/image_raw/compressed` |
-| RGB에 정렬된 Depth | `shutter_depth_topic:=oakd/stereo/image_raw` |
+| RGB에 정렬된 Depth | `shutter_depth_topic:=oakd/stereo/image_raw/compressedDepth` |
 | RGB CameraInfo | `shutter_camera_info_topic:=oakd/rgb/camera_info` |
 | Depth CameraInfo | `shutter_depth_camera_info_topic:=oakd/stereo/camera_info` |
 | 움직이는 TF | `shutter_tf_topic:=tf` |
@@ -196,7 +207,7 @@ base_link의 Z 방향을 바닥 위쪽으로 사용할 수 없는 장착·주행
 6. 같은 구역의 서로 다른 Depth 사진이 기본 0.5초와 최소 3프레임 조건을 충족해야(사진 사이 공백 1초 이하) 정상 또는 경고를 확정한다. 경고는 장애물 후보 위치도 연속으로 겹쳐야 한다.
 
 평면 추정에만 점 수를 줄인다. 장애물 판독은 원본 해상도의 점군을 사용한다.
-빨간 바닥 픽셀 수와 바닥 격자 관측 비율도 검사 구역 안에서만 계산한다.
+바닥으로 지운 픽셀 수와 바닥 격자 관측 비율도 검사 구역 안에서만 계산한다.
 `floor_fit_point_count`는 평면 후보 검증에 넣은 구역 전체의 유효 점 수, `floor_anchor_point_count`는
 경계에서 안쪽으로 들어온 근거 점 수다. `zone_pixel_count`는 검사 구역 픽셀 수다.
 RANSAC은 NumPy로 구현했으며 Open3D 설치를 요구하지 않는다.
@@ -223,9 +234,14 @@ RANSAC은 NumPy로 구현했으며 Open3D 설치를 요구하지 않는다.
 | `shutter_red_support_min_s` | 35 | 진한 선과 함께 확인할 옅은 빨간 선의 최소 채도 |
 | `shutter_min_red_fragment_pixel_ratio` | 0.0001 | 선 조각으로 보존할 최소 픽셀 수의 영상 면적 대비 비율 |
 | `shutter_zone_fragment_overlap_ratio` | 0.20 | 두 조각 중 큰 사각형 면적 대비 최소 겹침 |
+| `shutter_zone_fragment_gap_ratio` | 0.02 | 큰 묶음끼리 합칠 때 허용하는 사각형 간격(짧은 변 비율). 이음매로 끊긴 좌우 판을 한 구역으로 합친다 |
+| `shutter_zone_fragment_join_min_area_ratio` | 0.01 | 2단계 합치기에 참여하는 묶음의 최소 볼록 껍질 면적(화면 비율) |
+| `shutter_obstacle_boundary_inset_m` | 0.05 | 장애물 후보에서 제외하는 구역 경계 안쪽 띠 폭(m). 벽 밑단 픽셀의 가짜 장애물을 막는다 |
+| `shutter_confirm_zone_overlap_ratio` | 0.30 | 이전 구역과 같은 구역으로 보는 최소 겹침(IoU). 확인 이력 유지 기준 |
+| `shutter_obstacle_boundary_inset_ratio` | 0.02 | 장애물 후보에서 제외하는 구역 테두리 안쪽 띠(화면 짧은 변 비율, 픽셀). 먼 경계의 벽 밑단 줄을 막는다 |
 | `shutter_red_join_ratio` | 0.015 | 가까운 빨간 선 조각을 묶는 범위의 영상 짧은 변 대비 비율 |
 | `shutter_min_boundary_support_ratio` | 0.70 | 완전한 구역으로 인정할 각 변의 빨간 선 확인 비율 |
-| `shutter_max_tape_width_ratio` | 0.035 | 넓은 빨간 면을 제거하는 커널 크기의 영상 짧은 변 대비 비율 |
+| `shutter_max_tape_width_ratio` | 0.08 | 넓은 빨간 면을 제거하는 커널 크기의 영상 짧은 변 대비 비율 (480px에서 39px) |
 | `shutter_geometry_max_gap_seconds` | 1.0 s | 구역·평면 추적을 이어 쓸 최대 관측 공백 |
 | `shutter_tracking_min_points` | 12 | 영상 이동 추적에 필요한 최소 유효 특징점 수 |
 | `shutter_tracking_min_inlier_ratio` | 0.65 | 영상 이동 RANSAC의 최소 일치 비율 |
@@ -274,6 +290,14 @@ RANSAC은 NumPy로 구현했으며 Open3D 설치를 요구하지 않는다.
 이 녹화에서는 구역 오른쪽·아래 테이프가 화면 밖이라 모든 프레임이 `zone_partial`(미확인)이다.
 정상 판정을 받으려면 네 변의 빨간 테이프가 모두 보이는 위치에서 검사해야 한다.
 
+### 가까운 테이프가 구역에서 빠지던 문제 (2026-10-14)
+
+robot4 실시간 영상에서 왼쪽 긴 테두리 테이프는 색 조건(H 177·0, S 126~146)을 통과했지만,
+카메라 가까이에서 화면 가로 폭이 12~26px로 굵어져 기존 넓은 면 제거 커널(0.035, 17px)에 지워졌다.
+그 결과 구역이 오른쪽 사선 테이프 묶음만으로 만들어졌다. 기본값을 0.08(39px)로 올리자 왼쪽 테두리부터
+오른쪽 화면 끝까지 하나의 구역으로 잡혔다. 녹화 185장에서 구역 면적 중앙값은 61,544px에서 82,589px로 늘었고
+가짜 장애물은 0장으로 유지됐다. 39px보다 굵은 빨간 면은 계속 제거되며, 빨간 상자가 놓인 장면은 아직 시험하지 않았다.
+
 로그에는 `reason`, `coverage`, `floor_noise_m`, `height_threshold_m`, `zone_tracking`,
 `confirm_frames`, `confirm_elapsed_s`, `obstacle_heights_m`, `floor_diagnostics`, `ground_up_camera`가 나온다.
 평면을 못 찾으면 화면의 `reason`은 `floor_diagnostics.fit_reason`으로 상세 단계를 표시한다.
@@ -296,3 +320,76 @@ RANSAC은 NumPy로 구현했으며 Open3D 설치를 요구하지 않는다.
 
 한글은 Pillow와 한글 글꼴로 그린다. 현재 PC에서는 Noto Sans CJK 글꼴 경로를 자동 선택한다.
 다른 PC에서는 `shutter_font_path`로 글꼴 경로를 지정할 수 있다. 글꼴이 없으면 셔터 서비스만 비활성화하고 이유를 로그로 알린다.
+
+
+## RGB·Depth 화면 어긋남 보정 (2026-10-15 robot4 측정)
+
+- 증상: 상자를 세워 놓아도 장애물이 전혀 잡히지 않았다. Depth 영상에는 상자가 또렷한데 RGB 보다 오른쪽 위로
+  치우쳐 작게 보여, RGB 기준 구역 안의 Depth 픽셀이 모두 바닥 높이로 계산됐다.
+- 원인: `stereo.i_align_depth=true` 이고 두 CameraInfo 의 K 도 같지만(518.1 / 321.3, 241.9), 실제 Depth 는
+  RGB(1080P → ISP 2/3 → 640x480 중앙 잘라냄)보다 넓은 시야를 640x480 으로 줄인 영상이다. 카메라 설정은 건드리지
+  않았으므로(읽기만 함) 소프트웨어에서 보정한다.
+- 측정: 상자 두 개를 두고 `tools/measure_depth_alignment.py` 로 Depth 의 바닥 위 덩어리가 RGB 상자 사각형과 가장
+  잘 겹치는 축별 배율·이동을 찾았다. 결과 `depth_x = 0.775*rgb_x + 79`, `depth_y = 0.670*rgb_y + 85`
+  (정밀도 0.96).
+- 적용: 매니저 파라미터 `shutter_depth_pixel_scale_x/offset_x/scale_y/offset_y` 를
+  `shutter_obstacle.scale_depth_calibration()` 으로 Depth K·P 에 반영한 뒤 `depth_for_rgb()` 가 다시 샘플링한다.
+  보정 없이 쓰려면 1,0,1,0 을 준다. 카메라 해상도·정렬 설정이 바뀌면 반드시 다시 측정한다.
+- **카메라 설정 변경 후(2026-10-15 10:40 무렵, 사용자가 직접 변경)**: RGB·Depth 가 704x704, 둘 다 10Hz,
+  K = 569.95 / 353.4, 354.1 로 바뀌었다. 녹화 `~/final_ws/bags/shutter_1015_1043`(28.4초, 앞 10초 빈 구역·뒤 상자)에서
+  - 시각: 위상차 0.08ms, Depth 누락 0회, Depth 추가 도착 지연 0.07초.
+  - 화면: RGB 색 경계와 Depth 거리 경계 겹침이 최대가 되는 배율이 약 0.98(이전 설정은 약 0.667)이었다.
+    남은 약 2%는 RGB 렌즈 왜곡이며 `depth_for_rgb()` 의 왜곡 보정만으로 겹침이 40.8%→49.2%(최적 배율 맞춤 49.9%)로 올랐다.
+  - 그래서 **기본값을 1, 0, 1, 0(보정 없음)으로 되돌렸다.** 이전 기본값 0.775/79/0.670/85 를 새 설정에 쓰면
+    빈 구역·상자 26장 모두 `floor_not_confirmed` 로 상자를 하나도 잡지 못했다.
+- 주의: 매니저의 "Shutter alignment=verified" 로그는 카메라 파라미터만 읽은 결과이며 실제 화면 정렬을 보장하지 않는다.
+
+
+## 바닥 평면 고정값 (RANSAC 연산량 절감, 2026-10-15)
+
+- 카메라가 로봇에 고정돼 바닥 평면이 거의 변하지 않으므로 매니저 파라미터 `shutter_floor_plane_mode:=fixed`
+  에서는 `shutter_fixed_floor_plane`(카메라 광학 좌표계 `[nx, ny, nz, d]`, 높이 = p·n + d) 을
+  `inspect(fixed_plane=...)` 로 넘겨 RANSAC(250회 반복)을 건너뛴다.
+- **기본 모드는 `ransac`** 이다(2026-10-15 사용자 결정). 고정값 기능은 그대로 남아 있다.
+- 고정값 기본은 새 카메라 설정 녹화 `shutter_1015_1043` 의 RANSAC 48장 중앙값 `[-0.0017, -0.9994, 0.0334, 0.4237]`
+  (법선 흔들림 최대 0.63°)이다. 이 값으로 fixed 모드를 쓰면 빈 구역 가짜 장애물 0장, 상자 13장 모두 검출됐다.
+  이전 설정에서 잰 `[0.0040, -0.9996, 0.0292, 0.4610]` 은 d 가 3.7cm 달라 빈 구역 13장 중 6장에서 가짜 장애물이 나왔다.
+- 고정 평면은 매 프레임 `_plane_quality()` 로 기울기·일치 비율·근거 분포만 검증한다(가벼운 벡터 연산). 로봇이
+  기울거나 바닥이 다르면 `floor_not_confirmed` + `plane_source=fixed_plane_rejected` 로 미확인이 된다.
+- 다시 재려면 `-p shutter_floor_plane_mode:=ransac` 으로 실행하고 로그 `shutter verdict=... plane=[...]` 값을
+  파라미터에 옮겨 적는다. 로봇·카메라 장착이 바뀌면 반드시 다시 잰다.
+
+
+## 처리 속도 개선 (2026-10-15)
+
+704x704 로 바뀐 뒤 이 PC 에서 한 장 검사(`depth_for_rgb` + `inspect` + `stabilize_report`)가 중앙 460ms 였다.
+녹화 `shutter_1015_1043` 284장으로 측정했고, 아래 변경 뒤 **중앙 192ms(최대 413ms)** 이며 284장 모두 판정·사유·
+구역·장애물 상자·높이·잡음·관측 비율이 변경 전과 같았다.
+
+| 변경 | 변경 전 → 후 (한 장) |
+|---|---|
+| `_vertically_consistent`: `np.nanmedian` 대신 모두 유효한 창은 `partition`, 빈 값이 섞인 창만 정렬로 같은 중앙값 계산. 결과가 쓰이는 바닥보다 높은 픽셀(`where=tall`)만 검사 | 약 225ms → 수십 ms |
+| `_red_masks`(넓은 면 제거 열기 연산) 를 `inspect` 에서 한 번만 만들어 `_find_zone`·`_tracked_zone` 에 전달 | 최대 3회 → 1회(1회 약 25ms) |
+| `_fit_floor`: 무작위 세 점은 같은 순서로 뽑고, 250개 후보 평면의 일치 점 수를 행렬 한 번으로 계산 | 반복문 → 행렬 계산 |
+| 바닥 좌표 변환·다각형 안 판정을 화면 전체 유효 픽셀 대신 구역 안 픽셀만 계산 | 약 47만 점 → 구역 안 점 |
+
+남은 큰 비용은 넓은 면 제거 열기 연산(약 25ms)이며, 결과를 바꾸지 않고는 줄이기 어려워 그대로 두었다.
+
+
+## 장애물 표시 범위 (2026-10-15)
+
+- 판정용 `bbox` 는 구역(빨간 테두리) 안의 후보 픽셀만 감싸므로 세워 둔 상자는 윗부분이 잘려 보였다.
+- `inspect()` 가 구역 안 장애물 픽셀을 씨앗으로, 기준 높이 이상이면서 씨앗 거리 중앙값 ±
+  `shutter_obstacle_display_depth_tolerance_m`(기본 0.25 m) 안의 픽셀을 화면 전체에서 8-연결로 이어 붙여
+  `display_bbox` 를 만든다. `draw_result()` 는 이것으로 그린다. 벽처럼 더 먼 면은 거리 차이로 제외된다.
+- 판정·확인(겹침 비교)은 그대로 `bbox` 를 쓴다. 0 을 주면 표시도 구역 안 범위로 돌아간다.
+
+
+## 상자 밑단의 가짜 장애물 (2026-10-15)
+
+- 증상: 세운 상자 하나에 장애물이 두 개 잡혔다. 아래쪽 것은 상자 밑단 바로 아래 2~3줄(RGB 기준 9픽셀) 띠였다.
+- 원인: 그 띠의 Depth 가 상자 면(1.84 m)·바닥(1.8 m)보다 0.5 m 가까운 1.3 m 로 나왔다. 깊이가 갑자기 바뀌는
+  가장자리에서 스테레오 매칭이 만드는 잘못된 깊이(날아다니는 픽셀)다. 평면보다 가까우니 높이 15 cm 로 계산됐다.
+- 대책: `_vertically_consistent()` 로 같은 열 위아래 21줄 중앙값과 `shutter_flying_pixel_depth_m`(기본 0.10 m)
+  이상 다른 픽셀은 장애물 후보에서 뺀다. 실제 면은 여러 줄이 같은 깊이라 남는다. 0 이면 끈다.
+

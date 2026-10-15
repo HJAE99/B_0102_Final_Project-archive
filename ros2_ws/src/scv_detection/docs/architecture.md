@@ -658,7 +658,7 @@ sequenceDiagram
 | 종류 | 기본 /robot4 주소 | 타입·의미 |
 |---|---|---|
 | 영상 입력 | /robot4/oakd/rgb/image_raw/compressed | sensor_msgs/msg/CompressedImage |
-| 깊이 입력 | /robot4/oakd/stereo/image_raw | sensor_msgs/msg/Image, RGB에 정렬된 Depth |
+| 깊이 입력 | /robot4/oakd/stereo/image_raw/compressedDepth | sensor_msgs/msg/CompressedImage, RGB에 정렬된 손실 없는 PNG Depth (셔터 검사) |
 | 영상 출력 | /robot4/fire_extinguisher/detections/compressed | 원본 내용 또는 검사 표시 JPEG |
 | 불량 출력 | /robot4/inspect/result | scv_msgs/msg/InspectionResult, ABNORMAL 이벤트 |
 | YOLO 제어 | /robot4/detection_alert/inspect_yolo | std_srvs/srv/Trigger |
