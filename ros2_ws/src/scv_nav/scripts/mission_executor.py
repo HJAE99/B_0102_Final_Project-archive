@@ -8,7 +8,7 @@
 # 속도 상한 0.2 m/s 는 Nav2 controller·velocity_smoother 설정에서 건다 (이 파일에서 속도를 내지 않음)
 # 작업 종류
 #   SURVEY_SEGMENT: waypoints 를 navigate_through_poses 로 통과
-#   FACILITY_CHECK: 마지막 waypoint 에 정밀 도착 → {ns}/inspect_facility (자세 보정 피드백은 회전·전진으로 따름)
+#   FACILITY_CHECK: 마지막 waypoint 에 정밀 도착 → {ns}/inspect_facility 서비스 (IF-05, 10/14 PM 결정: 액션 → 서비스, 자세 보정 없음)
 #   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 30초
 #   DOCK:           waypoints(없으면 undock 위치)로 가서 dock
 # 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
@@ -32,7 +32,8 @@ from nav2_msgs.msg import Costmap
 from nav_msgs.msg import OccupancyGrid
 from nav2_simple_commander.robot_navigator import TaskResult
 from rcl_interfaces.srv import SetParameters
-from scv_msgs.action import ExecuteTask, InspectFacility, PreciseMeasure
+from scv_msgs.action import ExecuteTask, PreciseMeasure
+from scv_msgs.srv import InspectFacility
 from scv_msgs.msg import InspectionResult, RobotStatus
 from sensor_msgs.msg import BatteryState
 from turtlebot4_navigation.turtlebot4_navigator import TurtleBot4Navigator
@@ -88,7 +89,8 @@ class MissionExecutor(Node):
         self.create_subscription(OccupancyGrid, 'map', self.on_map,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.param_cli = self.create_client(SetParameters, 'controller_server/set_parameters', callback_group=cb)
-        self.inspect_cli = ActionClient(self, InspectFacility, 'inspect_facility', callback_group=cb)
+        self.inspect_cli = self.create_client(InspectFacility, 'inspect_facility', callback_group=cb)
+        self.inspect_timeout = float(self.declare_parameter('inspect_timeout_s', 30.0).value)   # 비전 판정 최대 시간
         self.precise_cli = ActionClient(self, PreciseMeasure, 'survey/precise', callback_group=cb)
         ActionServer(self, ExecuteTask, 'execute_task', self.execute,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT,
@@ -403,27 +405,24 @@ class MissionExecutor(Node):
         return kept
 
     def inspect(self, gh, g):
-        adjust = []   # 피드백 콜백은 executor 스레드라서 nav 호출은 이 스레드에서 한다
         kind = KIND.get(g.target_ref[:3], 0)
         if not kind:
             self.get_logger().warn(f'{g.target_ref}: KIND 표에 없는 종류 → kind 0 으로 보냄')
-        goal = InspectFacility.Goal(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
-        res, reason = self.call_action(self.inspect_cli, goal, gh, lambda m: adjust.append(m.feedback),
-                                       lambda: self.do_adjust(adjust, gh))
+        if not self.inspect_cli.wait_for_service(timeout_sec=5.0):
+            return False, 'NO_SERVER inspect_facility'
+        req = InspectFacility.Request(task_id=g.task_id, run_id=g.run_id, facility_id=g.target_ref, kind=kind)
+        fut = self.inspect_cli.call_async(req)
+        t0 = time.time()
+        while not fut.done():            # 서비스는 취소가 없다 — 작업이 취소되면 응답을 기다리지 않고 나감
+            if gh.is_cancel_requested:
+                return False, 'CANCELED'
+            if time.time() - t0 > self.inspect_timeout:
+                return False, f'TIMEOUT inspect_facility {self.inspect_timeout:.0f}s'
+            time.sleep(0.1)
+        res = fut.result()
         if res is None:
-            return False, reason
+            return False, 'INSPECT_FAILED'
         return res.verdict != InspectionResult.UNCONFIRMED, f'verdict={res.verdict} {res.detail}'
-
-    def do_adjust(self, adjust, gh):
-        while adjust and not gh.is_cancel_requested:
-            f = adjust.pop(0)
-            self.get_logger().info(f'자세 보정 {f.attempt}: yaw={f.adjust_yaw:.2f} rad forward={f.adjust_forward_m:.2f} m')
-            if f.adjust_yaw:
-                self.nav.spin(f.adjust_yaw)
-                self.wait_nav(gh)
-            if f.adjust_forward_m > 0 and not gh.is_cancel_requested:   # 후진은 하지 않음 (뒤에 센서 없음)
-                self.nav.driveOnHeading(f.adjust_forward_m)
-                self.wait_nav(gh)
 
     def measure(self, gh):
         res, reason = self.call_action(self.precise_cli, PreciseMeasure.Goal(duration_s=30), gh)

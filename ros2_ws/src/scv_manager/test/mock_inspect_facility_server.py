@@ -1,18 +1,19 @@
-"""묶음 시험용 가짜 비전: {ns}/inspect_facility 를 받아 2초 뒤 NORMAL 을 돌려주고 {ns}/inspect/result 를 낸다.
+"""묶음 시험용 가짜 비전: {ns}/inspect_facility 서비스(IF-05)를 받아 2초 뒤 NORMAL 을 돌려주고 {ns}/inspect/result 를 낸다.
 
     python3 mock_inspect_facility_server.py --ros-args -r __ns:=/robot4
 
-자세 보정은 요청하지 않는다 (로봇이 벽 가까이에서 더 움직이지 않게).
+자세 보정은 없다 (10/14 PM 결정).
 """
 
 import time
 
 import rclpy
-from rclpy.action import ActionServer
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
-from scv_msgs.action import InspectFacility
+from scv_msgs.srv import InspectFacility
 from scv_msgs.msg import InspectionResult
 
 
@@ -24,17 +25,15 @@ class MockInspectFacilityServer(Node):
             "inspect/result",
             QoSProfile(depth=50, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
-        self.action_server = ActionServer(
-            self,
+        self.service = self.create_service(
             InspectFacility,
             "inspect_facility",
             self.execute_callback,
+            callback_group=ReentrantCallbackGroup(),
         )
 
-    def execute_callback(self, goal_handle):
-        request = goal_handle.request
+    def execute_callback(self, request, response):
         self.get_logger().info(f"설비 점검 요청: {request.facility_id}")
-        goal_handle.publish_feedback(InspectFacility.Feedback(attempt=1))
         time.sleep(2.0)
 
         message = InspectionResult()
@@ -49,11 +48,9 @@ class MockInspectFacilityServer(Node):
         message.attempts = 1
         self.result_publisher.publish(message)
 
-        goal_handle.succeed()
-        return InspectFacility.Result(
-            verdict=InspectionResult.NORMAL,
-            detail="mock",
-        )
+        response.verdict = InspectionResult.NORMAL
+        response.detail = "mock"
+        return response
 
 
 def main(args=None):
@@ -61,7 +58,7 @@ def main(args=None):
     node = MockInspectFacilityServer()
 
     try:
-        rclpy.spin(node)
+        rclpy.spin(node, executor=MultiThreadedExecutor())
     except KeyboardInterrupt:
         pass
     finally:

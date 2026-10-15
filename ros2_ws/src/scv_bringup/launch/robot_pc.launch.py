@@ -8,7 +8,7 @@
 띄우는 순서는 주행 팀이 확인한 대로 localization → mission_executor → Nav2 다 (10/12 주행 일지).
 Dock 에 있는 채로 Nav2 를 먼저 띄우면 AMCL 초기 pose 가 늦어 global costmap 이 map TF 를 못 받고 bringup 이 중단된다.
 mission_executor 는 켜지면 스스로 undock 하고 초기 pose 를 준 뒤 Nav2 가 켜지기를 기다린다 (로봇이 움직인다).
-비전 노드(detection_alert)의 점검 요청 받기가 아직 없어 fake_vision 으로 대신한다.
+비전: vision:=true 면 scv_detection_manager 가 {ns}/inspect_facility 서비스(IF-05)를 받는다. 기본은 fake_vision(가짜 서비스, 2초 뒤 NORMAL).
 """
 import os
 
@@ -53,7 +53,10 @@ def _nodes(context):
     if arg('rssi') == 'true':
         nodes.append(include('scv_survey', 'laptop_test.launch.py', pose_source='tf', robot_ns=ns, rviz='false',
                              iface=arg('iface'), ssid=arg('ssid'), rssi_freq=arg('rssi_freq')))
-    if arg('fake_vision') == 'true':
+    if arg('vision') == 'true':          # 실제 비전 (T2-6). 화면 창은 기본으로 끔 (원격 실행 · 디스플레이 없음)
+        nodes.append(Node(package='scv_detection', executable='scv_detection_manager', namespace=ns, output='screen',
+                          parameters=[{'show': arg('vision_show') == 'true', 'device': arg('vision_device')}]))
+    elif arg('fake_vision') == 'true':
         nodes.append(script(os.path.join(manager_test, 'mock_inspect_facility_server.py')))
     return nodes
 
@@ -72,7 +75,10 @@ def generate_launch_description():
                               description='Nav2 를 띄우는 시간 [s]. mission_executor 가 undock·초기 pose 를 끝낸 뒤여야 한다'),
         DeclareLaunchArgument('rssi_freq', default_value='0', description='측정 AP 채널 고정 [MHz] (0 = 찾기, 전체 대역 스캔이 통신을 끊음)'),
         DeclareLaunchArgument('rssi', default_value='true', description='RSSI 측정(rssi_scanner · manual_tagger). 로봇에 얹지 않은 PC 면 false'),
-        DeclareLaunchArgument('fake_vision', default_value='true', description='가짜 inspect_facility 서버 (2초 뒤 NORMAL)'),
+        DeclareLaunchArgument('vision', default_value='false', description='실제 비전 노드 scv_detection_manager (켜면 fake_vision 무시)'),
+        DeclareLaunchArgument('vision_show', default_value='false', description='비전 결과 창 (로봇 PC 에 화면이 있을 때만)'),
+        DeclareLaunchArgument('vision_device', default_value='auto', description='YOLO 장치 (auto · cpu · cuda:0)'),
+        DeclareLaunchArgument('fake_vision', default_value='true', description='가짜 inspect_facility 서비스 (2초 뒤 NORMAL)'),
         # 한 launch 에 노드가 많을 때 SUPER_CLIENT 면 Nav2 lifecycle 응답을 놓친 적이 있다 (미니 프로젝트, 4번 로봇)
         SetEnvironmentVariable('ROS_SUPER_CLIENT', 'False'),
         OpaqueFunction(function=_nodes),

@@ -19,7 +19,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/InspectFacility.srv"
   "action/ExecuteTask.action"
   "action/PreciseMeasure.action"
-  "action/InspectFacility.action"   # IF-05 옛 액션 — 10/14 서비스로 바뀜, T2-6 통합 때 mission_executor 를 바꾸고 지운다
   DEPENDENCIES builtin_interfaces geometry_msgs sensor_msgs
 )
 

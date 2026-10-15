@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # PLAN 5-2·4-1: 다른 팀 노드 대신 쓰는 가짜 서버
-#   {ns}/inspect_facility (비전): 자세 보정 피드백 1번 → 2초 뒤 NORMAL
+#   {ns}/inspect_facility (비전, 서비스 IF-05): 2초 뒤 NORMAL
 #   {ns}/survey/precise (RSSI): duration_s 동안 1초마다 피드백 → 고정 값
 #   {ns}/keepout_mask (RSSI): -p mask:=true 일 때 map 과 같은 크기의 마스크에 사각형 하나를 점유(100)로 발행
 #   python3 fake_servers.py --ros-args -r __ns:=/robot3
 #   python3 fake_servers.py --ros-args -r __ns:=/robot3 -p mask:=true -p rect:="[1.0, 2.0, 2.0, 3.0]" -p clear_after:=30.0
 # rect = [x0, y0, x1, y1] (m, map 좌표). clear_after 초 뒤 빈 마스크로 바꿔 해제도 확인 (0 이면 해제 안 함)
-#   -p adjust_yaw:=1.5 -p adjust_forward:=0.3   # 자세 보정 피드백 값 (기본 0.1 rad·0.05 m). 보정 중 취소 시험용
 import time
 
 import rclpy
@@ -16,7 +15,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from nav_msgs.msg import OccupancyGrid
-from scv_msgs.action import InspectFacility, PreciseMeasure
+from scv_msgs.action import PreciseMeasure
+from scv_msgs.srv import InspectFacility
 from scv_msgs.msg import InspectionResult
 
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -26,24 +26,20 @@ class FakeServers(Node):
     def __init__(self):
         super().__init__('fake_servers')
         cb = ReentrantCallbackGroup()
-        ActionServer(self, InspectFacility, 'inspect_facility', self.inspect, callback_group=cb)
+        self.create_service(InspectFacility, 'inspect_facility', self.inspect, callback_group=cb)
         ActionServer(self, PreciseMeasure, 'survey/precise', self.precise, callback_group=cb)
         if self.declare_parameter('mask', False).value:
             self.rect = self.declare_parameter('rect', [1.0, 2.0, 2.0, 3.0]).value
             self.clear_after = self.declare_parameter('clear_after', 0.0).value
             self.mask_pub = self.create_publisher(OccupancyGrid, 'keepout_mask', LATCHED)
             self.create_subscription(OccupancyGrid, 'map', self.on_map, LATCHED)
-        self.adjust = (self.declare_parameter('adjust_yaw', 0.1).value, self.declare_parameter('adjust_forward', 0.05).value)   # 보정 중 취소 시험용
         self.get_logger().info('fake_servers ready')
 
-    def inspect(self, gh):
-        g = gh.request
+    def inspect(self, g, res):
         self.get_logger().info(f'inspect_facility {g.facility_id} kind={g.kind} run_id={g.run_id}')
-        gh.publish_feedback(InspectFacility.Feedback(attempt=1, adjust_yaw=self.adjust[0], adjust_forward_m=self.adjust[1],
-                                                     note='fake: 조금 돌고 앞으로'))
         time.sleep(2.0)
-        gh.succeed()
-        return InspectFacility.Result(verdict=InspectionResult.NORMAL, detail='fake', image_ref='')
+        res.verdict, res.detail, res.image_ref = InspectionResult.NORMAL, 'fake', ''
+        return res
 
     def precise(self, gh):
         n = gh.request.duration_s
