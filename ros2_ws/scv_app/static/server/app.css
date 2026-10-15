@@ -370,9 +370,9 @@ main #map { height: 64vh; min-height: 420px; }
 .maplegend i.ln { width: 18px; height: 0; border-top: 2.5px solid #475569; display: inline-block; }
 .maplegend i.ln.dash { border-top-style: dashed; }
 .maplegend .grad i.bar { width: 120px; height: 8px; border-radius: 4px; display: inline-block;
-  background: linear-gradient(90deg, hsl(12,72%,52%), hsl(60,67%,48%), hsl(120,60%,44%), hsl(175,52%,40%)); }
+  background: linear-gradient(90deg, hsl(240,90%,48%), hsl(180,90%,50%), hsl(120,90%,50%), hsl(60,90%,50%), hsl(0,90%,48%)); }
 .maplegend .grad small { font-size: 10.5px; }
-.maplegend i.um { width: 12px; height: 12px; background: #e2e8f0; border: 1px solid #94a3b8; display: inline-block; }
+.maplegend i.um { width: 12px; height: 12px; background: #cbd5e1; border: 1px solid #94a3b8; display: inline-block; }
 .maplegend i.ff { width: 14px; height: 14px; border: 2px solid #dc2626; background: #fecaca; color: #dc2626; font-style: normal; font-size: 12px; line-height: 10px; text-align: center; display: inline-block; }
 .maplegend i.sp { width: 8px; height: 8px; border-radius: 50%; background: hsl(120,60%,44%); display: inline-block; }
 .maplegend input[type=range] { width: 90px; }

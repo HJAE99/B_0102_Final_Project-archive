@@ -205,10 +205,11 @@ const rotatedImage = (url) => new Promise((ok, bad) => {
   img.src = url;
 });
 
-// RSSI 색 — 약함(따뜻한 색) → 강함(청록), −90 ~ −40 dBm 이어지는 색 (시안). 후보 기준(thr)은 표 · 후보 표시에 그대로
+// RSSI 색 — 약함 파랑 → 강함 빨강 (10/15 PM), −85 ~ −35 dBm 을 파랑(240°) → 청록 → 초록 → 노랑 → 빨강(0°) 으로 또렷하게
+const RSSI_LO = -85, RSSI_HI = -35;
 const rssiGrad = (v) => {
-  const t = Math.max(0, Math.min(1, (v + 90) / 50));
-  return `hsl(${Math.round(12 + t * 163)}, ${Math.round(72 - t * 20)}%, ${Math.round(52 - t * 12)}%)`;
+  const t = Math.max(0, Math.min(1, (v - RSSI_LO) / (RSSI_HI - RSSI_LO)));
+  return `hsl(${Math.round(240 - t * 240)}, 90%, ${Math.round(48 + Math.sin(t * Math.PI) * 4)}%)`;
 };
 const rssiColor = (v, thr) => (v < thr ? '#dc2626' : v < thr + 10 ? '#f59e0b' : '#16a34a');
 
@@ -217,8 +218,8 @@ const LAYERS = [
   ['raw', '원본 지도'], ['cells', '셀 원본'], ['plan', '계획 경로'], ['track', '방문 궤적'], ['samples', 'NetSample'], ['unmeasured', '미측정'],
   ['failed', '도달 실패'], ['keepout', '회피 구역'], ['fac', '설비'], ['dock', '관측·Dock'], ['zone', '구역'], ['grid', '격자·값'],
 ];
-const MONITOR_LAYERS = ['plan', 'track', 'cells', 'fac', 'dock', 'zone', 'grid', 'raw'];
-const MONITOR_DEFAULT = { plan: true, track: true, fac: true, dock: true };
+const MONITOR_LAYERS = ['plan', 'track', 'unmeasured', 'cells', 'fac', 'dock', 'zone', 'grid', 'raw'];
+const MONITOR_DEFAULT = { plan: true, track: true, unmeasured: true, fac: true, dock: true };
 const HISTORY_DEFAULT = { cells: true, track: true, samples: true, unmeasured: true, failed: true, fac: true };
 const ALL_ON = Object.fromEntries(LAYERS.map(([k]) => [k, true]));
 function useLayers(key, def) {                         // 화면마다 켠 레이어를 기억 (브라우저 저장, 못 쓰면 기본값)
@@ -243,9 +244,10 @@ function OrientSelect() {
 function MapLegend({ opacity, setOpacity, history }) {
   return html`<div class="maplegend">
     <span class="lk"><i class="ln dash" style=${{ borderTopColor: PLAN_COLOR }}></i>계획 경로</span><span class="lk"><i class="ln"></i>방문 궤적</span>
-    <span class="lk grad">RSSI <i class="bar"></i><small>약 −90</small><small>−65</small><small>−40 dBm 강</small></span>
+    <span class="lk grad">RSSI <small>약(나쁨) −85</small><i class="bar"></i><small>−35 dBm 강(좋음)</small></span>
+    <span class="lk"><i class="um"></i>미측정 (지나갔지만 신호 없음)</span>
     <label class="lk">농도 <input type="range" min="0.15" max="0.9" step="0.05" value=${opacity} onInput=${(e) => setOpacity(Number(e.target.value))} /></label>
-    ${history && html`<span class="lk"><i class="um"></i>미측정 · 표본 없음</span><span class="lk"><i class="ff">×</i>도달 실패 · 실행 사유 있음</span>
+    ${history && html`<span class="lk"><i class="ff">×</i>도달 실패 · 실행 사유 있음</span>
       <span class="lk"><i class="sp"></i>NetSample (속 빈 점 = 위치 불확실)</span>`}
   </div>`;
 }
@@ -541,11 +543,13 @@ function drawOverlay(L, layer, m, ov, P, lay = {}, opacity = 0.55) {
         icon: L.divIcon({ className: 'cell-val', iconSize: null, html: v ? `<b>${Math.round(v[0])}</b>` : `<small>${id}</small>` }) }).addTo(layer);
     });
   }
-  if (lay.unmeasured && ov.sectors) {                  // 미측정 — 이 회차에 배정된 섹터 칸 중 표본이 없는 칸 (회색 빈 칸)
-    (m.cells || []).forEach(([id, ix, iy, sector]) => {
-      if (!ov.sectors.includes(String(sector)) || best[id]) return;
-      rect([ix, iy], { weight: 1, color: '#94a3b8', fillColor: '#e2e8f0', fillOpacity: 0.55, dashArray: null })
-        .bindTooltip(`칸 ${id} (${ix},${iy}) · 미측정 — 유효 표본 없음`, { direction: 'top' }).addTo(layer);
+  if (lay.unmeasured) {                                // 미측정 — 로봇이 지나간 칸(방문 궤적) 중 신호 표본이 없는 칸만 회색. 안 간 칸은 그대로 둠
+    const visited = new Set();
+    Object.values(ov.tracks || {}).forEach((pts) => pts.forEach(([, x, y]) => visited.add(`${Math.floor((x - m.origin_x) / g)},${Math.floor((y - m.origin_y) / g)}`)));
+    (m.cells || []).forEach(([id, ix, iy]) => {
+      if (!visited.has(`${ix},${iy}`) || best[id]) return;
+      rect([ix, iy], { weight: 1, color: '#94a3b8', fillColor: '#cbd5e1', fillOpacity: 0.8, dashArray: null })
+        .bindTooltip(`칸 ${id} (${ix},${iy}) · 미측정 — 지나갔지만 신호 표본 없음`, { direction: 'top' }).addTo(layer);
     });
   }
   if (lay.track) {                                     // 방문 궤적 — 실선, 5초 넘게 끊긴 곳은 잇지 않음
