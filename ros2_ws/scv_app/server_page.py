@@ -1406,6 +1406,8 @@ import collections
 IM_LOCK = threading.Lock()                             # task 번호 · 단계 생성이 겹치지 않게 (inspection_manager 전체)
 CURRENT_RUN: dict[str, Any] = {"run_id": None}         # 메모리 — 진행 중 run_id (시작할 때 runs에서 복원)
 RECENT_EVENTS: collections.deque = collections.deque(maxlen=1000)   # 메모리 — 최근 이벤트 (시작할 때 robot_events에서)
+ROBOT_PLAN: dict[str, list] = {}                         # ros 모드 — robot_id → Nav2 전역 경로 점 [(x, y)] (ros_bridge, 모니터 지도)
+ESTOP: dict[str, bool] = {"on": False}                   # ros 모드 — 비상정지 중 (ros_bridge, 「재개」 버튼)
 LIVE_CELLS: dict[int, dict[int, dict[int, list[float]]]] = {}       # 메모리 — run → cell → ap → [n, sum, sumsq, last] (히트맵)
 AP_SEEN: dict[int, float] = {}                         # ap_id → 그 SSID 값을 마지막으로 받은 시각(monotonic)
 GRID_CACHE: dict[int, dict[str, Any]] = {}             # map_id → {"cells": {(ix, iy): (cell_id, sector)}, "ox", "oy", "g"}
@@ -2407,7 +2409,7 @@ def ui_extra() -> dict[str, Any]:
                            "WHERE m.is_active ORDER BY a.ap_id").fetchall()
         f = start_form(conn)
     return {"aps": aps, "start": {k: f[k] for k in ("can_start", "problems", "running", "target_ap")}
-            | {"robots": f["robots"]}, "run_owner": RUN_OWNER}
+            | {"robots": f["robots"]}, "run_owner": RUN_OWNER, "estopped": ESTOP["on"] and bool(f["running"])}
 
 
 @app.websocket("/ws/ui")
@@ -2425,9 +2427,10 @@ async def ws_ui(ws: WebSocket):
             cur = CURRENT_RUN["run_id"]
             with MEM_LOCK:                             # 진행 중 순찰의 이벤트만 (순찰이 없으면 비움)
                 events = [e for e in RECENT_EVENTS if cur and e.get("run_id") == cur][-30:]
+                plans = {k: list(v) for k, v in ROBOT_PLAN.items()}
             await ws.send_json({"type": "robots", "ts": datetime.now(timezone.utc).isoformat(),
                                 "timeout_s": status_timeout(), "robots": snap, "run_id": cur,
-                                "events": json.loads(json.dumps(events, default=str)), **extra})
+                                "events": json.loads(json.dumps(events, default=str)), "plans": plans, **extra})
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, RuntimeError):
         pass

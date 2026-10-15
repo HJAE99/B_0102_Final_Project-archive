@@ -168,10 +168,11 @@ function mapBounds(m) {
   return [[Math.min(...ys) - pad, Math.min(...xs) - pad], [Math.max(...ys) + pad, Math.max(...xs) + pad]];
 }
 
-function MapView({ m, robots, overlay, mini }) {
+function MapView({ m, robots, overlay, mini, plans }) {
   const ref = useRef(null);
   const mapRef = useRef(null);
   const robotLayerRef = useRef(null);
+  const planLayerRef = useRef(null);
   const overlayRef = useRef(null);
   useEffect(() => {
     const L = window.L;
@@ -265,6 +266,7 @@ function MapView({ m, robots, overlay, mini }) {
         .bindTooltip(`${f.facility_id}${f.has_gauge ? ' · 압력계' : ''}${f.is_active ? '' : ' (비활성)'}`, label('', 'fac')).addTo(info);
     });
     overlayRef.current = L.layerGroup().addTo(map);    // 작업 탭 — 히트맵 · 경로 · 후보 · 판정 (3-3차)
+    planLayerRef.current = L.layerGroup().addTo(map);   // 모니터 — Nav2 전역 경로 점 (RViz 처럼)
     robotLayerRef.current = L.layerGroup().addTo(map);  // 로봇 표시는 격자·번호 위
     markersRef.current = {};
     mapRef.current = map;
@@ -305,6 +307,17 @@ function MapView({ m, robots, overlay, mini }) {
       if (!seen.has(rid)) { layer.removeLayer(mk[rid].line); layer.removeLayer(mk[rid].dot); delete mk[rid]; }
     });
   }, [robots]);
+  // Nav2 전역 경로 (모니터만, plans 를 넘긴 지도) — 로봇 색 점, 1초마다 다시 그림
+  useEffect(() => {
+    const L = window.L, layer = planLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    Object.entries(plans || {}).forEach(([rid, pts]) => {
+      const col = robotColor(rid);
+      (pts || []).forEach(([x, y]) => L.circleMarker([y, x], { radius: 2, weight: 0, fillColor: col, fillOpacity: 0.85,
+        interactive: false }).addTo(layer));
+    });
+  }, [plans]);
   // 작업 탭 표시 — overlay가 바뀔 때마다 다시 그림 (지도 · 격자는 그대로)
   useEffect(() => {
     const layer = overlayRef.current;
@@ -407,8 +420,8 @@ function RobotPanel({ data, linked, onStart, onAbort, onResume }) {
     : !ready.length ? st.robots.map((r) => `${r.robot_id}: ${r.why.join(' · ')}`).join(' / ') : '';
   return html`<div class="rpanel">
     <h3>로봇 상태
-      ${onStart && (runId ? html`<button class="btn small danger" onClick=${() => onAbort(runId)}>${data.run_owner === 'ros' ? '비상정지' : '순찰 중단'} (run ${runId})</button>
-        ${data.run_owner === 'ros' && html`<button class="btn small" onClick=${onResume}>재개</button>`}`
+      ${onStart && (runId ? html`<button class="btn small danger" disabled=${data.estopped} onClick=${() => onAbort(runId)}>${data.run_owner === 'ros' ? (data.estopped ? '비상정지 중' : '비상정지') : '순찰 중단'} (run ${runId})</button>
+        ${data.run_owner === 'ros' && data.estopped && html`<button class="btn small primary" onClick=${onResume}>재개</button>`}`
         : html`<button class="btn small primary" disabled=${!st || !st.can_start} title=${why} onClick=${onStart}>순찰 시작</button>`)}
       <span class=${'live ' + (linked ? 'on' : '')}>${linked ? '실시간' : '연결 중…'}</span></h3>
     ${onStart && !runId && why && html`<p class="startwhy">순찰 시작 불가 — ${why}</p>`}
@@ -482,7 +495,7 @@ function MonitorPage({ onAuthLost }) {
         : state.error ? html`<div class="empty">${state.error}</div>`
         : !m ? html`<div class="empty">현재 지도가 없습니다. 정보 › 지도에서 지도를 등록하고 「현재 지도로」를 누르세요.</div>`
         : !m.width ? html`<div class="empty">지도 이미지 파일이 없습니다 (${m.image_key})</div>`
-        : html`<${MapView} m=${m} robots=${ui ? ui.robots : []} />`}
+        : html`<${MapView} m=${m} robots=${ui ? ui.robots : []} plans=${ui ? ui.plans : null} />`}
     </div>
     <div class="later">
       <${RobotPanel} data=${ui} linked=${linked} onStart=${() => setStarting(true)} onAbort=${abort} onResume=${resume} />

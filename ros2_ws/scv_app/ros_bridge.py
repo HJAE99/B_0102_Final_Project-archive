@@ -7,6 +7,8 @@
   B4 /{rid}/inspect/result (InspectionResult) → on_inspection · on_media          (점검 이력 · 사진)
   (작업 줄 tasks 는 inspection_manager 가 직접 DB 에 쓴다 — sync_tasks. 이 다리는 읽기만)
   B6 /{rid}/survey/sample (NetSample)        → on_samples (1초 묶음)             (히트맵 · 칸별 측정값)
+  B7 /{rid}/plan (nav_msgs/Path, Nav2 전역 경로) → sp.ROBOT_PLAN (모니터 지도에 점, RViz 처럼)
+  비상정지 여부: estop · resume 응답과 E7 · RESUMED 알림 → sp.ESTOP["on"] (모니터 「재개」 버튼)
 server_page 를 import 하지 않고 시작할 때 모듈(sp)을 받아 쓴다 (server_page 는 __main__ 으로 뜨므로)."""
 from __future__ import annotations
 
@@ -17,7 +19,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+import math
+
 import rclpy
+from nav_msgs.msg import Path
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -61,6 +66,7 @@ class Bridge(Node):
             self.create_subscription(InspectionResult, f"/{rid}/inspect/result",
                                      lambda m, r=rid: self.on_result(r, m), RESULT_QOS)
             self.create_subscription(NetSample, f"/{rid}/survey/sample", lambda m, r=rid: self.on_sample(r, m), SAMPLE_QOS)
+            self.create_subscription(Path, f"/{rid}/plan", lambda m, r=rid: self.on_plan(r, m), STATUS_QOS)
         self.create_subscription(Alert, "/inspection/alerts", self.on_alert, 10)
         self.clients_ = {n: self.create_client(Trigger, f"/inspection/{n}") for n in ("start", "estop", "resume")}
         self.create_timer(1.0, self.flush_samples)
@@ -79,7 +85,23 @@ class Bridge(Node):
             return {"ok": False, "message": f"/inspection/{name} 응답이 {timeout:.0f}초 안에 없습니다"}
         r = fut.result()
         self.refresh_run()
+        if r.success and name in ("estop", "resume"):
+            self.sp.ESTOP["on"] = name == "estop"
+        elif r.success and name == "start":
+            self.sp.ESTOP["on"] = False
         return {"ok": bool(r.success), "message": r.message}
+
+    # ------------------------------------------------------------ B7 Nav2 경로
+    def on_plan(self, rid: str, m: Path):
+        """전역 경로를 약 0.1 m 간격 점으로 줄여 둠 — 웹이 1초마다 가져감"""
+        pts, last = [], None
+        for p in m.poses:
+            xy = (round(p.pose.position.x, 2), round(p.pose.position.y, 2))
+            if last is None or math.dist(xy, last) >= 0.1:
+                pts.append(xy)
+                last = xy
+        with self.sp.MEM_LOCK:
+            self.sp.ROBOT_PLAN[rid] = pts
 
     def refresh_run(self):
         with self.sp.pool.connection() as conn:
@@ -99,6 +121,9 @@ class Bridge(Node):
             self.task[rid] = self.known_task(m.task_id)
             state = NAV_STATE[m.state] if m.state < len(NAV_STATE) else "UNKNOWN"
             self.docked[rid] = state == "DOCKED"
+            if not m.task_id or state == "DOCKED":         # 작업이 없으면 지난 경로는 지움
+                with self.sp.MEM_LOCK:
+                    self.sp.ROBOT_PLAN.pop(rid, None)
             body = {"stamp": iso(m.stamp), "run_id": m.run_id or None, "task_id": self.task[rid],
                     "nav_state": state, "progress": m.progress, "x": m.x, "y": m.y, "yaw": m.yaw,
                     "battery_pct": m.battery_percent, "is_docked": state == "DOCKED", "estop": state == "ESTOP"}
@@ -114,6 +139,8 @@ class Bridge(Node):
             self.refresh_run()
             run_id = self.sp.CURRENT_RUN["run_id"]
             rid = m.robot_id
+            if m.code in ("E7", "RESUMED", "RUN_COMPLETED"):  # 다른 브라우저에서 누른 것도 맞춤
+                self.sp.ESTOP["on"] = m.code == "E7"
             task = self.known_task(m.ref) if m.code in ("E1", "TASK_FAILED") else self.task.get(rid)
             ev = {"event_uid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{rid}|{m.code}|{m.ref}|{m.stamp.sec}.{m.stamp.nanosec}")),
                   "run_id": run_id, "task_id": task, "code": m.code, "level": LEVEL[min(m.level, 2)],
