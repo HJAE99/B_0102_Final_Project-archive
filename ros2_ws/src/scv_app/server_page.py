@@ -1984,13 +1984,14 @@ def on_samples(rid: str, run_id: int, samples: list[dict[str, Any]]) -> dict[str
                 c = cell_at(grid, float(s["x"]), float(s["y"])) if s.get("pose_ok") else None
                 tid = s.get("task_id") if s.get("task_id") in survey else None
                 row = conn.execute(
-                    "INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, cell_id, task_id) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING seq",
+                    "INSERT INTO net_samples (robot_id, run_id, seq, stamp, x, y, yaw, pose_ok, ap_id, rssi_dbm, cell_id, task_id, detected) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING seq",
                     (rid, run_id, int(s["seq"]), s["stamp"], s["x"], s["y"], s["yaw"], bool(s.get("pose_ok")), ap,
-                     int(s["rssi_dbm"]), c and c[0], tid)).fetchone()
+                     int(s["rssi_dbm"]) if s.get("detected", True) else None,
+                     c and c[0], tid, bool(s.get("detected", True)))).fetchone()
                 if row:
                     stored += 1
-                    if c:
+                    if c and s.get("detected", True):
                         inc.append((c[0], ap, float(s["rssi_dbm"])))
     with MEM_LOCK:                                     # 실시간 히트맵 누적 (이미 만든 run만 — 없으면 처음 볼 때 DB에서)
         live = LIVE_CELLS.get(run_id)
@@ -2008,7 +2009,7 @@ def live_cells(conn, run_id: int) -> dict[int, dict[int, list[float]]]:
     if live is None:                                   # 처음이거나 server_page 재시작 — net_samples에서 다시 집계
         live = {}
         for r in conn.execute("SELECT cell_id, ap_id, count(*) AS n, sum(rssi_dbm) AS s, sum(rssi_dbm * rssi_dbm) AS q "
-                              "FROM net_samples WHERE run_id = %s AND pose_ok AND cell_id IS NOT NULL "
+                              "FROM net_samples WHERE run_id = %s AND pose_ok AND detected AND cell_id IS NOT NULL "
                               "GROUP BY cell_id, ap_id", (run_id,)):
             live.setdefault(r["cell_id"], {})[r["ap_id"]] = [int(r["n"]), float(r["s"]), float(r["q"]), None]
         with MEM_LOCK:
@@ -2301,7 +2302,7 @@ def api_run_detail(run_id: int, request: Request, lite: bool = False):
                               "ORDER BY ts", (run_id,)):
             tracks.setdefault(r["robot_id"], []).append([round(float(r["t"]), 1), round(r["x"], 3), round(r["y"], 3)])
         points = [] if lite else conn.execute(
-            "SELECT robot_id, seq, stamp, x, y, pose_ok, ap_id, rssi_dbm, cell_id, task_id FROM net_samples "
+            "SELECT robot_id, seq, stamp, x, y, pose_ok, ap_id, detected, rssi_dbm, cell_id, task_id FROM net_samples "
             "WHERE run_id = %s ORDER BY stamp LIMIT 5000", (run_id,)).fetchall()
     with MEM_LOCK:                                     # 히트맵 = 칸 · AP별 평균(sum / n)
         heat = {cid: {ap: [round(v[1] / v[0], 1), int(v[0])] for ap, v in d.items() if v[0]} for cid, d in live.items()}
@@ -2369,7 +2370,8 @@ def api_task_detail(task_id: str, request: Request):
             if not tot["n"]:                           # 수행 시간으로 찾아도 없음 — 표본이 없는 task
                 basis = "none"
             rows = conn.execute(
-                f"SELECT n.cell_id, {cell_cols}, n.ap_id, count(*) AS n, min(n.stamp) AS first, "
+                f"SELECT n.cell_id, {cell_cols}, n.ap_id, count(*) AS n, "
+                f"count(*) FILTER (WHERE n.detected) AS n_detected, count(*) FILTER (WHERE NOT n.detected) AS n_missed, min(n.stamp) AS first, "
                 f"percentile_cont(0.5) WITHIN GROUP (ORDER BY n.rssi_dbm)::float8 AS median, "
                 f"round(avg(n.rssi_dbm), 1)::float8 AS mean, min(n.rssi_dbm) AS min, max(n.rssi_dbm) AS max "
                 f"FROM net_samples n JOIN grid_cells g USING (cell_id) WHERE {where} AND n.pose_ok "
@@ -2379,7 +2381,7 @@ def api_task_detail(task_id: str, request: Request):
                 c = cells.setdefault(r["cell_id"], {k: r[k] for k in ("cell_id", "ix", "iy", "sector", "center_x", "center_y")}
                                      | {"first": r["first"], "by_ap": {}})
                 c["first"] = min(c["first"], r["first"])
-                c["by_ap"][r["ap_id"]] = {k: r[k] for k in ("n", "median", "mean", "min", "max")}
+                c["by_ap"][r["ap_id"]] = {k: r[k] for k in ("n", "n_detected", "n_missed", "median", "mean", "min", "max")}
             out["survey"] = {"basis": basis, "totals": tot, "cells": sorted(cells.values(), key=lambda c: c["first"])}
             # 실제 순서 — 표본(rssi 주기)을 시각순으로. 같은 시각의 여러 AP 표본은 한 번으로 셈
             pts = conn.execute(f"SELECT DISTINCT n.stamp, n.cell_id, g.ix, g.iy FROM net_samples n JOIN grid_cells g USING (cell_id) "

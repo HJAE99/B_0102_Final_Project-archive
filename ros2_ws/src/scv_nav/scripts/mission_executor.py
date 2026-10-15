@@ -9,13 +9,14 @@
 # 작업 종류
 #   SURVEY_SEGMENT: waypoints 를 navigate_through_poses 로 통과
 #   FACILITY_CHECK: 마지막 waypoint 에 정밀 도착 → {ns}/inspect_facility 서비스 (IF-05, 10/14 PM 결정: 액션 → 서비스, 자세 보정 없음)
-#   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 30초
+#   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 10~15초
 #   DOCK:           waypoints(없으면 undock 위치)로 가서 dock
 # 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
 #   향하던 점이 global costmap 에서 장애물·inscribed 칸이 되면(지도에 없는 장애물이 점 위에 있음) 다가가기 전에 바로 건너뜀
 #   (그대로 두면 RPP 가 장애물에 2–5 cm 까지 붙어 돌지도 못하고 갇힘 — 10/14 시뮬, BackUp 복구 없음)
 # 배터리(E2): 30 % 이하 새 작업 거절(DOCK 제외), DOCK_PCT 이하 작업 취소 후 dock
 import math
+import re
 import threading
 import time
 
@@ -29,7 +30,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TwistStamped
 from nav2_msgs.msg import Costmap
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
+from action_msgs.msg import GoalStatus
 from nav2_simple_commander.robot_navigator import TaskResult
 from rcl_interfaces.srv import SetParameters
 from scv_msgs.action import ExecuteTask, PreciseMeasure
@@ -68,6 +70,11 @@ class MissionExecutor(Node):
         self.progress = 0.0
         self.warning = ''
         self.battery = 100.0
+        self.odom = None  # (수신 monotonic 시각, 선속도, 각속도)
+        self.precise_duration = int(self.declare_parameter("precise_duration_s", 15).value)
+        self.cell_size = float(self.declare_parameter("cell_size", 0.5).value)
+        if not 10 <= self.precise_duration <= 15:
+            raise ValueError("precise_duration_s는 10~15초여야 합니다")
         self.pose = None   # (x, y, yaw rad, 위치 표준편차 m)
         self.costmap = None   # 마지막 global costmap (nav2_msgs/Costmap, map 프레임)
         self.static_map = None   # 지도 (map_server). costmap 장애물 중 지도에 없는 것을 가리는 데 씀
@@ -85,6 +92,7 @@ class MissionExecutor(Node):
         self.create_subscription(DockStatus, 'dock_status', self.on_dock, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.on_pose,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_subscription(Odometry, "odom", self.on_odom, qos_profile_sensor_data)
         self.create_subscription(Costmap, 'global_costmap/costmap_raw', self.on_costmap, 1)
         self.create_subscription(OccupancyGrid, 'map', self.on_map,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -196,6 +204,10 @@ class MissionExecutor(Node):
         p.pose.orientation = pose.pose.orientation
         return p
 
+    def on_odom(self, msg):
+        v = msg.twist.twist
+        self.odom = (time.monotonic(), math.hypot(v.linear.x, v.linear.y), abs(v.angular.z))
+
     def on_pose(self, msg):
         p, q, c = msg.pose.pose.position, msg.pose.pose.orientation, msg.pose.covariance
         yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
@@ -263,7 +275,9 @@ class MissionExecutor(Node):
             gh.abort()
         r = ExecuteTask.Result(ok=ok, reason=reason)
         if measured:
-            r.rssi_median, r.rssi_iqr, r.n_samples = measured.rssi_median, measured.rssi_iqr, measured.n_samples
+            for field in ('rssi_median', 'rssi_iqr', 'n_samples', 'n_total', 'n_missed',
+                          'rssi_mean', 'duration_s', 'measurement_valid', 'measurement_reason'):
+                setattr(r, field, getattr(measured, field))
         return r
 
     def follow(self, gh, waypoints, precise=False):
@@ -424,11 +438,56 @@ class MissionExecutor(Node):
             return False, 'INSPECT_FAILED'
         return res.verdict != InspectionResult.UNCONFIRMED, f'verdict={res.verdict} {res.detail}'
 
+    def measurement_guard(self, target_cell, start_pose):
+        if self.battery <= DOCK_PCT:
+            return 'LOW_BATTERY'
+        if self.pose is None or self.pose[3] > self.pose_std_max:
+            return 'POSE_UNCERTAIN'
+        if self.static_map is None:
+            return 'NO_MAP'
+        ox, oy = self.static_map.info.origin.position.x, self.static_map.info.origin.position.y
+        actual = (math.floor((self.pose[0] - ox) / self.cell_size),
+                  math.floor((self.pose[1] - oy) / self.cell_size))
+        if actual != target_cell:
+            return 'OUTSIDE_TARGET_CELL'
+        if (math.dist(self.pose[:2], start_pose[:2]) > .05
+                or abs(math.atan2(math.sin(self.pose[2] - start_pose[2]),
+                                  math.cos(self.pose[2] - start_pose[2]))) > .10):
+            return 'MOVED_DURING_MEASUREMENT'
+        if self.odom is None or time.monotonic() - self.odom[0] > 1:
+            return 'NO_FRESH_ODOM'
+        if self.odom[1] > .02 or self.odom[2] > .05:
+            return 'NOT_STATIONARY'
+        return ''
+
     def measure(self, gh):
-        res, reason = self.call_action(self.precise_cli, PreciseMeasure.Goal(duration_s=30), gh)
+        target = re.fullmatch(r'cell:(-?\d+),(-?\d+)', gh.request.target_ref)
+        if target is None or self.pose is None:
+            return False, 'INVALID_MEASUREMENT_TARGET', None
+        cell = tuple(map(int, target.groups()))
+        self.stop()
+        # 남은 속도로 바로 실패하지 않게 멈출 때까지 최대 2초 기다린 뒤 그 자리를 기준으로 삼는다 (10/15 통합 브랜치)
+        until = time.monotonic() + 2
+        while time.monotonic() < until and not gh.is_cancel_requested and not (
+                self.odom and time.monotonic() - self.odom[0] <= 1 and self.odom[1] <= .02 and self.odom[2] <= .05):
+            time.sleep(.1)
+        start = self.pose
+        # 새 창을 열기 전에 1초간 정지 확인. 측정 중에도 동일한 조건을 계속 확인한다.
+        until = time.monotonic() + 1
+        while time.monotonic() < until:
+            reason = 'CANCELED' if gh.is_cancel_requested else self.measurement_guard(cell, start)
+            if reason:
+                return False, reason, None
+            time.sleep(.1)
+        res, reason = self.call_action(
+            self.precise_cli, PreciseMeasure.Goal(duration_s=self.precise_duration), gh,
+            each=lambda: self.measurement_guard(cell, start))
         if res is None:
             return False, reason, None
-        return True, f'median={res.rssi_median:.1f} iqr={res.rssi_iqr:.1f} n={res.n_samples}', res
+        reason = self.measurement_guard(cell, start)
+        if reason:
+            res.measurement_valid, res.measurement_reason = False, reason
+        return res.measurement_valid, res.measurement_reason, res
 
     def call_action(self, client, goal, gh, on_fb=None, each=None):
         # 다른 노드의 액션을 보내고 결과를 기다림. 작업이 취소되면 그 액션도 취소
@@ -446,9 +505,15 @@ class MissionExecutor(Node):
                 h.cancel_goal_async()
                 return None, 'CANCELED'
             if each:
-                each()
+                reason = each()
+                if reason:
+                    h.cancel_goal_async()
+                    return None, reason
             time.sleep(0.1)
-        return r.result().result, ''
+        outcome = r.result()
+        if outcome.status != GoalStatus.STATUS_SUCCEEDED:
+            return None, getattr(outcome.result, 'measurement_reason', '') or 'ACTION_FAILED'
+        return outcome.result, ''
 
     def go_dock(self, gh, waypoints):
         if self.nav.getDockedStatus():

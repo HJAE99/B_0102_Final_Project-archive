@@ -189,12 +189,13 @@ class Bridge(Node):
 
     # ------------------------------------------------------------ B6 표본
     def on_sample(self, rid: str, m: NetSample):
-        if not m.detected or self.docked.get(rid):         # 미검출(RSSI 없음) · 도크 위는 넣지 않음
+        if self.docked.get(rid):                         # 미검출도 스캔 시도 1회로 보존한다
             return
         with self.lock:
             self.samples.setdefault(rid, []).append(
                 {"seq": m.seq, "stamp": iso(m.stamp), "x": m.x, "y": m.y, "yaw": m.yaw, "pose_ok": m.pose_ok,
-                 "rssi_dbm": m.rssi_dbm, "task_id": self.task.get(rid)})
+                 "detected": bool(m.detected), "rssi_dbm": m.rssi_dbm if m.detected else None,
+                 "task_id": self.task.get(rid)})
 
     def flush_samples(self):
         with self.lock:

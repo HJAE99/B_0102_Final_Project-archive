@@ -6,6 +6,7 @@ from pathlib import Path
 import rclpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PoseStamped
+from action_msgs.msg import GoalStatus
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
@@ -21,6 +22,7 @@ from scv_msgs.msg import Alert, Candidate, InspectionResult, RobotStatus
 from scv_msgs.srv import Reassign
 from scv_survey.cellmap_store import open_store, read_map_yaml
 from scv_survey.heatmap import cell_center, cell_index, keepout_mask
+from scv_survey.remeasurement import MIN_SAMPLES, classify
 from std_srvs.srv import Trigger
 
 from .manager_core import (
@@ -122,8 +124,8 @@ class InspectionManager(Node):
         self.declare_parameter("survey_split_m", 0.5)
         self.declare_parameter("passed_goal_radius_m", 0.35)
         self.declare_parameter("shadow_dbm", -72.0)
-        self.declare_parameter("max_remeasure_per_robot", 5)
-        # 재측정은 음영·미검출 후보의 30초 정밀 측정이다 (TEST_PLAN). 미측정 칸은 넣지 않는다
+        self.declare_parameter("max_remeasure_per_robot", 0)  # 0: 전체 후보
+        # 1차 측정에서 미검출된 칸만 10~15초 정지 재측정 (선택 2차 작업, 10/15 PM). 약한 신호 칸 · 미측정 메우기는 넣지 않는다
         self.declare_parameter("include_unmeasured", False)
         self.declare_parameter("dock_keepout_radius_m", 0.6)
         self.declare_parameter("writer_node", "cell_map_writer")
@@ -254,6 +256,8 @@ class InspectionManager(Node):
         self.canceling_task_ids = set()
         self.seen_candidate_ids = set()
         self.pending_candidates = {}
+        self.pending_remeasure_results = {}
+        self.confirmed_cells = set()
         # 이번 회차 측정 작업에서 장애물로 못 간 칸 (mission_executor 결과 reason). 미측정이면 채우기(재측정 후보)에서 뺀다
         self.blocked_cells = set()
         self.seen_inspection_results = set()
@@ -450,6 +454,8 @@ class InspectionManager(Node):
             self.publish_mask(robot_id, set())
         self.seen_candidate_ids.clear()
         self.pending_candidates.clear()
+        self.pending_remeasure_results.clear()
+        self.confirmed_cells.clear()
         self.seen_inspection_results.clear()
 
         for robot_id, zone_id in self.zone_by_robot.items():
@@ -523,9 +529,18 @@ class InspectionManager(Node):
             return
         self.synced_tasks.update(keys)
 
+    def retry_remeasure_results(self) -> None:
+        """저장 못 한 재측정 결과를 같은 값으로 다시 저장 (다시 재지 않음). 순찰은 멈추지 않는다 (10/15 PM)."""
+        for task_id, (robot_id, result) in list(self.pending_remeasure_results.items()):
+            task = self.core.tasks.get(task_id)
+            if task is None or self.apply_remeasure(robot_id, task, result):
+                self.pending_remeasure_results.pop(task_id, None)
+
     def dispatch_next_task(self) -> None:
         if self.core.run_state != RunState.RUNNING:
             return
+        if self.pending_remeasure_results:
+            self.retry_remeasure_results()
         if self.core.patrol_phase in {
             PatrolPhase.WAITING_CANDIDATES,
             PatrolPhase.WAITING_KEEPOUT,
@@ -730,7 +745,7 @@ class InspectionManager(Node):
     def on_task_result(self, robot_id: str, task_id: str, future) -> None:
         self.active_goals.pop(task_id, None)
         task = self.core.tasks.get(task_id)
-        if task is None:
+        if task is None or task.state == TaskState.CANCELED:
             return
 
         if task_id in self.canceling_task_ids:
@@ -748,7 +763,11 @@ class InspectionManager(Node):
             return
 
         try:
-            result = future.result().result
+            wrapped = future.result()
+            result = wrapped.result
+            if getattr(wrapped, 'status', GoalStatus.STATUS_SUCCEEDED) != GoalStatus.STATUS_SUCCEEDED:
+                result.ok = False
+                result.reason = result.reason or 'ACTION_NOT_SUCCEEDED'
         except Exception as exc:
             if task.state == TaskState.CANCELED:
                 return
@@ -763,6 +782,20 @@ class InspectionManager(Node):
                 f"작업 결과 수신 실패: {exc}",
             )
             return
+
+        if result.ok and task.task_type == ExecuteTask.Goal.REINSPECTION:
+            state = self.remeasure_state(result)
+            if state is None or re.fullmatch(r'cell:(-?\d+),(-?\d+)', task.target_ref) is None:
+                result.ok, result.reason = False, 'UNCONFIRMED: invalid or insufficient measurement'
+            elif not self.apply_remeasure(robot_id, task, result):
+                # 저장 실패: 판정 알림(CLEARED/REMAINS)은 저장된 뒤에만. 작업은 끝내고 다음으로 진행, 저장은 dispatch 마다 재시도
+                self.pending_remeasure_results[task_id] = (robot_id, result)
+                result.reason = 'SAVE_PENDING'
+                self.publish_alert(level=Alert.LEVEL_WARN, code='SAVE_PENDING', robot_id=robot_id,
+                                   ref=task.target_ref, message='재측정 결과 저장 실패 — 판정은 저장된 뒤 알림, 순찰은 계속')
+        if not result.ok and task.task_type == ExecuteTask.Goal.REINSPECTION:
+            self.publish_alert(level=Alert.LEVEL_WARN, code='UNCONFIRMED', robot_id=robot_id,
+                               ref=task.target_ref, message=result.reason or '재점검 판정 불가')
 
         self.core.finish_task(
             task_id,
@@ -780,7 +813,6 @@ class InspectionManager(Node):
                     ref=task.candidate_id,
                     message="네트워크 후보 재측정 작업을 완료했습니다.",
                 )
-                self.apply_remeasure(robot_id, task, result)
         else:
             message = f"작업 실패: {result.reason or '사유 없음'}"
             self.publish_task_failure(robot_id, task_id, message)
@@ -890,7 +922,7 @@ class InspectionManager(Node):
             return {}
 
     def queue_cell_candidates(self) -> None:
-        """자기 섹터의 미검출·음영·미측정 칸을 그 로봇의 재측정 후보로 넣는다."""
+        """자기 섹터에서 1차 측정 때 미검출된 칸(include_unmeasured 면 미측정 칸도)을 그 로봇의 재측정 후보로 넣는다."""
         cells = self.read_cells()
         if not cells:
             return
@@ -905,6 +937,7 @@ class InspectionManager(Node):
                 int(self.get_parameter("max_remeasure_per_robot").value),
                 bool(self.get_parameter("include_unmeasured").value),
                 self.blocked_cells,
+                min_samples=MIN_SAMPLES,
             )
 
             for ix, iy in targets:
@@ -926,51 +959,46 @@ class InspectionManager(Node):
                     candidate,
                 )
 
-    def apply_remeasure(self, robot_id: str, task, result) -> None:
-        """재측정 값으로 칸 상태를 다시 정해 저장한다 (target_ref 가 cell:ix,iy 일 때)."""
-        cell = re.fullmatch(r"cell:(-?\d+),(-?\d+)", task.target_ref)
-        if cell is None:
-            return
+    def remeasure_state(self, result):
+        # 이전 액션/문자열 결과에는 미검출 수가 없다. 추측해 정상으로 해제하지 않는다.
+        nd, nm, total = (getattr(result, k, 0) for k in ('n_samples', 'n_missed', 'n_total'))
+        valid = (getattr(result, 'measurement_valid', False)
+                 and 10 <= getattr(result, 'duration_s', 0) <= 16
+                 and total == nd + nm)
+        return classify(getattr(result, 'rssi_median', None), nd, nm, valid=valid,
+                        threshold=float(self.get_parameter('shadow_dbm').value))
 
-        # mission_executor 가 Result 필드를 채우지 않으면 reason 에서 읽는다
-        text = re.search(r"median=(-?[\d.]+).*?n=(\d+)", result.reason)
-        if result.n_samples:
-            count, median = result.n_samples, result.rssi_median
-        elif text:
-            count, median = int(text.group(2)), float(text.group(1))
-        else:
-            count, median = 0, 0.0
-
-        if count == 0:
-            state = "miss"
-        elif median < float(self.get_parameter("shadow_dbm").value):
-            state = "shadow"
-        else:
-            state = "normal"
-
+    def apply_remeasure(self, robot_id: str, task, result) -> bool:
+        """판정 가능하고 저장에 성공했을 때만 알림·회피 상태를 확정한다."""
+        cell = re.fullmatch(r'cell:(-?\d+),(-?\d+)', task.target_ref)
+        state = self.remeasure_state(result)
+        if cell is None or state is None:
+            return False
+        ix, iy = int(cell.group(1)), int(cell.group(2))
         try:
-            self.store.update_cell(
-                self.core.run_id,
-                int(cell.group(1)),
-                int(cell.group(2)),
-                state,
-                median if count else None,
-                count,
-            )
-        except RuntimeError as exc:
-            self.get_logger().error(f"칸 상태를 쓰지 못했습니다: {exc}")
-
-        cleared = state == "normal"
+            saved = self.store.update_cell(
+                self.core.run_id, ix, iy, state,
+                result.rssi_median if result.n_samples else None, result.n_total,
+                mean=result.rssi_mean if result.n_samples else None,
+                n_detected=result.n_samples, n_missed=result.n_missed)
+        except (RuntimeError, OSError) as exc:
+            self.get_logger().error(f'재측정 저장 실패 — 판정 확정 보류: {exc}')
+            return False
+        if not saved:
+            self.get_logger().error(f'{task.target_ref}: 저장 대상 칸 없음 — 판정 확정 보류')
+            return False
+        if state == 'normal':
+            self.confirmed_cells.discard((ix, iy))
+        else:
+            self.confirmed_cells.add((ix, iy))
         self.publish_alert(
-            level=Alert.LEVEL_INFO if cleared else Alert.LEVEL_WARN,
-            code="CLEARED" if cleared else "REMAINS",
-            robot_id=robot_id,
+            level=Alert.LEVEL_INFO if state == 'normal' else Alert.LEVEL_WARN,
+            code='CLEARED' if state == 'normal' else 'REMAINS', robot_id=robot_id,
             ref=task.target_ref,
-            message=(
-                f"{task.target_ref} 재측정: {state} "
-                f"(median={median:.1f} dBm, n={count})"
-            ),
-        )
+            message=f'{task.target_ref} 재점검: {state} '
+                    f'(median={result.rssi_median if result.n_samples else None}, '
+                    f'detected={result.n_samples}, missed={result.n_missed}, total={result.n_total})')
+        return True
 
     def begin_facility_phase(self) -> None:
         """남은 음영·미검출 칸을 회피 마스크로 내고 설비 점검·Dock 작업을 만든다."""
@@ -981,7 +1009,7 @@ class InspectionManager(Node):
 
         cells = self.read_cells()
         blocked = mask_cells(
-            cells,
+            {c: row for c, row in cells.items() if c in self.confirmed_cells},
             self.cell_size,
             origin,
             [

@@ -79,7 +79,7 @@ class NetworkMapEngine(Node):
         mask_topic = self.declare_parameter('mask_topic', '/keepout_mask').value
         self.shadow_dbm = float(self.declare_parameter('shadow_dbm', float(SHADOW_DBM)).value)
         self.mask_margin = float(self.declare_parameter('mask_margin', 0.0).value)
-        self.mask_min_samples = int(self.declare_parameter('min_samples_for_mask', 2).value)
+        self.mask_min_samples = int(self.declare_parameter('min_samples_for_mask', 3).value)
 
         self.grid = SurveyGrid(cell_size=cell)
         self.dirty = True

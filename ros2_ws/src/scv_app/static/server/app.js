@@ -208,6 +208,7 @@ const rotatedImage = (url) => new Promise((ok, bad) => {
 // RSSI 색 — 약함 파랑 → 강함 빨강 (10/15 PM), −85 ~ −35 dBm 을 파랑(240°) → 청록 → 초록 → 노랑 → 빨강(0°) 으로 또렷하게
 const RSSI_LO = -85, RSSI_HI = -35;
 const rssiGrad = (v) => {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '#94a3b8';
   const t = Math.max(0, Math.min(1, (v - RSSI_LO) / (RSSI_HI - RSSI_LO)));
   return `hsl(${Math.round(240 - t * 240)}, 90%, ${Math.round(48 + Math.sin(t * Math.PI) * 4)}%)`;
 };
@@ -533,7 +534,7 @@ function drawOverlay(L, layer, m, ov, P, lay = {}, opacity = 0.55) {
       const c = byId[cid];
       if (!c) return;
       rect(c, { weight: 1, color: rssiGrad(mean), opacity: 0.9, fillColor: rssiGrad(mean), fillOpacity: 0.12 })
-        .bindTooltip(`칸 ${cid} (${c[0]},${c[1]}) · ${(ov.apName || {})[ap] || ap} 평균 ${mean} dBm · 표본 ${n}`, { direction: 'top' }).addTo(layer);
+        .bindTooltip(`칸 ${cid} (${c[0]},${c[1]}) · ${(ov.apName || {})[ap] || ap} ${mean == null ? '검출값 없음' : '평균 ' + mean + ' dBm'} · 표본 ${n}`, { direction: 'top' }).addTo(layer);
     });
   }
   if (lay.grid) {                                      // 격자 · 값 — 칸 번호 위에 대표값
@@ -572,8 +573,8 @@ function drawOverlay(L, layer, m, ov, P, lay = {}, opacity = 0.55) {
   if (lay.samples) {                                   // NetSample — 개별 표본 점 (위치 불확실 = 속 빈 회색)
     (ov.points || []).forEach((s) => {
       const okp = s.pose_ok;
-      L.circleMarker(P(s.x, s.y), { radius: 3, weight: okp ? 0 : 1.2, color: '#64748b', fill: okp, fillColor: rssiGrad(s.rssi_dbm), fillOpacity: 0.95 })
-        .bindTooltip(`${s.robot_id} · seq ${s.seq} · ${hm(s.stamp)}<br>(${fmtNum(Math.round(s.x * 100) / 100)}, ${fmtNum(Math.round(s.y * 100) / 100)}) · ${s.rssi_dbm} dBm${okp ? '' : ' · 위치 불확실(칸 집계 제외)'}${s.task_id ? '<br>' + s.task_id : ''}`, { direction: 'top' }).addTo(layer);
+      L.circleMarker(P(s.x, s.y), { radius: 3, weight: okp ? 0 : 1.2, color: '#64748b', fill: okp, fillColor: s.detected === false ? '#94a3b8' : rssiGrad(s.rssi_dbm), fillOpacity: 0.95 })
+        .bindTooltip(`${s.robot_id} · seq ${s.seq} · ${hm(s.stamp)}<br>(${fmtNum(Math.round(s.x * 100) / 100)}, ${fmtNum(Math.round(s.y * 100) / 100)}) · ${s.detected === false ? 'AP 미검출' : s.rssi_dbm + ' dBm'}${okp ? '' : ' · 위치 불확실(칸 집계 제외)'}${s.task_id ? '<br>' + s.task_id : ''}`, { direction: 'top' }).addTo(layer);
     });
   }
   if (lay.failed) {                                    // 도달 실패 — 붉은 테두리 칸 + ×, 실행 사유
@@ -1003,7 +1004,7 @@ function TaskDetail({ taskId, m, onClose, onAuthLost }) {
   if (d && m) {
     const heat = {};
     ((d.survey && d.survey.cells) || []).forEach((c) => {
-      heat[c.cell_id] = Object.fromEntries(Object.entries(c.by_ap).map(([ap, v]) => [ap, [v.median, v.n]]));
+      heat[c.cell_id] = Object.fromEntries(Object.entries(c.by_ap).map(([ap, v]) => [ap, [v.median, v.n_detected ?? v.n]]));
     });
     const cands = d.candidates || (d.candidate ? [d.candidate] : []);
     const ins = (d.inspections || []).map((i) => ({ ...i, facility_id: d.facility.facility_id,
