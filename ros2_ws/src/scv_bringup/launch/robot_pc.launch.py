@@ -52,7 +52,7 @@ def _nodes(context):
     # 띄울 때)는 iw scan 이 그 PC 의 Wi-Fi 를 매초 채널 밖으로 끌고 나가 관제 · Discovery Server 연결이 끊긴다 (10/15 Victus)
     if arg('rssi') == 'true':
         nodes.append(include('scv_survey', 'laptop_test.launch.py', pose_source='tf', robot_ns=ns, rviz='false',
-                             iface=arg('iface'), ssid=arg('ssid')))
+                             iface=arg('iface'), ssid=arg('ssid'), rssi_freq=arg('rssi_freq')))
     if arg('fake_vision') == 'true':
         nodes.append(script(os.path.join(manager_test, 'mock_inspect_facility_server.py')))
     return nodes
@@ -70,6 +70,7 @@ def generate_launch_description():
                               description='localization 뒤 mission_executor(undock · 초기 pose)를 띄우는 시간 [s]'),
         DeclareLaunchArgument('nav2_delay', default_value='30.0',
                               description='Nav2 를 띄우는 시간 [s]. mission_executor 가 undock·초기 pose 를 끝낸 뒤여야 한다'),
+        DeclareLaunchArgument('rssi_freq', default_value='0', description='측정 AP 채널 고정 [MHz] (0 = 찾기, 전체 대역 스캔이 통신을 끊음)'),
         DeclareLaunchArgument('rssi', default_value='true', description='RSSI 측정(rssi_scanner · manual_tagger). 로봇에 얹지 않은 PC 면 false'),
         DeclareLaunchArgument('fake_vision', default_value='true', description='가짜 inspect_facility 서버 (2초 뒤 NORMAL)'),
         # 한 launch 에 노드가 많을 때 SUPER_CLIENT 면 Nav2 lifecycle 응답을 놓친 적이 있다 (미니 프로젝트, 4번 로봇)

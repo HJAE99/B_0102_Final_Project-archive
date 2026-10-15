@@ -58,6 +58,7 @@ class RssiScanner(Node):
         self.rescan_after_miss = self.declare_parameter('rescan_after_miss', 3).value
         self.full_scan_interval = self.declare_parameter('full_scan_interval', 60.0).value
         self.scan_retries = self.declare_parameter('scan_retries', 2).value
+        self.fixed_freq = int(self.declare_parameter('fixed_freq', 0).value)   # >0: 그 채널만 (전체 대역 스캔 안 함)
         self.log_samples = self.declare_parameter('log_samples', True).value
         status_period = self.declare_parameter('status_period', 10.0).value
         if self.method not in ('scan', 'link'):
@@ -90,7 +91,7 @@ class RssiScanner(Node):
     def _new_tracker(self, ssid):
         return HotspotTracker(ssid=ssid, pattern=self.pattern,
                               rescan_after_miss=self.rescan_after_miss,
-                              full_scan_interval=self.full_scan_interval)
+                              full_scan_interval=self.full_scan_interval, fixed_freq=self.fixed_freq)
 
     def on_param(self, params):
         for p in params:

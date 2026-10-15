@@ -206,13 +206,15 @@ class HotspotTracker:
     """
 
     def __init__(self, ssid: str = '', pattern: str = 'iPhone',
-                 rescan_after_miss: int = 3, full_scan_interval: float = 60.0):
+                 rescan_after_miss: int = 3, full_scan_interval: float = 60.0, fixed_freq: int = 0):
         self.manual = bool(ssid)
         self.ssid = ssid
         self.pattern = pattern
         self.rescan_after_miss = max(1, int(rescan_after_miss))
         self.full_scan_interval = full_scan_interval
-        self.freq: Optional[int] = None
+        # fixed_freq > 0 이면 그 채널만 잰다 — 전체 대역 스캔을 아예 하지 않음 (스캔마다 수 초씩 공유기 채널을 떠나 통신이 끊김, 10/15)
+        self.fixed = int(fixed_freq) if fixed_freq else 0
+        self.freq: Optional[int] = self.fixed or None
         self.misses = 0
         self.last_full = -math.inf
 
@@ -220,6 +222,8 @@ class HotspotTracker:
         """이번에 스캔할 주파수. None 이면 전체 대역, [] 이면 이번엔 스캔하지 않음.
         전체 대역 능동 스캔(4~7 s)은 그동안 무선랜이 공유기 채널을 떠나 ROS 통신 · 같은 공유기의 다른 PC 까지 흔든다
         (10/15 핫스팟이 꺼진 동안 쉬지 않고 돌아 Nav2 bringup · 관제 연결이 끊김) → 한 번도 못 찾았어도 full_scan_interval 마다만"""
+        if self.fixed:
+            return [self.fixed]
         if self.freq is None:
             return None if now - self.last_full >= self.full_scan_interval else []
         if self.misses >= self.rescan_after_miss and now - self.last_full >= self.full_scan_interval:

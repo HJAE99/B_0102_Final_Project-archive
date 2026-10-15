@@ -200,3 +200,12 @@ def test_tracker_off_then_on():
     r = tr.update(on, full=True, now=24.0)
     assert r.target is not None and tr.misses == 0 and tr.next_freqs(25.0) == [2412]
     assert any('채널 바뀜' in e for e in r.events) and any('다시 검출' in e for e in r.events)
+
+
+def test_tracker_fixed_freq_never_full_scan():
+    # 채널을 고정하면 처음부터 그 채널만 — 못 찾아도 전체 대역 스캔을 하지 않음 (10/15 Wi-Fi 단절)
+    tr = HotspotTracker(ssid='iPhone', fixed_freq=5745)
+    assert tr.next_freqs(0.0) == [5745]
+    for t in range(1, 200):
+        tr.update([], full=False, now=float(t))
+        assert tr.next_freqs(float(t)) == [5745]
