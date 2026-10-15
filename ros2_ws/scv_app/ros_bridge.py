@@ -129,7 +129,7 @@ class Bridge(Node):
                             to_db = True
                     elif rid and m.code in DB_CODES:
                         to_db = bool(task) or m.code not in NEED_TASK
-                    if to_db:
+                    if to_db and rid:                           # E7 은 위에서 로봇마다 넣음 (rid "" 로 또 넣으면 FK 위반 · 롤백)
                         self.sp.add_event(conn, rid, ev | {"source": "control" if m.code in CONTROL_CODES else "robot"})
             if not to_db:                                  # DB 규칙 밖 (RUN_STARTED · KEEPOUT_BLOCKED …) — 화면에만
                 ts = ev["ts"].isoformat()
