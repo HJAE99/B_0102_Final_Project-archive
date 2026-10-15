@@ -2,7 +2,7 @@
 # PLAN 5-1·5-2·5-3·3-4·4-2: IF-11 {ns}/execute_task 액션 서버 + IF-12 {ns}/status 1 Hz. 작업 한 건씩 받아 Nav2 로 실행
 #   python3 mission_executor.py --ros-args -r __ns:=/robot3
 #   (undock 상태로 다른 자리에서 다시 켤 때만 -p x:=… -p y:=… -p yaw:=… 로 그 자리 좌표를 줌)
-# 시작: Dock 에 있으면 undock → 초기 pose 설정 → Nav2 활성화 대기 (dock_init.py 를 합침)
+# 시작: Dock 에 있으면 라이다만 켜고 그대로 → 초기 pose 설정 → Nav2 활성화 대기. undock 은 첫 작업 때 (10/15 통합 브랜치)
 # HOME 의 x, y(m), yaw(도)는 undock 직후 로봇의 지도(testbed_v1) 좌표. Dock 에서는 lidar 가 꺼져 있어 이 위치를 기준으로 함
 # 이 위치는 Dock 바로 앞이므로 배터리 부족·DOCK 작업 때 여기로 돌아와 dock 한다
 # 속도 상한 0.2 m/s 는 Nav2 controller·velocity_smoother 설정에서 건다 (이 파일에서 속도를 내지 않음)
@@ -522,6 +522,19 @@ def localize(nav, home):
             rclpy.spin_once(nav, timeout_sec=0.1)
 
 
+def start_lidar(nav):
+    # TurtleBot4 power_saver 가 Dock 에서 끈 RPLIDAR 모터를 켬 (rplidar_ros 의 {ns}/start_motor, std_srvs/Empty)
+    from std_srvs.srv import Empty
+    cli = nav.create_client(Empty, 'start_motor')
+    if not cli.wait_for_service(timeout_sec=5.0):
+        nav.get_logger().warn('start_motor 서비스 없음 — 라이다가 꺼져 있으면 Nav2 bringup 이 멈출 수 있음')
+        return
+    fut = cli.call_async(Empty.Request())
+    rclpy.spin_until_future_complete(nav, fut, timeout_sec=5.0)
+    nav.get_logger().info('Dock 위 — undock 하지 않고 라이다를 켬 (작업이 오면 undock)')
+    time.sleep(2.0)   # 모터가 돌고 scan 이 나올 때까지
+
+
 def settle(nav):
     # 제자리에서 좌우로 0.26 rad(15°) 돌려 AMCL 이 라이다로 방향을 맞추게 함 (10/12 시험: ±0.5 두 번과 차이 없음)
     for yaw in (0.26, -0.26):
@@ -540,13 +553,20 @@ def main():
             raise SystemExit(f'HOME 에 {nav.get_namespace()} 없음 — -p x y yaw 를 주세요')
         xyyaw = HOME[nav.get_namespace()]
     home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
-    if nav.getDockedStatus():
-        nav.undock()
+    # 10/15 통합 브랜치: 켤 때 undock 하지 않는다 (웹 「순찰 시작」 전까지 도크에서 충전). Dock 에서는 power_saver 가
+    # 라이다를 꺼 AMCL 이 map TF 를 못 내고 Nav2 bringup 이 멈추므로 라이다만 켠다. 이때 주는 home 은 Nav2 를 띄우기 위한
+    # 대략값이다 — 작업이 오면 execute() 가 undock → home 다시 → settle 로 맞춘다 (2·3회차가 이 길로 돎)
+    docked = nav.getDockedStatus()
+    if docked:
+        start_lidar(nav)
     # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
     localize(nav, home)
     nav.waitUntilNav2Active(localizer='robot_localization')   # 'amcl' 이면 공분산 0 인 (0,0) 초기 pose 를 다시 보냄
-    settle(nav)
+    if not docked:
+        settle(nav)   # 도크 위에서는 돌지 않음
     node = MissionExecutor(nav, home)
+    if docked:
+        node.state = S.STATE_DOCKED
     ex = MultiThreadedExecutor()
     ex.add_node(node)
     spin = threading.Thread(target=ex.spin, daemon=True)
