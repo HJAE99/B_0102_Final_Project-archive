@@ -337,9 +337,9 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       else L.imageOverlay(m.image_url, bounds, { className: 'mapimg', pane: 'floor' }).addTo(L1.current.base);
       freeRect(m).then((r) => {
         if (mapRef.current !== map || !r) return;
-        L.rectangle([P(r.x0, r.y0), P(r.x1, r.y1)], { pane: 'floor', color: '#9aa5ae', weight: 5, fillColor: '#ffffff', fillOpacity: 1, interactive: false })
+        L.rectangle([P(r.x0, r.y0), P(r.x1, r.y1)], { pane: 'floor', color: '#9aa5ae', weight: 10, fillColor: '#ffffff', fillOpacity: 1, interactive: false })
           .addTo(L1.current.plate);
-        (r.walls || []).forEach(([a, b]) => L.polyline([P(...a), P(...b)], { pane: 'floor', color: '#9aa5ae', weight: 5, lineCap: 'square', interactive: false })
+        (r.walls || []).forEach(([a, b]) => L.polyline([P(...a), P(...b)], { pane: 'floor', color: '#9aa5ae', weight: 10, lineCap: 'square', interactive: false })
           .addTo(L1.current.plate));
       }).catch(() => {});
     } else {                                           // 지도 이미지 파일이 없음 — 격자 · 등록 정보 범위로 맞추고 알림
