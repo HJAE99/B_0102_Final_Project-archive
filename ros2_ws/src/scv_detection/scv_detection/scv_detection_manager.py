@@ -54,7 +54,7 @@ FACILITY_MODES = {
     InspectionResult.KIND_EXTINGUISHER: 'yolo',   # 압력계 바늘 · ArUco
     InspectionResult.KIND_EXIT_LIGHT: 'yolo',     # 유도등 밝기
     InspectionResult.KIND_SHUTTER: 'shutter',     # 하강 구간 장애물 (RGB-D)
-    InspectionResult.KIND_RACK: 'rack',           # 기준 사진 대비 돌출
+    InspectionResult.KIND_RACK: 'yolo',           # YOLO 랙 · 박스 적재 판정 (rack_loading). 'rack' 은 이전 OpenCV 기준 사진 방식
 }
 VERDICTS = {'NORMAL': InspectionResult.NORMAL, 'ABNORMAL': InspectionResult.ABNORMAL}
 # 관제(ros_bridge · inspection_manager)는 inspect/result 를 TRANSIENT_LOCAL 로 받는다
@@ -870,10 +870,11 @@ class ScvDetectionManager(Node):
         if kind == InspectionResult.KIND_SHUTTER:
             status = (outcome.get('shutter') or {}).get('status')
             return status if status in VERDICTS else None
-        if kind == InspectionResult.KIND_RACK:            # 랙 모드는 판정이 났을 때만 결과를 남긴다
-            return 'NORMAL' if outcome.get('success') else 'ABNORMAL'
-        key = 'pressures' if kind == InspectionResult.KIND_EXTINGUISHER else 'exit_signs'
-        statuses = {r.get('status') for r in outcome.get(key) or []}
+        if kind == InspectionResult.KIND_RACK:            # yolo 모드의 랙 적재 판정 (랙마다 NORMAL · ABNORMAL · UNCONFIRMED)
+            reports = (outcome.get('rack_loading') or {}).get('racks')
+        else:
+            reports = outcome.get('pressures' if kind == InspectionResult.KIND_EXTINGUISHER else 'exit_signs')
+        statuses = {r.get('status') for r in reports or []}
         return 'ABNORMAL' if 'ABNORMAL' in statuses else 'NORMAL' if 'NORMAL' in statuses else None
 
     def _publish_facility_result(self, request, verdict, detail):
