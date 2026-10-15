@@ -560,7 +560,7 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
                 nav.get_logger().warn(f'{node_name} 30초 넘게 inactive — Nav2 bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
                 restart_nav2(nav)
                 stuck_since = None
-        else:
+        elif state is not None:                         # 응답 없음(None)은 타이머를 유지 — 섞여 들어와도 30초를 채움
             stuck_since = None
         time.sleep(1.0)
 
