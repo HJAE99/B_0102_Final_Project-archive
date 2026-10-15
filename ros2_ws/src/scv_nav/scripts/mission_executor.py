@@ -677,9 +677,8 @@ def main():
             raise SystemExit(f'HOME 에 {nav.get_namespace()} 없음 — -p x y yaw 를 주세요')
         xyyaw = HOME[nav.get_namespace()]
     home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
-    # 10/15 통합 브랜치: 켤 때 undock 하지 않는다 (웹 「순찰 시작」 전까지 도크에서 충전). Dock 에서는 power_saver 가
-    # 라이다를 꺼 AMCL 이 map TF 를 못 내고 Nav2 bringup 이 멈추므로 라이다만 켠다. 이때 주는 home 은 Nav2 를 띄우기 위한
-    # 대략값이다 — 작업이 오면 execute() 가 undock → home 다시 → settle 로 맞춘다 (2·3회차가 이 길로 돎)
+    # stay_docked:=true 일 때만: 켤 때 undock 하지 않고 도크에서 라이다만 켜 Nav2 를 띄운다 (Dock 에서는 power_saver 가
+    # 라이다를 꺼 AMCL 이 map TF 를 못 냄). 작업이 오면 execute() 가 undock → home 다시 → settle 로 맞춘다
     docked = nav.getDockedStatus()
     # 10/15 오후: 도크 위에서 start_motor 를 부르면 rplidar 드라이버가 죽는 일이 4번 재현 (robot4 ×3, robot3 ×1, 호출 직후 노드 사라짐)
     # → 기본은 오전 방식(켤 때 undock, 1~5회차 라이다 문제 0번). -p stay_docked:=true 일 때만 도크에 머물며 라이다를 켬
