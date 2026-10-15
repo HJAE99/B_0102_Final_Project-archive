@@ -176,7 +176,9 @@ def test_tracker_auto_locks_strongest_and_keeps_it():
 def test_tracker_auto_without_candidate_is_miss():
     tr = HotspotTracker(ssid='', pattern='Galaxy')
     r = tr.update(_fresh(), full=True, now=0.0)
-    assert r.target is None and tr.ssid == '' and tr.next_freqs(1.0) is None
+    assert r.target is None and tr.ssid == ''
+    # 못 찾았으면 전체 대역 스캔은 full_scan_interval(60 s) 마다만 — 그 사이는 스캔하지 않음 (10/15 Wi-Fi 단절)
+    assert tr.next_freqs(1.0) == [] and tr.next_freqs(60.0) is None
 
 
 def test_tracker_off_then_on():

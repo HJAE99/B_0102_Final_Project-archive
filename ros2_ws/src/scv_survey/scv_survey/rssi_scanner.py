@@ -56,7 +56,7 @@ class RssiScanner(Node):
         self.robot_id = self.declare_parameter('robot_id', 'laptop').value
         rate = self.declare_parameter('rate_hz', 1.0).value
         self.rescan_after_miss = self.declare_parameter('rescan_after_miss', 3).value
-        self.full_scan_interval = self.declare_parameter('full_scan_interval', 10.0).value
+        self.full_scan_interval = self.declare_parameter('full_scan_interval', 60.0).value
         self.scan_retries = self.declare_parameter('scan_retries', 2).value
         self.log_samples = self.declare_parameter('log_samples', True).value
         status_period = self.declare_parameter('status_period', 10.0).value
@@ -132,6 +132,9 @@ class RssiScanner(Node):
 
     def measure_scan(self):
         freqs = self.tracker.next_freqs(time.monotonic())
+        if freqs == []:                                # 전체 대역 스캔 간격 사이 — 스캔 없이 미검출로 보냄
+            self.publish(self.get_clock().now(), False, None)
+            return
         res, fresh = self.scan_once(freqs)
         t_start = res.start_boottime
         # 한 채널 스캔은 AP 가 있어도 4 번에 1 번꼴로 못 듣는다 (probe 응답 누락, 10/11 실측)

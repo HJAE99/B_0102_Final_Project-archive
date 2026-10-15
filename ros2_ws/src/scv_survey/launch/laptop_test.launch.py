@@ -152,7 +152,7 @@ def generate_launch_description():
                               description='이 횟수 연속 미검출이면 전체 대역 스캔으로 채널 재탐색'),
         DeclareLaunchArgument('scan_retries', default_value='2',
                               description='한 채널 스캔에서 못 들으면 같은 채널을 다시 스캔하는 횟수'),
-        DeclareLaunchArgument('full_scan_interval', default_value='10.0',
+        DeclareLaunchArgument('full_scan_interval', default_value='60.0',
                               description='재탐색 중 전체 대역 스캔 간격 [s] (한 번에 약 5 s)'),
         DeclareLaunchArgument('log_samples', default_value='true',
                               description='측정마다 SSID·dBm 한 줄 로그'),
