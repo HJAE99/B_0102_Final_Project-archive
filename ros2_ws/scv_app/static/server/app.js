@@ -406,7 +406,7 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
     if (!map || !base) return;
     const [show, hide] = lay.raw ? [base, plate] : [plate, base];
     if (map.hasLayer(hide)) map.removeLayer(hide);
-    if (!map.hasLayer(show)) { show.addTo(map); show.eachLayer((l) => l.bringToBack && l.bringToBack()); }
+    if (!map.hasLayer(show)) show.addTo(map);          // 둘 다 floor pane 이라 순서를 바꾸지 않음 (bringToBack 하면 칸막이가 흰 바닥 뒤로 숨음)
   }, [lay.raw, orient]);
   useEffect(() => {
     const L = window.L, info = L1.current.info;
