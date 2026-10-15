@@ -54,6 +54,17 @@ DEFAULT_OPTIONS = {
     'flying_pixel_depth_m': 0.10,
     # 잘린 구역은 볼록 껍질 모양이 프레임마다 조금씩 달라 50% 겹침 기준에서 확인 이력이 자주 지워졌다.
     'confirm_zone_overlap_ratio': 0.30,
+    # 구역 안정화·가림 처리(2026-10-15). 새 검출이 추적한 이전 구역과 이 IoU 이상 겹치면 새 검출(최신 모양)을 쓴다.
+    # 덜 겹치면 이전 프레임에 보이던 빨간 테이프 픽셀(영상 이동만큼 옮김)을 지금 '보임 / 물체에 가려짐(Depth가 이전
+    # 바닥 평면으로 계산한 바닥 거리보다 occlusion_margin_m 넘게 가까움) / 바닥이 보이는데 선이 없음'으로 나눈다.
+    # '선이 없음'이 zone_max_missing_red_ratio 이하이고 '보임'이 zone_min_visible_red_ratio 이상이면 이전 구역을 유지한다.
+    'zone_keep_iou': 0.95, 'occlusion_margin_m': 0.05, 'zone_min_visible_red_ratio': 0.30,
+    # 정상 프레임의 '사라짐'은 약 1%, 물체가 선을 가린 첫 장은 약 5%였다. 선 일부를 지운 시험(물체 없음)은 약 14%.
+    'zone_max_missing_red_ratio': 0.08,
+    # 한쪽 선 보간(2026-10-15). 셔터 띠는 좌우 두 긴 선이 일정 간격으로 평행하다(실측 폭 약 0.80m, 앞뒤 폭 일정).
+    # 바닥 평면 위에서 띠 방향과 side_line_max_angle_deg 이내, side_line_min_length_m 이상인 빨간 직선을 좌우 선으로 본다.
+    # 한쪽 선만 보이면(반대쪽이 처음부터 물체에 가려진 경우 등) 띠 안쪽으로 band_width_m 떨어진 평행선을 만들어 구역을 채운다.
+    'band_width_m': 0.80, 'side_line_max_angle_deg': 25.0, 'side_line_min_length_m': 0.5,
     'coverage_cell_m': 0.05, 'max_coverage_cells': 10000, 'min_coverage_ratio': 0.98,
     'min_valid_depth_ratio': 0.80, 'confirm_frames': 3, 'confirm_seconds': 0.5,
     'confirm_max_gap_seconds': 1.0,
@@ -97,13 +108,14 @@ def validate_options(**overrides):
                  'zone_fragment_join_min_area_ratio', 'floor_max_height_ratio',
                  'min_plane_inlier_ratio', 'min_coverage_ratio', 'min_valid_depth_ratio',
                  'max_tape_width_ratio', 'tracking_min_inlier_ratio', 'tracking_red_support_ratio',
-                 'plane_update_ratio', 'confirm_zone_overlap_ratio'):
+                 'plane_update_ratio', 'confirm_zone_overlap_ratio', 'zone_keep_iou', 'zone_min_visible_red_ratio',
+                 'zone_max_missing_red_ratio'):
         if not 0 < settings[name] < 1:
             raise ValueError(f'shutter_{name} must be within 0..1')
     positive = ('depth_min_m', 'depth_max_m', 'plane_distance_m', 'min_floor_span_m',
                 'min_obstacle_height_m', 'cluster_voxel_m', 'min_obstacle_area_m2',
                 'coverage_cell_m', 'confirm_seconds', 'confirm_max_gap_seconds', 'floor_noise_multiplier',
-                'geometry_max_gap_seconds')
+                'geometry_max_gap_seconds', 'occlusion_margin_m', 'band_width_m', 'side_line_min_length_m')
     if (any(settings[name] <= 0 for name in positive) or settings['boundary_tolerance_m'] < 0
             or settings['obstacle_boundary_inset_m'] < 0 or not 0 <= settings['obstacle_boundary_inset_ratio'] < 0.5
             or settings['obstacle_display_depth_tolerance_m'] < 0 or settings['flying_pixel_depth_m'] < 0):
@@ -112,7 +124,7 @@ def validate_options(**overrides):
             or settings['min_obstacle_height_m'] <= settings['plane_distance_m']
             or settings['min_plane_points'] < 3 or settings['max_plane_points'] < settings['min_plane_points']
             or settings['confirm_frames'] < 2 or settings['tracking_min_points'] < 4
-            or not 0 < settings['max_floor_tilt_deg'] < 45):
+            or not 0 < settings['max_floor_tilt_deg'] < 45 or not 0 < settings['side_line_max_angle_deg'] < 60):
         raise ValueError('invalid shutter depth limits, plane/height sensitivity or confirmation settings')
     return settings
 
@@ -593,12 +605,100 @@ def _find_zone(frame, settings, diagnostics=None, masks=None):
     return polygon, zone_mask, seed, complete
 
 
-def _tracked_zone(frame, detected, diagnostics, state, observation_time, settings, masks=None):
-    """이전 바닥 특징점의 이동과 현재 빨간 선을 확인해 흔들림을 줄인 구역을 반환한다.
+def _boundary_evidence(polygon, red, settings, depth_m=None, rays=None, plane=None):
+    """구역 다각형의 변을 따라 점을 찍어 변마다 빨간 선이 보이는 점·물체에 가려진 점의 수를 센다.
 
-    state는 이번 검사에서만 쓰는 영상·구역 이력이다. 실제 특징점과 빨간 선의 근거가 부족하거나
-    관측 공백이 길면 이전 위치를 쓰지 않는다. 로봇이 움직이면 측정한 영상 이동으로 경계를 옮긴다.
-    masks는 같은 사진으로 미리 만든 _red_masks 결과다. 주면 한 장에서 같은 마스크를 다시 계산하지 않는다.
+    반환값은 변 순서대로 {'samples': 표본 수, 'seen': 빨간 선 보임, 'occluded': 가려짐, 'border': 화면 가장자리 변} 목록이다.
+    빨간 선 보임은 red 마스크에서 red_join_ratio 크기 이내에 빨간 픽셀이 있는 경우다.
+    가려짐은 빨간 선이 안 보이는 점의 Depth가, plane([nx, ny, nz, d], 높이 = p·n + d)으로 계산한 그 픽셀의
+    바닥 거리보다 occlusion_margin_m 넘게 가까운 경우다. 즉 바닥 위 물체가 선을 덮고 있다는 뜻이다.
+    plane·depth_m·rays 중 하나라도 없으면 가려짐은 판단하지 않고 0으로 센다.
+    """
+    size = max(3, int(round(min(red.shape) * settings['red_join_ratio'])) | 1)
+    nearby = cv2.dilate(red, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))) > 0
+    height, width = red.shape
+    border = _edge_on_image_border(polygon, red.shape)
+    can_judge = plane is not None and depth_m is not None and rays is not None
+    if can_judge:
+        normal, offset = np.asarray(plane[:3], dtype=float), float(plane[3])
+    evidence = []
+    for index, (start, end) in enumerate(zip(polygon, np.roll(polygon, -1, axis=0))):
+        count = max(2, int(np.ceil(np.linalg.norm(np.asarray(end, float) - start))) + 1)
+        samples = np.rint(np.linspace(start, end, count)).astype(np.int32)
+        xs = np.clip(samples[:, 0], 0, width - 1)
+        ys = np.clip(samples[:, 1], 0, height - 1)
+        seen = nearby[ys, xs]
+        occluded = np.zeros(len(xs), dtype=bool)
+        if can_judge:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                floor_depth = -offset / (rays[ys, xs] @ normal)
+            measured = np.asarray(depth_m, dtype=float)[ys, xs]
+            occluded = (~seen & np.isfinite(measured) & (measured > 0) & np.isfinite(floor_depth)
+                        & (floor_depth > 0) & (measured < floor_depth - settings['occlusion_margin_m']))
+        evidence.append({'samples': len(xs), 'seen': int(np.count_nonzero(seen)),
+                         'occluded': int(np.count_nonzero(occluded)), 'border': bool(border[index])})
+    return evidence
+
+
+def _expected_red_state(expected, red, settings, depth_m=None, rays=None, plane=None):
+    """이전 프레임에 보이던 빨간 테이프 픽셀(expected, 영상 이동만큼 옮긴 마스크)이 지금 어떤 상태인지 비율로 반환한다.
+
+    반환값 {'seen': 지금도 빨간 선 근처, 'occluded': 선은 안 보이지만 그 자리에 바닥보다 가까운 물체가 있음,
+    'missing': 바닥이 보이는데(또는 판단할 수 없는데) 선이 없음}의 비율 합은 1이다. expected가 없거나 비면 missing=1이다.
+    가림은 plane([nx, ny, nz, d])으로 계산한 그 픽셀의 바닥 거리보다 Depth가 occlusion_margin_m 넘게 가까운 경우다.
+    """
+    if expected is None or not np.any(expected):
+        return {'seen': 0.0, 'occluded': 0.0, 'missing': 1.0}
+    size = max(3, int(round(min(red.shape) * settings['red_join_ratio'])) | 1)
+    nearby = cv2.dilate(red, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))) > 0
+    ys, xs = np.nonzero(expected)
+    seen = nearby[ys, xs]
+    occluded = np.zeros(len(ys), dtype=bool)
+    if plane is not None and depth_m is not None and rays is not None:
+        normal, offset = np.asarray(plane[:3], dtype=float), float(plane[3])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            floor_depth = -offset / (rays[ys, xs] @ normal)
+        measured = np.asarray(depth_m, dtype=float)[ys, xs]
+        occluded = (~seen & np.isfinite(measured) & (measured > 0) & np.isfinite(floor_depth)
+                    & (floor_depth > 0) & (measured < floor_depth - settings['occlusion_margin_m']))
+    total = len(ys)
+    seen_ratio = float(np.count_nonzero(seen) / total)
+    occluded_ratio = float(np.count_nonzero(occluded) / total)
+    return {'seen': seen_ratio, 'occluded': occluded_ratio, 'missing': max(0.0, 1.0 - seen_ratio - occluded_ratio)}
+
+
+def _explained_by_occlusion(evidence, settings):
+    """변별 근거로 (이전 구역을 유지해도 되는지, 네 변이 모두 근거로 설명되는지, 가려진 점 수)를 반환한다.
+
+    화면 가장자리에 잘린 변은 원래 선이 없으므로 판단에서 뺀다. 남은 변마다 '보임+가려짐' 비율이
+    min_boundary_support_ratio 이상이고, 남은 변 전체에서 빨간 선이 보이는 비율이 zone_min_visible_red_ratio
+    이상이어야 유지한다. 선이 하나도 안 보이는데 가림만으로 구역을 지어내지 않기 위한 조건이다.
+    """
+    inner = [edge for edge in evidence if not edge['border']]
+    if not inner:
+        return False, False, 0
+    total = sum(edge['samples'] for edge in inner)
+    seen = sum(edge['seen'] for edge in inner)
+    occluded = sum(edge['occluded'] for edge in inner)
+    each_edge = all((edge['seen'] + edge['occluded']) / edge['samples'] >= settings['min_boundary_support_ratio']
+                    for edge in inner)
+    keep = each_edge and seen / total >= settings['zone_min_visible_red_ratio']
+    return keep, each_edge and len(inner) == len(evidence), occluded
+
+
+def _tracked_zone(frame, detected, diagnostics, state, observation_time, settings, masks=None,
+                  depth_m=None, rays=None, plane=None):
+    """이전 구역을 영상 이동만큼 옮긴 추적 결과와 이번 검출을 비교해 안정된 구역을 반환한다.
+
+    state는 이번 검사에서만 쓰는 영상·구역 이력이다. 관측 공백이 길거나 특징점이 부족하면 추적하지 않는다.
+    선택 규칙(zone_tracking 진단값):
+    - 'verified_detection': 이번 검출이 추적한 이전 구역과 zone_keep_iou 이상 겹치면 이번 검출(최신 모양)을 쓴다.
+      추적 결과만 계속 쓰면 옛 모양에 고정되고 꼭짓점이 쌓였기 때문이다.
+    - 'verified_optical_flow' / 'kept_through_occlusion': 검출이 없거나 크게 다를 때, 이전 프레임에 보이던 빨간 테이프
+      픽셀이 지금도 보이거나 물체에 가려졌을 뿐이면(_expected_red_state) 이전 구역을 유지한다. 가린 비율이 2% 이상이면
+      kept_through_occlusion 이다. 바닥이 보이는데 선이 사라졌으면 선이 실제로 바뀐 것이라 유지하지 않는다.
+    - 'new_detection': 위 조건이 안 되면 이번 검출을 쓴다. 검출도 없으면 None 이다.
+    masks는 같은 사진으로 미리 만든 _red_masks 결과다. depth_m·rays·plane(이전 바닥 평면)이 있으면 가림을 판단한다.
     """
     _, red = masks if masks is not None else _red_masks(frame, settings)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -609,7 +709,7 @@ def _tracked_zone(frame, detected, diagnostics, state, observation_time, setting
     can_track = (previous_gray is not None and previous_gray.shape == gray.shape
                  and previous_polygon is not None and previous_time is not None
                  and 0 < observation_time - previous_time <= settings['geometry_max_gap_seconds'])
-    tracked = None
+    tracked = expected_red = None
     if can_track:
         mask = state.get('floor_mask')
         if mask is None:
@@ -639,34 +739,47 @@ def _tracked_zone(frame, detected, diagnostics, state, observation_time, setting
                                                        [0, gray.shape[0]-1]], np.float32)
                                     area, clipped = cv2.intersectConvexConvex(warped, bounds)
                                     if clipped is not None and area >= gray.size * settings['min_zone_area_ratio']:
-                                        polygon = np.rint(clipped.reshape(-1, 2)).astype(np.int32)
+                                        # 매번 잘라낼 때 생기는 작은 꼭짓점이 쌓이지 않도록 검출과 같은 방식으로 단순화한다.
+                                        hull = cv2.convexHull(np.rint(clipped.reshape(-1, 2)).astype(np.int32))
+                                        polygon = cv2.approxPolyDP(hull, cv2.arcLength(hull, True) * 0.01,
+                                                                   True).reshape(-1, 2)
                                         old_red = state.get('red_mask')
-                                        if old_red is not None:
+                                        if old_red is not None and len(polygon) >= 3:
                                             expected = cv2.warpPerspective(old_red.astype(np.uint8), matrix,
                                                                            (gray.shape[1], gray.shape[0]),
                                                                            flags=cv2.INTER_NEAREST) > 0
                                             nearby = cv2.dilate(red, np.ones((5, 5), np.uint8)) > 0
                                             support = np.mean(nearby[expected]) if np.any(expected) else 0.0
                                             diagnostics['tracking_red_support_ratio'] = float(support)
-                                            if support >= settings['tracking_red_support_ratio']:
-                                                zone_mask, seed, selected_red = _zone_masks(polygon, red, settings)
-                                                touches_edge = np.any((polygon <= 1)
-                                                                      | (polygon >= np.array(gray.shape[::-1]) - 2))
-                                                complete = (len(polygon) == 4 and not touches_edge
-                                                            and _boundary_supported(polygon, red, settings))
-                                                tracked = polygon, zone_mask, seed, complete
+                                            tracked, expected_red = polygon, expected
     chosen = detected
     if tracked is not None:
-        # 새로 보인 완전한 경계는 다시 잡고, 같은 구역의 색 검출 흔들림은 특징점 추적 결과를 쓴다.
-        if detected is None or (_same_zone(detected[0], tracked[0], settings['confirm_zone_overlap_ratio'])
-                                and not (detected[3] and not tracked[3])):
-            chosen = tracked
-            diagnostics['zone_tracking'] = 'verified_optical_flow'
+        if detected is not None and _same_zone(detected[0], tracked, settings['zone_keep_iou']):
+            # 이번 검출이 이전 구역과 맞으면 최신 검출을 쓴다(옛 모양에 고정되지 않게 한다).
+            diagnostics['zone_tracking'] = 'verified_detection'
+        else:
+            red_state = _expected_red_state(expected_red, red, settings, depth_m, rays, plane)
+            diagnostics.update(zone_red_seen_ratio=red_state['seen'], zone_red_occluded_ratio=red_state['occluded'],
+                               zone_red_missing_ratio=red_state['missing'])
+            if (red_state['missing'] <= settings['zone_max_missing_red_ratio']
+                    and red_state['seen'] >= settings['zone_min_visible_red_ratio']):
+                # 이전에 보이던 선이 지금도 보이거나 물체에 가려졌을 뿐이면 이전 구역을 유지한다.
+                # 바닥이 보이는데 선이 사라진 경우(선이 실제로 바뀜)는 유지하지 않고 이번 검출을 쓴다.
+                zone_mask, seed, _ = _zone_masks(tracked, red, settings)
+                evidence = _boundary_evidence(tracked, red, settings, depth_m, rays, plane)
+                _, all_edges, _ = _explained_by_occlusion(evidence, settings)
+                complete = len(tracked) == 4 and all_edges
+                chosen = tracked, zone_mask, seed, complete
+                diagnostics['zone_tracking'] = ('kept_through_occlusion' if red_state['occluded'] >= 0.02
+                                                else 'verified_optical_flow')
     if chosen is None:
         state.clear()
         return None
     polygon, zone_mask, seed, complete = chosen
     selected_red = (red > 0) & zone_mask
+    if diagnostics['zone_tracking'] in ('kept_through_occlusion', 'verified_optical_flow') and expected_red is not None:
+        # 이전 구역을 유지하는 동안에는 원래 테이프 위치도 함께 기억해, 가려진 선이 사라진 것인지 매 프레임 다시 확인한다.
+        selected_red = selected_red | (expected_red & zone_mask)
     if previous_polygon is not None and not _same_zone(polygon, previous_polygon,
                                                        settings['confirm_zone_overlap_ratio']):
         state.pop('plane', None)
@@ -676,6 +789,197 @@ def _tracked_zone(frame, detected, diagnostics, state, observation_time, setting
     diagnostics.update(_red_tape_mask=selected_red, red_pixel_count=int(np.count_nonzero(selected_red)),
                        zone_detection_reason='zone_found' if complete else 'zone_boundary_partial')
     return polygon, zone_mask, seed, complete
+
+
+def _floor_basis(plane):
+    """바닥 평면에서 (위쪽 법선, 앞 방향, 옆 방향) 단위 벡터를 카메라 좌표계로 반환한다.
+
+    앞 방향은 카메라 광축(z)을 바닥에 눕힌 방향이고, 옆 방향은 법선과 앞 방향에 수직이다.
+    바닥 위 점 P는 (옆 좌표 l, 앞 좌표 a)로 P = l·옆 + a·앞 - d·법선 으로 나타낼 수 있다.
+    """
+    normal = np.asarray(plane[:3], dtype=float)
+    forward = np.array([0.0, 0.0, 1.0]) - normal[2] * normal
+    forward /= np.linalg.norm(forward)
+    return normal, forward, np.cross(normal, forward)
+
+
+def _floor_side_lines(polygon, red, rays, plane, settings, axis):
+    """구역 근처 빨간 테이프 픽셀을 바닥 평면 좌표로 옮겨 띠 방향과 맞는 긴 직선을 찾아 옆 위치별로 묶어 반환한다.
+
+    axis는 바닥 2D 좌표(옆 l, 앞 a)에서의 띠 방향 단위 벡터다. 반환값은 (선 묶음 목록, 다른 빨간 점들의 옆 위치)이다.
+    선 묶음은 {'offset': 띠 방향에 수직인 옆 위치(m), 'center': 중심점, 'direction': 방향, 'length': 길이(m),
+    'start'/'end': 선 방향으로 잰 양 끝 위치}이다.
+    직선은 같은 순서의 무작위 표본(시드 고정)으로 차례로 찾아, 같은 점군이면 같은 결과가 나온다.
+    """
+    normal, forward, side = _floor_basis(plane)
+    offset = float(plane[3])
+    height, width = red.shape
+    near = np.zeros(red.shape, np.uint8)
+    cv2.fillConvexPoly(near, np.rint(polygon).astype(np.int32), 1)
+    grow = max(3, int(round(min(height, width) * 0.08)) | 1)
+    near = cv2.dilate(near, np.ones((grow, grow), np.uint8)) > 0
+    ys, xs = np.nonzero((red > 0) & near)
+    rng = np.random.default_rng(0)
+    if len(ys) > 5000:
+        keep = rng.choice(len(ys), 5000, replace=False)
+        ys, xs = ys[keep], xs[keep]
+    directions = rays[ys, xs]
+    denominators = directions @ normal
+    looking_down = denominators < -1e-3
+    lengths = -offset / denominators[looking_down]
+    points3d = directions[looking_down] * lengths[:, None]
+    points = np.column_stack((points3d @ side, points3d @ forward))
+    points = points[(points[:, 1] > 0) & (points[:, 1] < settings['depth_max_m'])]
+    across = np.array([-axis[1], axis[0]])
+    cosine = np.cos(np.deg2rad(settings['side_line_max_angle_deg']))
+    remaining = points
+    candidates = []
+    for _ in range(8):
+        if len(remaining) < 60:
+            break
+        # 후보 직선 200개를 한 번에 평가한다(두 점을 같은 순서로 뽑아 결과는 반복문과 같다).
+        pairs = np.array([rng.choice(len(remaining), 2, replace=False) for _ in range(200)])
+        firsts, vectors = remaining[pairs[:, 0]], remaining[pairs[:, 1]] - remaining[pairs[:, 0]]
+        norms = np.linalg.norm(vectors, axis=1)
+        usable = norms >= 0.05
+        if not np.any(usable):
+            break
+        firsts, vectors = firsts[usable], vectors[usable] / norms[usable, None]
+        normals_2d = np.column_stack((-vectors[:, 1], vectors[:, 0]))
+        offsets_2d = np.einsum('ij,ij->i', firsts, normals_2d)
+        counts = np.count_nonzero(np.abs(remaining @ normals_2d.T - offsets_2d) < 0.03, axis=0)
+        winner = int(np.argmax(counts))
+        best = np.abs(remaining @ normals_2d[winner] - offsets_2d[winner]) < 0.03
+        if np.count_nonzero(best) < max(60, 0.02 * len(points)):
+            break
+        line_points = remaining[best]
+        center = line_points.mean(axis=0)
+        _, _, vectors = np.linalg.svd(line_points - center, full_matrices=False)
+        direction = vectors[0] if vectors[0] @ axis >= 0 else -vectors[0]
+        along = line_points @ direction  # 선 자신의 방향으로 잰 범위(start/end)
+        length = float(np.percentile((line_points - center) @ direction, 98)
+                       - np.percentile((line_points - center) @ direction, 2))
+        if abs(direction @ axis) >= cosine and length >= settings['side_line_min_length_m']:
+            candidates.append({'offset': float(center @ across), 'center': center, 'direction': direction, 'length': length,
+                               'start': float(np.percentile(along, 2)), 'end': float(np.percentile(along, 98))})
+        remaining = remaining[~best]
+    # 옆 위치가 12cm 안쪽인 후보는 같은 테이프(테이프 양쪽 가장자리 등)로 묶는다.
+    groups = []
+    for candidate in sorted(candidates, key=lambda item: item['offset']):
+        if groups and candidate['offset'] - groups[-1][-1]['offset'] < 0.12:
+            groups[-1].append(candidate)
+        else:
+            groups.append([candidate])
+    lines = []
+    for group in groups:
+        weights = np.array([item['length'] for item in group])
+        direction = np.sum([item['direction'] * w for item, w in zip(group, weights)], axis=0)
+        lines.append({'offset': float(np.average([item['offset'] for item in group], weights=weights)),
+                      'center': np.average([item['center'] for item in group], axis=0, weights=weights),
+                      'direction': direction / np.linalg.norm(direction), 'length': float(weights.max()),
+                      'start': min(item['start'] for item in group), 'end': max(item['end'] for item in group)})
+    return lines, points @ across
+
+
+def _project_floor_points(points2d, plane, rays):
+    """바닥 2D 좌표(옆, 앞) 점들을 화면 픽셀 좌표로 바꾼다. 카메라 뒤쪽 점은 버린다.
+
+    rays에서 화면 가운데의 초점 거리·주점을 읽어 바늘구멍 모형으로 투영한다(가장자리 왜곡 몇 픽셀은 무시한다).
+    """
+    normal, forward, side = _floor_basis(plane)
+    points3d = (points2d[:, :1] * side + points2d[:, 1:2] * forward - float(plane[3]) * normal)
+    points3d = points3d[points3d[:, 2] > 0.05]
+    height, width = rays.shape[:2]
+    row, column = height // 2, width // 2
+    focal_x = 1.0 / (rays[row, column + 1, 0] - rays[row, column, 0])
+    focal_y = 1.0 / (rays[row + 1, column, 1] - rays[row, column, 1])
+    center_x = column - rays[row, column, 0] * focal_x
+    center_y = row - rays[row, column, 1] * focal_y
+    return np.column_stack((center_x + focal_x * points3d[:, 0] / points3d[:, 2],
+                            center_y + focal_y * points3d[:, 1] / points3d[:, 2]))
+
+
+def _complete_band(polygon, red, rays, plane, settings, state):
+    """좌우 긴 선으로 띠 사각형을 만들어 가려져 잘린 구역을 채운 다각형을 반환한다.
+
+    반환값은 (새 다각형 또는 None, 진단 사전)이다. 두 선이 모두(일부라도) 보이면 두 선 사이를 채우고 띠 방향을
+    state에 기억한다. 한쪽만 보이면 다른 빨간 점(사선·가로선)이 있는 쪽을 띠 안쪽으로 보고 band_width_m 떨어진
+    평행선을 만든다.
+    띠 사각형의 앞뒤 범위는 현재 구역 꼭짓점과 보이는 선의 범위로 정하고, 화면에 투영한 뒤 현재 구역과 합친다.
+    새 구역이 현재보다 3% 이상 넓어질 때만 쓴다. 선이 하나도 없으면 아무것도 지어내지 않는다.
+    """
+    axis = state.get('band_axis')
+    axis = np.array([0.0, 1.0]) if axis is None else np.asarray(axis, dtype=float)
+    lines, red_offsets = _floor_side_lines(polygon, red, rays, plane, settings, axis)
+    info = {'zone_side_lines': len(lines), 'zone_band_completion': 'none'}
+    if not lines:
+        return None, info
+    width = settings['band_width_m']
+    normal, forward, side = _floor_basis(plane)
+    # 가장 바깥 두 선 사이가 띠 폭 ±15% 일 때만 좌우 두 선으로 인정한다(사선 조각을 반대쪽 선으로 착각하지 않게).
+    both = len(lines) >= 2 and abs((lines[-1]['offset'] - lines[0]['offset']) - width) <= width * 0.15
+    corners = []
+    for x, y in np.asarray(polygon, dtype=float):
+        direction = rays[int(np.clip(y, 0, rays.shape[0] - 1)), int(np.clip(x, 0, rays.shape[1] - 1))]
+        denominator = direction @ normal
+        if denominator < -1e-3:
+            point = direction * (-float(plane[3]) / denominator)
+            corners.append((point @ side, point @ forward))
+    corners = np.asarray(corners).reshape(-1, 2)
+    if both:
+        # 두 선이 모두(일부라도) 보이면 두 선 사이를 띠로 채우고, 방향·폭을 기억해 다음 프레임의 띠 방향으로 쓴다.
+        used = [lines[0], lines[-1]]
+        direction = lines[0]['direction'] * lines[0]['length'] + lines[-1]['direction'] * lines[-1]['length']
+        axis = direction / np.linalg.norm(direction)
+        state['band_axis'] = axis.tolist()
+        across = np.array([-axis[1], axis[0]])
+        # 옆 위치는 실제로 쓰는 띠 방향 기준으로 다시 잰다(처음 가정한 방향과 몇 도 다를 수 있다).
+        laterals = (float(lines[0]['center'] @ across), float(lines[-1]['center'] @ across))
+        info['zone_band_width_m'] = float(abs(laterals[1] - laterals[0]))
+        mode = 'filled_between_both_sides'
+    else:
+        seen = max(lines, key=lambda item: item['length'])
+        used = [seen]
+        axis = seen['direction']
+        across = np.array([-axis[1], axis[0]])
+        others = red_offsets - seen['offset']
+        others = others[(np.abs(others) > 0.06) & (np.abs(others) < width * 1.3)]
+        seen_lateral = float(seen['center'] @ across)
+        if len(others):
+            sign = 1.0 if np.median(others) > 0 else -1.0
+        elif len(corners):
+            sign = 1.0 if np.mean(corners @ across) > seen_lateral else -1.0
+        else:
+            return None, info
+        laterals = (seen_lateral, seen_lateral + sign * width)
+        info.update(zone_band_seen_offset_m=seen_lateral, zone_band_side_sign=sign)
+        mode = 'interpolated_from_one_side'
+    # 띠 사각형의 앞뒤 범위는 실제로 보이는 좌우 선의 범위로만 정한다. 구역 꼭짓점까지 늘리면 가까운 쪽 끝선을
+    # 넘어 화면 맨 아래까지 채웠다. 선의 범위는 처음 가정한 방향 기준이라 지금 방향으로 다시 잰다.
+    ends = []
+    for line in used:
+        for distance in (line['start'], line['end']):
+            point = line['center'] + (distance - float(line['center'] @ line['direction'])) * line['direction']
+            ends.append(float(point @ axis))
+    start, end = min(ends), max(ends)
+    rectangle = []
+    for lateral in laterals:
+        for distance in np.linspace(start, end, 12):
+            rectangle.append(lateral * across + distance * axis)
+    pixels = _project_floor_points(np.asarray(rectangle), plane, rays)
+    if len(pixels) < 3:
+        return None, info
+    height, width_px = red.shape
+    hull = cv2.convexHull(np.vstack([pixels, np.asarray(polygon, dtype=float)]).astype(np.float32))
+    bounds = np.array([[0, 0], [width_px - 1, 0], [width_px - 1, height - 1], [0, height - 1]], np.float32)
+    area, clipped = cv2.intersectConvexConvex(hull.reshape(-1, 2), bounds)
+    if clipped is None or area < cv2.contourArea(np.asarray(polygon, np.float32)) * 1.03:
+        info['zone_band_completion'] = 'both_sides' if both else 'one_side_no_gain'
+        return None, info
+    hull = cv2.convexHull(np.rint(clipped.reshape(-1, 2)).astype(np.int32))
+    completed = cv2.approxPolyDP(hull, cv2.arcLength(hull, True) * 0.01, True).reshape(-1, 2)
+    info['zone_band_completion'] = mode
+    return completed, info
 
 
 def _floor_fit_distance(settings):
@@ -1066,8 +1370,10 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     red_masks = _red_masks(frame, settings)
     zone = _find_zone(frame, settings, diagnostics=zone_diagnostics, masks=red_masks)
     if observation_time is not None:
+        # 가림 판단에는 이전 프레임의 바닥 평면(고정 평면 모드면 그 평면)과 이번 Depth를 쓴다.
+        previous_plane = fixed_plane if fixed_plane is not None else geometry.get('plane')
         zone = _tracked_zone(frame, zone, zone_diagnostics, geometry, observation_time, settings,
-                             masks=red_masks)
+                             masks=red_masks, depth_m=depth_m, rays=rays, plane=previous_plane)
     report.update(zone_diagnostics)
     if zone is None:
         return report
@@ -1100,6 +1406,34 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     plane, ratio, noise = floor
     normal, offset = plane[:3], plane[3]
     report.update(plane=plane.tolist(), floor_inlier_ratio=ratio, floor_noise_m=noise)
+    # 좌우 긴 선 중 한쪽만 보이면(반대쪽이 물체에 가려짐 등) 띠 폭만큼 떨어진 평행선으로 구역을 채운다.
+    # 실제로 관측한 구역을 그대로 유지하는 중이면 그 구역이 이미 완성돼 있으므로 건너뛴다. 건너뛰지 않으면 완성된
+    # 구역 위에 띠 사각형을 한 번 더 합쳐 구역이 넘쳤다(가림 시험 정확도 0.996 → 0.945). 보간으로 만든 구역을
+    # 유지하는 중이면 계속 보간해 다듬는다(첫 장 보간이 덜 채워진 채 굳지 않게, 처음부터 가린 시험 복원율 0.925 → 개선).
+    keeping = report.get('zone_tracking') in ('kept_through_occlusion', 'verified_optical_flow')
+    if keeping and not geometry.get('zone_interpolated'):
+        completed, band_info = None, {'zone_band_completion': 'kept_previous_zone'}
+    else:
+        completed, band_info = _complete_band(polygon, red_masks[1], rays, plane, settings, geometry)
+    if completed is not None:
+        geometry['zone_interpolated'] = True
+    elif not keeping:
+        geometry['zone_interpolated'] = False
+    report.update(band_info)
+    if completed is not None:
+        polygon, complete = completed, False
+        filled = np.zeros(depth_m.shape, np.uint8)
+        cv2.fillConvexPoly(filled, np.rint(polygon).astype(np.int32), 1)
+        zone_mask = filled > 0
+        report.update(zone_polygon=polygon.tolist(), zone_complete=False, _zone_mask=zone_mask,
+                      zone_pixel_count=int(np.count_nonzero(zone_mask)),
+                      zone_detection_reason=('zone_filled_between_side_lines'
+                                             if band_info['zone_band_completion'] == 'filled_between_both_sides'
+                                             else 'zone_interpolated_from_one_side'),
+                      valid_depth_ratio=float(np.mean(valid[zone_mask])))
+        if observation_time is not None:
+            # 다음 프레임 추적도 보간한 구역을 기준으로 이어 가게 한다.
+            geometry.update(polygon=polygon.copy(), zone_mask=zone_mask)
     # 허용값을 잡음에 맞춰 늘리되 목표 장애물 높이까지 바닥으로 흡수하지 않게 상한을 둔다.
     floor_distance_cap = max(settings['plane_distance_m'],
                              settings['min_obstacle_height_m'] * settings['floor_max_height_ratio'])
@@ -1431,7 +1765,9 @@ def draw_result(frame, report, *, font_path='', font_size=24):
                        'degenerate_polygon': '구역 모양이 너무 얇음',
                        'zone_candidates_ambiguous': '여러 구역 후보가 비슷함',
                        'zone_boundary_partial': '일부 구역 검출',
-                       'zone_found': '전체 구역 검출'}
+                       'zone_found': '전체 구역 검출',
+                       'zone_interpolated_from_one_side': '한쪽 선으로 구역 보간',
+                       'zone_filled_between_side_lines': '좌우 선 사이로 구역 채움'}
         zone_reason = report.get('zone_detection_reason')
         tape_info = (f"빨간 선: {report['red_pixel_count']}픽셀 | "
                      f"구역 후보: {report.get('zone_candidate_count', 0)} | "

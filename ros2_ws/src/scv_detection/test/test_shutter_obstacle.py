@@ -206,3 +206,58 @@ def test_camera_height_check_suggests_focal_from_tf_height():
     assert abs(check['suggested_focal_px'] - 569.95 * 0.432 / 0.244) < 1e-6
     empty = shutter_obstacle.camera_height_check(None, 0.244, 569.95)
     assert empty['camera_height_ratio'] is None and empty['suggested_focal_px'] is None
+
+
+def test_expected_red_state_separates_seen_occluded_and_missing():
+    """이전에 보이던 빨간 선 픽셀을 '지금도 보임 / 물체에 가려짐 / 바닥이 보이는데 사라짐'으로 나눈다.
+
+    카메라가 바닥 0.25m 위에서 수평으로 보는 가상 장면이다. 선의 왼쪽 1/3은 그대로 보이고, 가운데 1/3은
+    바닥(그 행에서 1.0m)보다 가까운 물체(Depth 0.6m)가 덮고, 오른쪽 1/3은 선만 지워져 바닥 Depth가 그대로 보인다.
+    """
+    height, width, focal = 200, 300, 200.0
+    ys, xs = np.indices((height, width), dtype=float)
+    rays = np.dstack(((xs - 150) / focal, (ys - 100) / focal, np.ones((height, width))))
+    plane = np.array([0.0, -1.0, 0.0, 0.25])  # 높이 = 0.25 - y, 바닥은 카메라 아래 0.25m
+    floor_depth = np.where(rays[..., 1] > 1e-6, 0.25 / np.maximum(rays[..., 1], 1e-6), 0.0)
+    expected = np.zeros((height, width), bool)
+    expected[150:154, 30:270] = True  # 이전에 보이던 가로 테이프
+    red = np.zeros((height, width), np.uint8)
+    red[150:154, 30:110] = 255  # 왼쪽 1/3만 지금도 빨갛게 보임
+    depth = floor_depth.copy()
+    depth[120:160, 110:190] = 0.6  # 가운데 1/3을 덮는 가까운 물체(그 자리 바닥은 약 1.0m)
+    settings = shutter_obstacle.validate_options()
+    state = shutter_obstacle._expected_red_state(expected, red, settings, depth, rays, plane)
+    assert 0.25 < state['seen'] < 0.45 and 0.25 < state['occluded'] < 0.40 and 0.25 < state['missing'] < 0.40
+    # 바닥 평면을 모르면 가림을 판단하지 않으므로 보이지 않는 선은 모두 사라짐으로 센다.
+    unknown = shutter_obstacle._expected_red_state(expected, red, settings)
+    assert unknown['occluded'] == 0 and abs(unknown['seen'] + unknown['missing'] - 1) < 1e-9
+
+
+def test_one_side_line_fills_hidden_opposite_side():
+    """좌우 긴 선 중 오른쪽 선만 보이면 띠 폭(0.8m)만큼 떨어진 왼쪽 선 위치까지 구역을 채운다.
+
+    카메라가 바닥 0.25m 위에서 수평으로 보는 가상 장면이다. 바닥 좌표(옆, 앞)로 오른쪽 선(옆 +0.4m)과
+    띠 안쪽 사선 두 개를 화면에 그린다. 왼쪽 선(옆 -0.4m)은 물체에 가려졌다고 보고 그리지 않는다.
+    """
+    height, width, focal = 240, 320, 300.0
+    ys, xs = np.indices((height, width), dtype=float)
+    rays = np.dstack(((xs - 160) / focal, (ys - 120) / focal, np.ones((height, width))))
+    plane = np.array([0.0, -1.0, 0.0, 0.25])
+    red = np.zeros((height, width), np.uint8)
+
+    def draw(start, end):
+        """바닥 좌표 두 점 사이 선을 화면 빨간 마스크에 굵게 그린다."""
+        pts = shutter_obstacle._project_floor_points(np.linspace(start, end, 60), plane, rays)
+        cv2.polylines(red, [np.rint(pts).astype(np.int32)], False, 255, 4)
+
+    draw((0.4, 1.2), (0.4, 3.0))       # 오른쪽 긴 선
+    draw((-0.35, 1.6), (0.35, 2.0))     # 띠 안쪽 사선
+    draw((-0.35, 2.2), (0.35, 2.6))
+    polygon = cv2.convexHull(np.column_stack(np.nonzero(red)[::-1]).astype(np.int32)).reshape(-1, 2)
+    settings = shutter_obstacle.validate_options()
+    completed, info = shutter_obstacle._complete_band(polygon, red, rays, plane, settings, {})
+    assert completed is not None and info['zone_band_completion'] == 'interpolated_from_one_side'
+    hidden = shutter_obstacle._project_floor_points(np.array([[-0.38, 1.4], [-0.38, 2.0], [-0.38, 2.6]]), plane, rays)
+    for x, y in hidden:
+        assert cv2.pointPolygonTest(polygon.astype(np.float32), (float(x), float(y)), False) < 0  # 원래는 구역 밖
+        assert cv2.pointPolygonTest(completed.astype(np.float32), (float(x), float(y)), True) >= -3  # 보간 뒤 구역 안
