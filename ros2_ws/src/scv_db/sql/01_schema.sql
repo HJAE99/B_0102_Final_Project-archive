@@ -177,7 +177,7 @@ CREATE TABLE IF NOT EXISTS net_samples (
     yaw             REAL         NOT NULL,
     pose_ok         BOOLEAN      NOT NULL,
     ap_id           SMALLINT     NOT NULL REFERENCES aps (ap_id),
-    rssi_dbm        SMALLINT     NOT NULL CHECK (rssi_dbm BETWEEN -127 AND 0),
+    rssi_dbm        SMALLINT     CHECK (rssi_dbm BETWEEN -127 AND 0),
     cell_id         INT          REFERENCES grid_cells (cell_id),
     received_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     task_id         VARCHAR(40)  REFERENCES tasks (task_id),  -- 3-3차: 표본을 모은 측정 task (이력 「자세히」)
@@ -185,6 +185,16 @@ CREATE TABLE IF NOT EXISTS net_samples (
 );
 -- ⑩ 업그레이드 — 이전 판 net_samples에 task 칼럼 (새 DB는 위에서 이미 있음). 이전 표본 채우기는 파일 끝 ⑩
 ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS task_id VARCHAR(40) REFERENCES tasks (task_id);
+-- RSSI 재점검: 미검출은 숫자를 만들어 넣지 않고 detected=false / RSSI=NULL로 보존.
+-- 과거 행은 원래 검출값으로 유지한다. 과거에 버려진 미검출은 복원할 수 없다.
+ALTER TABLE net_samples ADD COLUMN IF NOT EXISTS detected BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE net_samples ALTER COLUMN rssi_dbm DROP NOT NULL;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'net_samples_detection_check') THEN
+        ALTER TABLE net_samples ADD CONSTRAINT net_samples_detection_check
+            CHECK ((detected AND rssi_dbm IS NOT NULL) OR (NOT detected AND rssi_dbm IS NULL));
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS net_samples_run_cell_idx   ON net_samples (run_id, cell_id);
 CREATE INDEX IF NOT EXISTS net_samples_robot_stamp_idx ON net_samples (robot_id, stamp);
 CREATE INDEX IF NOT EXISTS net_samples_task_idx       ON net_samples (task_id, cell_id);
@@ -221,6 +231,16 @@ CREATE TABLE IF NOT EXISTS grid_stats (
     computed_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, cell_id, ap_id)
 );
+
+-- 기존 통계의 검출/미검출 수는 알 수 없으므로 NULL로 유지한다.
+ALTER TABLE grid_stats ADD COLUMN IF NOT EXISTS n_detected INT CHECK (n_detected >= 0);
+ALTER TABLE grid_stats ADD COLUMN IF NOT EXISTS n_missed INT CHECK (n_missed >= 0);
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'grid_stats_detection_count_check') THEN
+        ALTER TABLE grid_stats ADD CONSTRAINT grid_stats_detection_count_check
+            CHECK (n_detected IS NULL OR n_missed IS NULL OR n = n_detected + n_missed);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS baselines (
     baseline_id     SERIAL       PRIMARY KEY,
@@ -931,7 +951,7 @@ COMMENT ON COLUMN net_samples.y IS '측정 시각의 로봇 위치 y(m)';
 COMMENT ON COLUMN net_samples.yaw IS '측정 시각의 로봇 방향(rad)';
 COMMENT ON COLUMN net_samples.pose_ok IS '위치 추정이 믿을 만한지(AMCL 공분산 기준). false면 통계에서 제외(E5)';
 COMMENT ON COLUMN net_samples.ap_id IS '측정 대상 AP. 관제 PC api가 NetSample.ap_ssid로 aps.ssid를 찾아 채움(등록되지 않은 SSID면 저장하지 않음)';
-COMMENT ON COLUMN net_samples.rssi_dbm IS '수신 신호 세기(dBm). 대상 AP가 안 보이면 −100';
+COMMENT ON COLUMN net_samples.rssi_dbm IS '검출 RSSI(dBm). detected=false면 NULL; 미검출을 평균에 넣지 않음';
 COMMENT ON COLUMN net_samples.cell_id IS 'x, y가 속한 격자 칸. pose_ok가 false이거나 격자 밖이면 NULL';
 COMMENT ON COLUMN net_samples.received_at IS '관제 PC가 받은 시각. stamp와 크게 차이 나면 재연결 뒤 늦게 받은 표본';
 COMMENT ON COLUMN net_samples.task_id IS '표본을 모은 측정 task(SURVEY_SEGMENT, 3-3차). 제어 PC가 표본마다 붙임. 이력 「자세히」에서 task가 거친 칸 · 칸별 측정값을 이것으로 조회. 3-3차 이전 표본은 수행 시간으로 채움(못 찾으면 NULL)';
@@ -1061,5 +1081,9 @@ COMMENT ON COLUMN reports.kind IS '네트워크 순찰 보고서 / 설비 점검
 COMMENT ON COLUMN reports.file_key IS 'scv_media 안 파일 경로(PDF 등)';
 COMMENT ON COLUMN reports.summary IS '요약 수치. 예: {"suspect_cells": 12, "coverage_pct": 96.5, "findings": 2}';
 COMMENT ON COLUMN reports.generated_at IS '생성 시각';
+
+-- 2026-10-15 RSSI 재점검 분기: 기존 30초 기본값을 새 15초 기본값으로 이전.
+-- 10~15초로 이미 조정한 설정은 유지한다. 실제 로봇 PC의 동일 파라미터도 함께 배포해야 한다.
+UPDATE settings SET value = '15' WHERE key = 'precise_duration_s' AND value = '30';
 
 COMMIT;

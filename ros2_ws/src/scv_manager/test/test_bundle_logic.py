@@ -271,3 +271,14 @@ def test_mask_cells_skip_normal_low_confidence_and_dock():
     }
 
     assert mask_cells(cells, 0.5, ORIGIN, [(3.184, 0.995)], 0.6) == {(2, 1)}
+
+
+def test_candidate_filter_preserves_low_sample_vs_unmeasured_and_all_candidates():
+    cells = {(1,1): CellRow('shadow', -80, 1, 'low', -80),
+             (2,1): CellRow('shadow', -80, 3, 'ok', -75),
+             (3,1): CellRow('shadow', -70, 3, 'ok', -85)}
+    reachable = {(1,1),(2,1),(3,1),(4,1)}
+    assert remeasure_targets(cells,reachable,0,False,min_samples=3) == [(3,1),(2,1)]
+    assert remeasure_targets(cells,reachable,0,True,min_samples=3) == [(3,1),(2,1),(4,1)]
+    many = {(i,0): CellRow('miss',None,3,'ok') for i in range(7)}
+    assert len(remeasure_targets(many,set(many),0,False,min_samples=3)) == 7

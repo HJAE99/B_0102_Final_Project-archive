@@ -204,7 +204,11 @@ class MockExecuteTaskServer(Node):
             # mission_executor 와 같은 꼴 (Result 필드와 reason 둘 다)
             result.rssi_median = -60.0 if cleared else -80.0
             result.rssi_iqr = 2.0
-            result.n_samples = 30
+            result.n_samples = result.n_total = 15
+            result.n_missed = 0
+            result.rssi_mean = result.rssi_median
+            result.duration_s = 15.0
+            result.measurement_valid = True
             result.reason = (
                 f"median={result.rssi_median:.1f} iqr=2.0 n=30"
             )
