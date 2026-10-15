@@ -120,7 +120,14 @@ class Bridge(Node):
             with self.sp.pool.connection() as conn:
                 with conn.transaction():
                     to_db = False
-                    if rid and m.code in DB_CODES:
+                    if m.code == "E7" and not rid and run_id:   # 비상정지는 회차 전체 — 그 회차 로봇마다 한 줄 (robot_id NOT NULL)
+                        r = conn.execute("SELECT sector_robots FROM runs WHERE run_id = %s", (run_id,)).fetchone()
+                        for each in sorted(set((r and r["sector_robots"] or {}).values()) - {None, ""}):
+                            uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{each}|E7|{m.stamp.sec}.{m.stamp.nanosec}"))
+                            self.sp.add_event(conn, each, ev | {"event_uid": uid, "task_id": self.task.get(each),
+                                                                "source": "robot"})
+                            to_db = True
+                    elif rid and m.code in DB_CODES:
                         to_db = bool(task) or m.code not in NEED_TASK
                     if to_db:
                         self.sp.add_event(conn, rid, ev | {"source": "control" if m.code in CONTROL_CODES else "robot"})
