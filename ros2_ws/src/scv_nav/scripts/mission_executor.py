@@ -681,6 +681,12 @@ def main():
     # 라이다를 꺼 AMCL 이 map TF 를 못 내고 Nav2 bringup 이 멈추므로 라이다만 켠다. 이때 주는 home 은 Nav2 를 띄우기 위한
     # 대략값이다 — 작업이 오면 execute() 가 undock → home 다시 → settle 로 맞춘다 (2·3회차가 이 길로 돎)
     docked = nav.getDockedStatus()
+    # 10/15 오후: 도크 위에서 start_motor 를 부르면 rplidar 드라이버가 죽는 일이 4번 재현 (robot4 ×3, robot3 ×1, 호출 직후 노드 사라짐)
+    # → 기본은 오전 방식(켤 때 undock, 1~5회차 라이다 문제 0번). -p stay_docked:=true 일 때만 도크에 머물며 라이다를 켬
+    stay = nav.declare_parameter('stay_docked', False).value
+    if docked and not stay:
+        nav.undock()
+        docked = False
     if docked:
         start_lidar(nav)
     # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
