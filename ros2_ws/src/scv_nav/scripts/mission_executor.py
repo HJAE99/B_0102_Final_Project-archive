@@ -605,6 +605,7 @@ def restart_nav2(nav, manager='lifecycle_manager_navigation'):
         nav.get_logger().warn(f'{manager}/manage_nodes 서비스 없음')
         nav.destroy_client(cli)
         return
+    ok = False
     for cmd in (ManageLifecycleNodes.Request.RESET, ManageLifecycleNodes.Request.STARTUP):
         if cmd == ManageLifecycleNodes.Request.STARTUP and not ok:
             nav.get_logger().warn(f'{manager} RESET 실패/응답 없음 — STARTUP 은 다음 주기로 미룸')
@@ -709,6 +710,9 @@ def main():
     if docked and not stay:
         for n in range(1, 4):                          # undock 이 거절 · 실패해도 navigator 는 완료로 봄 → 도크 상태로 다시 확인
             nav.undock()
+            end_t = time.time() + 1.5                  # dock_status 가 갱신될 때까지 (마지막 값이 아직 True 일 수 있음)
+            while time.time() < end_t:
+                rclpy.spin_once(nav, timeout_sec=0.1)
             if not nav.getDockedStatus():
                 break
             nav.get_logger().warn(f'undock 뒤에도 도크 위 — 다시 undock ({n}/3)')
