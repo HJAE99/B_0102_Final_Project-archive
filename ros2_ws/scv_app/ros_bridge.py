@@ -165,6 +165,10 @@ class Bridge(Node):
             batches, self.samples = self.samples, {}
         for (rid, run_id), rows in batches.items():
             try:
+                with self.sp.pool.connection() as conn:     # 끝난 회차 — 로봇은 도크에서도 마지막 run_id 로 계속 보냄
+                    r = conn.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,)).fetchone()
+                if not r or r["status"] != "running":
+                    continue
                 ssid = self.target.get(run_id)
                 if ssid is None:                           # NetSample 에 SSID 가 없어 그 회차 지도의 측정 AP 로
                     with self.sp.pool.connection() as conn:
