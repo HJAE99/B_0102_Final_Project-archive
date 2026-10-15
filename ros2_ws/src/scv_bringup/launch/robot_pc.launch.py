@@ -60,7 +60,9 @@ def _nodes(context):
                           parameters=[{'source': source}]))
     if arg('vision') == 'true':          # 실제 비전 (T2-6). 화면 창은 기본으로 끔 (원격 실행 · 디스플레이 없음)
         nodes.append(Node(package='scv_detection', executable='scv_detection_manager', namespace=ns, output='screen',
-                          parameters=[{'show': arg('vision_show') == 'true', 'device': arg('vision_device')}]))
+                          parameters=[{'show': arg('vision_show') == 'true', 'device': arg('vision_device'),
+                                       # 10/15 run 10: 1036 이면 카메라 높이 비율 0.92 → 비전 노드가 권한 953 (robot4 OAK-D)
+                                       'shutter_focal_length_px': float(arg('shutter_focal_px'))}]))
     elif arg('fake_vision') == 'true':
         nodes.append(script(os.path.join(manager_test, 'mock_inspect_facility_server.py')))
     return nodes
@@ -84,6 +86,7 @@ def generate_launch_description():
         DeclareLaunchArgument('vision', default_value='false', description='실제 비전 노드 scv_detection_manager (켜면 fake_vision 무시)'),
         DeclareLaunchArgument('vision_show', default_value='false', description='비전 결과 창 (로봇 PC 에 화면이 있을 때만)'),
         DeclareLaunchArgument('vision_device', default_value='auto', description='YOLO 장치 (auto · cpu · cuda:0)'),
+        DeclareLaunchArgument('shutter_focal_px', default_value='953.0', description='셔터 검사 초점 거리 [px] (0 이면 CameraInfo)'),
         DeclareLaunchArgument('fake_vision', default_value='true', description='가짜 inspect_facility 서비스 (2초 뒤 NORMAL)'),
         # 한 launch 에 노드가 많을 때 SUPER_CLIENT 면 Nav2 lifecycle 응답을 놓친 적이 있다 (미니 프로젝트, 4번 로봇)
         SetEnvironmentVariable('ROS_SUPER_CLIENT', 'False'),
