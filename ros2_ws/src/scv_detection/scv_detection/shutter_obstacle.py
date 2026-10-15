@@ -56,6 +56,10 @@ DEFAULT_OPTIONS = {
     # 화면 표시용: 구역 안에서 잡힌 장애물 픽셀을 씨앗으로, 같은 거리대(±이 값, m)의 바닥 위 픽셀을 화면 전체에서
     # 이어 붙여 물체 전체 범위(display_bbox)를 구한다. 판정·확인에는 쓰지 않고 그리기에만 쓴다. 0이면 끈다.
     'obstacle_display_depth_tolerance_m': 0.25,
+    # 장애물 높이: 판정은 구역 안 점으로 하되, 보고 높이는 구역 안 점에서 시작해 같은 거리대(±이 값, m)로 이어진 물체 전체
+    # 픽셀의 90% 높이와 구역 안 90% 높이 중 큰 값이다. 화면에서 구역 윗변 위로 넘어간 윗부분이 빠져 상자(실측 185mm)가
+    # 약 88mm 로 보고됐다(2026-10-15 robot4, 물체 전체 기준 188mm). 0이면 구역 안 높이만 쓴다.
+    'obstacle_height_depth_tolerance_m': 0.10,
     # 상자 밑단처럼 깊이가 갑자기 바뀌는 가장자리에서 스테레오가 2~3줄짜리 엉뚱한(훨씬 가까운) 깊이 띠를 만든다
     # (2026-10-15 robot4: 상자 밑에 15cm 가짜 장애물, 원본 4~6줄=RGB 6~9줄). 위아래 21줄 중앙값과 이만큼(m) 이상 다른 픽셀은 후보에서 뺀다.
     'flying_pixel_depth_m': 0.10,
@@ -126,6 +130,7 @@ def validate_options(**overrides):
     if (any(settings[name] <= 0 for name in positive) or settings['boundary_tolerance_m'] < 0
             or settings['obstacle_boundary_inset_m'] < 0 or not 0 <= settings['obstacle_boundary_inset_ratio'] < 0.5
             or settings['obstacle_display_depth_tolerance_m'] < 0 or settings['flying_pixel_depth_m'] < 0
+            or settings['obstacle_height_depth_tolerance_m'] < 0
             or not 0 <= settings['obstacle_line_margin_ratio'] < 0.5):
         raise ValueError('shutter distance/area/time must be positive and boundary tolerance nonnegative')
     if (settings['depth_min_m'] >= settings['depth_max_m']
@@ -1596,13 +1601,19 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     above_floor = np.zeros(depth_m.shape, dtype=bool)
     kept = in_zone_pixel & (heights > floor_distance)
     above_floor[ys[kept], xs[kept]] = True
+    height_image = np.full(depth_m.shape, np.nan)
+    height_image[ys, xs] = heights
     for obstacle in obstacles:
         indices = obstacle.pop('indices')
-        member_heights = heights[candidates][indices]
-        obstacle['height_p90_m'] = float(np.percentile(member_heights, 90))
+        seeds = np.column_stack((xs, ys))[candidates][indices]
+        zone_height = float(np.percentile(heights[candidates][indices], 90))
+        # 보고 높이: 같은 거리대로 이어진 물체 전체(구역 윗변 위로 넘어간 부분 포함)의 90% 높이와 구역 안 높이 중 큰 값.
+        _, whole = _full_extent(obstacle['bbox'], seeds, tall, depth_m, settings['obstacle_height_depth_tolerance_m'])
+        whole_height = float(np.nanpercentile(height_image[whole], 90)) if whole is not None else zone_height
+        obstacle.update(height_p90_m=max(zone_height, whole_height), height_zone_p90_m=zone_height,
+                        height_whole_p90_m=whole_height)
         obstacle['display_bbox'], member = _full_extent(
-            obstacle['bbox'], np.column_stack((xs, ys))[candidates][indices], tall, depth_m,
-            settings['obstacle_display_depth_tolerance_m'])
+            obstacle['bbox'], seeds, tall, depth_m, settings['obstacle_display_depth_tolerance_m'])
         if member is not None:
             above_floor |= member
     report.update(_above_floor_mask=above_floor, _depth_m=depth_m)

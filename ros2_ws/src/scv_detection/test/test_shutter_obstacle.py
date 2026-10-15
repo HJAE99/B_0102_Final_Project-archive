@@ -276,3 +276,21 @@ def test_box_standing_on_side_line_is_obstacle():
     report = shutter_obstacle.inspect(*_scene(box_height_m=0.10, box_rows=(330, 380), box_cols=(525, 570)))
     assert report['status'] == 'ABNORMAL' and report['obstacles']
     assert report['zone_wall_edges'] == 0
+
+
+def test_reported_height_uses_whole_object_above_zone():
+    """구역 윗변 위로 이어진 세로 상자 면은 물체 전체 높이로 보고하고, 판정용 bbox 는 구역 근처에 머문다.
+
+    상자 앞면(행 200~330, 열 280~360)을 바닥과 닿는 행 330의 바닥 거리 하나로 둔다(세로로 선 면).
+    구역 먼 쪽 선은 y=250 이라 윗부분(행 200~250)은 화면상 구역 밖이다.
+    """
+    frame, depth, rays, up = _scene(noise_m=0.003)
+    along_down = rays @ -up
+    face_depth = 0.25 / along_down[330, 320]
+    depth[200:330, 280:360] = face_depth + np.random.default_rng(1).normal(0, 0.003, (130, 80))
+    report = shutter_obstacle.inspect(frame, depth, rays, up)
+    assert report['status'] == 'ABNORMAL' and report['obstacles']
+    obstacle = max(report['obstacles'], key=lambda item: item['point_count'])
+    assert obstacle['height_whole_p90_m'] > obstacle['height_zone_p90_m'] + 0.02
+    assert obstacle['height_p90_m'] == max(obstacle['height_whole_p90_m'], obstacle['height_zone_p90_m'])
+    assert obstacle['bbox'][1] >= 236
