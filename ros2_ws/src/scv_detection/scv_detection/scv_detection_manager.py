@@ -186,8 +186,10 @@ class ScvDetectionManager(Node):
         # 1036 이면 카메라 높이 약 0.237m, 상자 앞면 높이 약 197mm 다(초점 1030~1060 에서 198~192mm). 카메라 해상도·ISP 설정이 바뀌면 다시 정한다.
         # 실행 중 로그·화면의 '카메라 높이 확인' 비율이 1에서 크게 벗어나면 이 값이 틀린 것이다.
         self.declare_parameter('shutter_focal_length_px', 1036.0)
-        self.declare_parameter('shutter_depth_timeout', 0.5)
-        self.declare_parameter('shutter_sync_tolerance', 0.03)
+        # 셔터 검사는 로봇이 멈춘 상태에서 하므로 0.1초 정도 앞뒤 사진을 짝지어도 장면이 같다.
+        # 시각 차이는 10Hz 한 주기(0.1초)까지, Depth 수신 경과는 Wi-Fi 지연을 생각해 1초까지 허용한다.
+        self.declare_parameter('shutter_depth_timeout', 1.0)
+        self.declare_parameter('shutter_sync_tolerance', 0.10)
         self.declare_parameter('shutter_font_path', '')
         self.declare_parameter('shutter_font_size', 24)
         for name, default in shutter_obstacle.DEFAULT_OPTIONS.items():

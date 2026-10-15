@@ -63,6 +63,11 @@ DEFAULT_OPTIONS = {
     # 상자 밑단처럼 깊이가 갑자기 바뀌는 가장자리에서 스테레오가 2~3줄짜리 엉뚱한(훨씬 가까운) 깊이 띠를 만든다
     # (2026-10-15 robot4: 상자 밑에 15cm 가짜 장애물, 원본 4~6줄=RGB 6~9줄). 위아래 21줄 중앙값과 이만큼(m) 이상 다른 픽셀은 후보에서 뺀다.
     'flying_pixel_depth_m': 0.10,
+    # 아래쪽 지지 확인(2026-10-15 robot3). 가로 빗금 테이프·판지 이음매처럼 가로로 긴 무늬에서 스테레오가 짝을 잘못 찾아
+    # 바닥 위 4~10cm 로 뜬 얇은 띠(세로 10~13줄)를 만들었다(8개 녹화 중 3개에서 거짓 장애물, 1720 녹화는 75장 중 61장).
+    # 실제 물체는 높은 점 바로 아래 화면 픽셀(그 점의 발까지)도 물체다. 높은 점에서 발 쪽으로 내려가며 바닥 분류 거리 높이까지의
+    # 구간 중 바닥 픽셀이 이 비율을 넘으면 떠 있는 Depth 잡음으로 보고 장애물 후보·화면 표시에서 뺀다. 1이면 끈다.
+    'unsupported_floor_ratio': 0.5,
     # 잘린 구역은 볼록 껍질 모양이 프레임마다 조금씩 달라 50% 겹침 기준에서 확인 이력이 자주 지워졌다.
     'confirm_zone_overlap_ratio': 0.30,
     # 구역 안정화·가림 처리(2026-10-15). 새 검출이 추적한 이전 구역과 이 IoU 이상 겹치면 새 검출(최신 모양)을 쓴다.
@@ -76,6 +81,11 @@ DEFAULT_OPTIONS = {
     # 바닥 평면 위에서 띠 방향과 side_line_max_angle_deg 이내, side_line_min_length_m 이상인 빨간 직선을 좌우 선으로 본다.
     # 한쪽 선만 보이면(반대쪽이 처음부터 물체에 가려진 경우 등) 띠 안쪽으로 band_width_m 떨어진 평행선을 만들어 구역을 채운다.
     'band_width_m': 0.80, 'side_line_max_angle_deg': 25.0, 'side_line_min_length_m': 0.5,
+    # 가짜 좌우 선 거르기(2026-10-15 robot3). 가로 빗금 테이프가 여러 줄인 구역에서 빗금 조각 교차점들이 이어진 앞쪽 방향의
+    # 가짜 선(이어짐 비율 0.47~0.69, 양쪽 비율 0.19~3.1)을 좌우 선으로 잡아, 그 선 기준 0.8m 보간이 구역을 오른쪽 선 밖·벽 위까지
+    # 넓혔다(벽이 장애물로 잡힘). 실제 선은 이어짐 0.75~1.0, 양쪽 비율 0~0.01 이었다. 선을 10cm 칸으로 나눠 점이 있는 칸 비율이
+    # side_line_min_coverage 이상이고, 선 양옆 6~20cm 의 빨간 점(적은 쪽)이 선 위 점의 side_line_max_two_sided_ratio 이하인 선만 쓴다.
+    'side_line_min_coverage': 0.7, 'side_line_max_two_sided_ratio': 0.1,
     'coverage_cell_m': 0.05, 'max_coverage_cells': 10000, 'min_coverage_ratio': 0.98,
     'min_valid_depth_ratio': 0.80, 'confirm_frames': 3, 'confirm_seconds': 0.5,
     'confirm_max_gap_seconds': 1.0,
@@ -131,7 +141,9 @@ def validate_options(**overrides):
             or settings['obstacle_boundary_inset_m'] < 0 or not 0 <= settings['obstacle_boundary_inset_ratio'] < 0.5
             or settings['obstacle_display_depth_tolerance_m'] < 0 or settings['flying_pixel_depth_m'] < 0
             or settings['obstacle_height_depth_tolerance_m'] < 0
-            or not 0 <= settings['obstacle_line_margin_ratio'] < 0.5):
+            or not 0 <= settings['obstacle_line_margin_ratio'] < 0.5
+            or not 0 < settings['unsupported_floor_ratio'] <= 1
+            or not 0 <= settings['side_line_min_coverage'] <= 1 or settings['side_line_max_two_sided_ratio'] < 0):
         raise ValueError('shutter distance/area/time must be positive and boundary tolerance nonnegative')
     if (settings['depth_min_m'] >= settings['depth_max_m']
             or settings['min_obstacle_height_m'] <= settings['plane_distance_m']
@@ -821,7 +833,8 @@ def _floor_side_lines(polygon, red, rays, plane, settings, axis):
 
     axis는 바닥 2D 좌표(옆 l, 앞 a)에서의 띠 방향 단위 벡터다. 반환값은 (선 묶음 목록, 다른 빨간 점들의 옆 위치)이다.
     선 묶음은 {'offset': 띠 방향에 수직인 옆 위치(m), 'center': 중심점, 'direction': 방향, 'length': 길이(m),
-    'start'/'end': 선 방향으로 잰 양 끝 위치}이다.
+    'start'/'end': 선 방향으로 잰 양 끝 위치, 'coverage': 이어짐 비율, 'two_sided': 양쪽 빨간 점 비율}이다.
+    빗금 테이프 교차 조각이 모인 가짜 선(중간이 비거나 양옆에 빨간 점이 있음)은 버린다.
     직선은 같은 순서의 무작위 표본(시드 고정)으로 차례로 찾아, 같은 점군이면 같은 결과가 나온다.
     """
     normal, forward, side = _floor_basis(plane)
@@ -872,9 +885,26 @@ def _floor_side_lines(polygon, red, rays, plane, settings, axis):
         along = line_points @ direction  # 선 자신의 방향으로 잰 범위(start/end)
         length = float(np.percentile((line_points - center) @ direction, 98)
                        - np.percentile((line_points - center) @ direction, 2))
-        if abs(direction @ axis) >= cosine and length >= settings['side_line_min_length_m']:
+        # 실제 테이프는 길이 방향으로 이어져 있다. 가로 빗금 테이프 여러 줄이 이 직선과 만나는 조각만 모인 가짜 선은
+        # 사이사이가 비어 있으므로, 선을 10cm 칸으로 나눠 점이 있는 칸의 비율(이어짐 비율)을 함께 잰다.
+        start_along, end_along = float(np.percentile(along, 2)), float(np.percentile(along, 98))
+        bins = max(1, int(np.ceil((end_along - start_along) / 0.10)))
+        filled = np.unique(np.clip(((along - start_along) / 0.10).astype(int), 0, bins - 1))
+        coverage = float(len(filled) / bins)
+        # 실제 좌우 선은 빗금·가로 테이프가 띠 안쪽 한쪽에만 붙는다. 빗금을 가로지르는 가짜 선은 양쪽 모두에 빨간 점이 있다.
+        # 선 범위 안에서 선 양옆 6~20cm 띠의 빨간 점 수를 세어, 적은 쪽 수를 선 위 점 수로 나눈 값(양쪽 비율)을 잰다.
+        line_normal = np.array([-direction[1], direction[0]])
+        signed = (points - center) @ line_normal
+        position = points @ direction
+        within = (position >= start_along) & (position <= end_along)
+        left = np.count_nonzero(within & (signed > 0.06) & (signed < 0.20))
+        right = np.count_nonzero(within & (signed < -0.06) & (signed > -0.20))
+        two_sided = float(min(left, right) / max(1, len(line_points)))
+        if (abs(direction @ axis) >= cosine and length >= settings['side_line_min_length_m']
+                and coverage >= settings['side_line_min_coverage']
+                and two_sided <= settings['side_line_max_two_sided_ratio']):
             candidates.append({'offset': float(center @ across), 'center': center, 'direction': direction, 'length': length,
-                               'start': float(np.percentile(along, 2)), 'end': float(np.percentile(along, 98))})
+                               'start': start_along, 'end': end_along, 'coverage': coverage, 'two_sided': two_sided})
         remaining = remaining[~best]
     # 옆 위치가 12cm 안쪽인 후보는 같은 테이프(테이프 양쪽 가장자리 등)로 묶는다.
     groups = []
@@ -890,7 +920,9 @@ def _floor_side_lines(polygon, red, rays, plane, settings, axis):
         lines.append({'offset': float(np.average([item['offset'] for item in group], weights=weights)),
                       'center': np.average([item['center'] for item in group], axis=0, weights=weights),
                       'direction': direction / np.linalg.norm(direction), 'length': float(weights.max()),
-                      'start': min(item['start'] for item in group), 'end': max(item['end'] for item in group)})
+                      'start': min(item['start'] for item in group), 'end': max(item['end'] for item in group),
+                      'coverage': max(item['coverage'] for item in group),
+                      'two_sided': min(item['two_sided'] for item in group)})
     return lines, points @ across
 
 
@@ -1216,6 +1248,30 @@ def _wall_backed_edges(polygon, tall_mask, settings, skip):
     return walled
 
 
+def _far_end_edges(polygon, image_shape, skip):
+    """화면 구역 다각형에서 띠의 먼 끝(벽이 붙을 수 있는 가로 변)에 해당하는 변을 참·거짓 배열로 반환한다.
+
+    polygon은 화면 픽셀 꼭짓점, image_shape는 영상 크기, skip은 처음부터 빼는 변(화면 가장자리에 잘린 변)이다.
+    바닥은 멀수록 화면 위쪽에 보이므로, 남은 변 중 가운데가 가장 위에 있는 변(그보다 짧은 변의 3% 픽셀 이내 아래까지)이면서
+    화면에서 30° 이하로 누운 변만 먼 끝 변으로 본다. 좌우 긴 선 쪽 변은 띠 중간 거리에 가운데가 있어 더 아래에 있다.
+    예전에는 꼭짓점을 바닥 좌표로 바꿔 띠 방향과 비교했으나, 먼 꼭짓점이 벽 위나 지평선 근처에 걸리면 바닥 위치가
+    수 m 뒤로 밀려 먼 변이 좌우 선으로 분류됐다(2026-10-15 robot3: 벽 판단에서 빠져 벽 전체가 장애물로 잡힘).
+    """
+    corners = np.asarray(polygon, dtype=float)
+    following = np.roll(corners, -1, axis=0)
+    edges = following - corners
+    lengths = np.linalg.norm(edges, axis=1)
+    middle_rows = (corners[:, 1] + following[:, 1]) / 2
+    flat = np.abs(edges[:, 1]) <= np.tan(np.deg2rad(30)) * np.abs(edges[:, 0])
+    usable = ~np.asarray(skip, dtype=bool) & (lengths >= 10)
+    far = np.zeros(len(corners), dtype=bool)
+    if not np.any(usable):
+        return far
+    top = middle_rows[usable].min()
+    far[usable & flat & (middle_rows <= top + 0.03 * min(image_shape[:2]))] = True
+    return far
+
+
 def _inside_polygon(points, polygon, tolerance=0.0):
     """바닥의 2D 점들과 볼록 구역 다각형을 받아 경계를 포함한 구역 내부 여부 배열을 반환한다.
 
@@ -1333,24 +1389,54 @@ def _vertically_consistent(depth_m, tolerance_m, rows=21, where=None):
     return result
 
 
+def _supported_from_below(xs, ys, heights, foot_rows, floor_image, floor_distance, max_floor_ratio):
+    """바닥보다 높은 픽셀마다 그 아래가 실제로 받쳐 주는지(떠 있는 Depth 잡음이 아닌지) 참·거짓 배열로 반환한다.
+
+    xs, ys는 픽셀 열·행, heights는 바닥에서 잰 높이(m), foot_rows는 그 점을 바닥에 내린 위치(발)의 화면 행이다.
+    floor_image는 물체가 아닌 픽셀(바닥 분류 거리 이하이거나 바닥보다 아래로 잰 픽셀, 참) 그림이다. 서 있는 물체라면 높은 점에서 발까지 같은 열의 픽셀도 물체 면이며,
+    맨 아래 바닥 분류 거리(floor_distance) 높이만큼만 바닥처럼 보인다. 그래서 점 바로 아래부터
+    '발까지 거리 × (1 - floor_distance/높이)' 행까지만 보고, 그 구간에서 바닥 픽셀 비율이 max_floor_ratio를 넘으면
+    바닥 위에 떠 있는 띠(가로 테이프에서 생기는 스테레오 오차)로 보고 거짓을 돌려준다.
+    구간이 3행 미만이거나 화면 아래로 나가 볼 수 없는 부분은 판단하지 않고 참(받쳐 줌)으로 둔다.
+    빈 Depth 픽셀은 바닥으로 세지 않으므로 물체 면에 구멍이 있어도 지지가 끊기지 않는다.
+    """
+    supported = np.ones(len(xs), dtype=bool)
+    if max_floor_ratio >= 1 or len(xs) == 0:
+        return supported
+    height = floor_image.shape[0]
+    # 열마다 위에서부터 바닥 픽셀 수를 누적해 두면 구간 안 바닥 수를 뺄셈 한 번으로 구할 수 있다.
+    cumulative = np.zeros((height + 1, floor_image.shape[1]), dtype=np.int32)
+    np.cumsum(floor_image, axis=0, dtype=np.int32, out=cumulative[1:])
+    span = np.clip(foot_rows - ys, 0, None) * np.clip(1 - floor_distance / np.maximum(heights, 1e-6), 0, 1)
+    end = np.minimum(ys + np.floor(span).astype(int), height - 1)
+    length = end - ys
+    judged = length >= 3
+    floor_count = cumulative[end[judged] + 1, xs[judged]] - cumulative[ys[judged] + 1, xs[judged]]
+    supported[judged] = floor_count <= max_floor_ratio * length[judged]
+    return supported
+
+
 def _full_extent(bbox, seed_pixels, tall, depth_m, depth_tolerance_m):
     """구역 안 장애물 픽셀을 씨앗으로 같은 거리대의 바닥 위 픽셀을 화면 전체에서 이어 붙여 (사각형, 픽셀 마스크)를 반환한다.
 
     bbox는 구역 안 부분의 [왼쪽, 위, 오른쪽, 아래]이고 seed_pixels는 그 픽셀 xy 좌표다. tall은 바닥 위
     (기준 높이 이상) 픽셀 마스크, depth_tolerance_m 은 씨앗 거리 중앙값과의 허용 차이다. 벽처럼 더 먼 면은
     거리 차이로 떨어져 나간다. 허용값이 0이거나 이어진 덩어리가 없으면 (bbox 그대로, None)을 돌려준다.
-    마스크는 화면에 물체 전체를 그릴 때 쓰고 판정에는 쓰지 않는다.
+    물체 면 가운데에 빈 Depth 가로줄(robot3 상자에서 약 7줄)이 있으면 위아래가 끊겨 윗부분이 빠지므로, 이어짐 판단에만
+    위아래 5줄·좌우 1줄씩 넓힌 마스크를 쓰고, 돌려주는 마스크는 원래 픽셀만 남긴다.
+    마스크는 화면 표시와 보고 높이(물체 전체 90% 높이)에 쓰고 장애물 판정에는 쓰지 않는다.
     """
     if depth_tolerance_m <= 0 or not len(seed_pixels):
         return list(bbox), None
     center = float(np.median(depth_m[seed_pixels[:, 1], seed_pixels[:, 0]]))
     window = tall & np.isfinite(depth_m) & (np.abs(depth_m - center) <= depth_tolerance_m)
-    count, labels = cv2.connectedComponents(window.astype(np.uint8), connectivity=8)
+    bridged = cv2.dilate(window.astype(np.uint8), np.ones((11, 3), np.uint8))
+    count, labels = cv2.connectedComponents(bridged, connectivity=8)
     touched = np.unique(labels[seed_pixels[:, 1], seed_pixels[:, 0]])
     touched = touched[touched > 0]
     if not len(touched):
         return list(bbox), None
-    member = np.isin(labels, touched)
+    member = window & np.isin(labels, touched)
     rows, cols = np.nonzero(member)
     return [int(min(bbox[0], cols.min())), int(min(bbox[1], rows.min())),
             int(max(bbox[2], cols.max() + 1)), int(max(bbox[3], rows.max() + 1))], member
@@ -1556,18 +1642,10 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     on_border = _edge_on_image_border(polygon, depth_m.shape)
     tall_image = np.zeros(depth_m.shape, dtype=bool)
     tall_image[ys[is_tall], xs[is_tall]] = True
-    # 벽은 띠의 끝(먼 쪽 가로선)에만 있다고 본다. 띠 방향과 45° 이내로 나란한 변(좌우 긴 선)은 벽 판단에서 빼서,
+    # 벽은 띠의 끝(먼 쪽 가로선)에만 있다고 본다. 그 외 변(좌우 긴 선·가까운 변)은 벽 판단에서 빼서,
     # 선 위에 선 큰 물체가 변의 절반 이상을 덮어도 벽으로 오인해 그 물체를 빼지 않게 한다.
-    _, forward_3d, side_3d = _floor_basis(plane)
-    band_axis = geometry.get('band_axis')
-    axis_3d = (forward_3d if band_axis is None
-               else band_axis[0] * side_3d + band_axis[1] * forward_3d)
-    axis_2d = axis_3d @ basis
-    axis_2d = axis_2d / max(np.linalg.norm(axis_2d), 1e-9)
-    edges_2d = np.roll(floor_polygon, -1, axis=0) - floor_polygon
-    edge_cos = np.abs(edges_2d @ axis_2d) / np.maximum(np.linalg.norm(edges_2d, axis=1), 1e-9)
-    side_edge = edge_cos >= np.cos(np.deg2rad(45))
-    walled = _wall_backed_edges(polygon, tall_image, settings, on_border | side_edge)
+    far_end = _far_end_edges(polygon, depth_m.shape, on_border)
+    walled = _wall_backed_edges(polygon, tall_image, settings, ~far_end)
     report['zone_wall_edges'] = int(np.count_nonzero(walled))
     inset_pixels = int(round(min(depth_m.shape) * settings['obstacle_boundary_inset_ratio']))
     margin_pixels = int(round(min(depth_m.shape) * settings['obstacle_line_margin_ratio']))
@@ -1584,8 +1662,24 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     foot_inside = np.zeros(len(tall_index), dtype=bool)
     foot_inside[front] = _inside_polygon(feet_pixels, polygon_float, foot_tolerance)
     # 구역 밖 카메라 앞쪽에 서서 화면상 구역을 가리는 물체는 점 자체는 구역 안이지만 발이 구역 밖이라 빠진다.
+    # 아래쪽 지지 확인: 바로 아래가 바닥인 떠 있는 띠(가로 테이프의 스테레오 오차)는 장애물 후보와 화면 표시에서 뺀다.
+    floor_image = np.zeros(depth_m.shape, dtype=bool)
+    # 바닥보다 아래로 잰 점(스테레오 오차)도 물체가 아니므로 바닥 쪽으로 센다.
+    floor_image[ys, xs] = heights <= floor_distance
+    raised_index = np.flatnonzero(is_tall | (in_zone_pixel & (heights > floor_distance)))
+    raised_feet, raised_front = _camera_points_to_pixels(
+        available[raised_index] - heights[raised_index, None] * normal, rays)
+    foot_rows = np.full(len(raised_index), depth_m.shape[0], dtype=float)
+    foot_rows[raised_front] = raised_feet[:, 1]
+    supported = np.ones(len(heights), dtype=bool)
+    supported[raised_index] = _supported_from_below(
+        xs[raised_index], ys[raised_index], heights[raised_index], np.nan_to_num(foot_rows, nan=depth_m.shape[0]),
+        floor_image, floor_distance, settings['unsupported_floor_ratio'])
+    raised_in_zone = in_zone_pixel & (heights > floor_distance)
+    report['unsupported_pixel_ratio'] = float(np.count_nonzero(raised_in_zone & ~supported)
+                                              / max(1, report['zone_pixel_count']))
     candidates = np.zeros(len(heights), dtype=bool)
-    candidates[tall_index] = pixel_inside & foot_inside
+    candidates[tall_index] = pixel_inside & foot_inside & supported[tall_index]
     tall = np.zeros(depth_m.shape, dtype=bool)
     tall[ys, xs] = heights >= effective_height
     if settings['flying_pixel_depth_m'] > 0:
@@ -1597,9 +1691,9 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     obstacles = _cluster_points(available[candidates], np.column_stack((xs, ys))[candidates],
                                 floor_xy[candidates], settings)
     # 화면 표시용: 바닥을 지우고 남은 것만 Depth 색으로 그리기 위한 마스크다(판정에는 쓰지 않는다).
-    # 구역 안에서 바닥 분류 거리보다 높은 유효 픽셀에, 구역 윗변 위로 넘어간 장애물 전체 범위를 더한다.
+    # 구역 안에서 바닥 분류 거리보다 높고 아래가 받쳐 주는 유효 픽셀에, 구역 윗변 위로 넘어간 장애물 전체 범위를 더한다.
     above_floor = np.zeros(depth_m.shape, dtype=bool)
-    kept = in_zone_pixel & (heights > floor_distance)
+    kept = raised_in_zone & supported
     above_floor[ys[kept], xs[kept]] = True
     height_image = np.full(depth_m.shape, np.nan)
     height_image[ys, xs] = heights

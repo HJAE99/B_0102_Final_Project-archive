@@ -11,6 +11,7 @@ def _scene(box_height_m=None, noise_m=0.012, seed=0, box_rows=(280, 330), box_co
 
     반환값은 (BGR 영상, 미터 Depth, 픽셀 방향, 카메라 기준 위쪽 방향)이다.
     box_height_m을 주면 box_rows·box_cols(화면 행·열 범위, 기본은 구역 가운데)에 그 높이의 상자 윗면을 Depth로 넣는다.
+    실제 상자처럼 윗면의 가까운 모서리에서 바닥까지 내려오는 세로 앞면도 넣는다(윗면만 있으면 공중에 뜬 판이 된다).
     """
     height, width, focal = 480, 640, 518.0
     matrix = (focal, 0.0, 320.0, 0.0, focal, 240.0, 0.0, 0.0, 1.0)
@@ -32,6 +33,16 @@ def _scene(box_height_m=None, noise_m=0.012, seed=0, box_rows=(280, 330), box_co
         box[box_rows[0]:box_rows[1], box_cols[0]:box_cols[1]] = True
         top = camera_height - box_height_m
         depth[box] = top / along_down[box]
+        # 앞면: 윗면 가까운 모서리(box_rows 마지막 행)를 지나고 앞쪽 수평 방향을 법선으로 하는 세로 면이다.
+        forward = np.array([0.0, 0.0, 1.0]) - up * up[2]
+        forward /= np.linalg.norm(forward)
+        edge_row, columns = box_rows[1] - 1, slice(*box_cols)
+        edge = rays[edge_row, columns] * depth[edge_row, columns, None]
+        face_t = (edge @ forward)[None, :] / np.maximum(rays[edge_row + 1:, columns] @ forward, 1e-6)
+        face_height = camera_height + face_t * (rays[edge_row + 1:, columns] @ up)
+        below = depth[edge_row + 1:, columns]
+        on_face = (face_height >= 0) & (face_t < below)
+        below[on_face] = face_t[on_face]
     depth = depth + np.random.default_rng(seed).normal(0, noise_m, depth.shape)
     return frame, depth, rays, up
 
@@ -294,3 +305,81 @@ def test_reported_height_uses_whole_object_above_zone():
     assert obstacle['height_whole_p90_m'] > obstacle['height_zone_p90_m'] + 0.02
     assert obstacle['height_p90_m'] == max(obstacle['height_whole_p90_m'], obstacle['height_zone_p90_m'])
     assert obstacle['bbox'][1] >= 236
+
+
+def test_supported_from_below_separates_floating_band_from_standing_face():
+    """바로 아래가 바닥인 떠 있는 점은 거짓, 아래로 물체 면이 이어지거나 빈 Depth뿐인 점은 참인지 확인한다."""
+    floor = np.ones((100, 3), dtype=bool)
+    floor[20:60, 1] = False  # 가운데 열: 20~59행이 물체 앞면
+    floor[20:60, 2] = False
+    floor[30:50, 2] = False  # 오른쪽 열: 물체 면 중간이 빈 Depth(바닥으로 세지 않음)
+    xs = np.array([0, 1, 2])
+    ys = np.array([20, 20, 20])
+    heights = np.full(3, 0.09)
+    foot_rows = np.full(3, 70.0)  # 발은 70행, 바닥 분류 거리 0.03m 이면 20 + 50×(1-1/3) ≈ 53행까지 본다
+    supported = shutter_obstacle._supported_from_below(xs, ys, heights, foot_rows, floor, 0.03, 0.5)
+    assert supported.tolist() == [False, True, True]
+    # 비율 1이면 확인을 끈다.
+    assert shutter_obstacle._supported_from_below(xs, ys, heights, foot_rows, floor, 0.03, 1.0).all()
+
+
+def test_floating_stripe_on_tape_is_not_obstacle():
+    """가로 테이프 위 스테레오 오차처럼 바닥 위 9cm 로 뜬 15줄 띠는 장애물이 아니고, 확인을 끄면 장애물이 된다."""
+    frame, depth, rays, up = _scene(noise_m=0.004)
+    along_down = rays @ -up
+    stripe = (slice(330, 345), slice(200, 440))
+    depth[stripe] = (0.25 - 0.09) / along_down[stripe]
+    report = shutter_obstacle.inspect(frame, depth, rays, up)
+    assert report['status'] == 'NORMAL' and report['obstacles'] == []
+    assert report['unsupported_pixel_ratio'] > 0
+    report = shutter_obstacle.inspect(frame, depth, rays, up, unsupported_floor_ratio=1.0)
+    assert report['status'] == 'ABNORMAL'
+
+
+def _hatch_red_mask(with_side_line):
+    """704px·초점 1036px 카메라(바닥 0.24m 위, 수평)에서 띠 가운데 끊긴 가로 테이프 조각 7개를 그린 빨간 마스크를 만든다.
+
+    조각들은 앞쪽으로 일정 간격이라 앞쪽 방향 가짜 직선으로 이어질 수 있다. with_side_line이 참이면 옆 0.4m에
+    끊김 없는 실제 좌우 선(폭 5cm)도 그린다. 반환값은 (빨간 마스크, 픽셀 방향, 바닥 평면)이다.
+    """
+    height, width, focal = 704, 704, 1036.0
+    ys, xs = np.indices((height, width), dtype=float)
+    rays = np.dstack(((xs - 352) / focal, (ys - 352) / focal, np.ones((height, width))))
+    plane = np.array([0.0, -1.0, 0.0, 0.24])
+    red = np.zeros((height, width), np.uint8)
+
+    def band(l0, l1, a0, a1):
+        """바닥 좌표(옆 l0~l1, 앞 a0~a1) 사각형을 화면에 채운다."""
+        pts = shutter_obstacle._project_floor_points(np.array([[l0, a0], [l1, a0], [l1, a1], [l0, a1]], float), plane, rays)
+        cv2.fillConvexPoly(red, np.rint(pts).astype(np.int32), 255)
+
+    for k in range(7):
+        band(-0.15, 0.15, 1.0 + 0.3 * k, 1.06 + 0.3 * k)
+    if with_side_line:
+        band(0.38, 0.43, 0.8, 2.9)
+    return red, rays, plane
+
+
+def test_side_lines_ignore_chain_of_hatch_pieces():
+    """끊긴 빗금 조각이 이어진 가짜 앞쪽 선은 버리고, 끊김 없는 실제 좌우 선만 남기는지 확인한다."""
+    polygon = np.array([[0, 703], [703, 703], [703, 380], [0, 380]])
+    axis = np.array([0.0, 1.0])
+    red, rays, plane = _hatch_red_mask(False)
+    loose = shutter_obstacle.validate_options(side_line_min_coverage=0.0, side_line_max_two_sided_ratio=1e9)
+    assert shutter_obstacle._floor_side_lines(polygon, red, rays, plane, loose, axis)[0]  # 거르지 않으면 가짜 선이 생긴다
+    settings = shutter_obstacle.validate_options()
+    assert shutter_obstacle._floor_side_lines(polygon, red, rays, plane, settings, axis)[0] == []
+    red, rays, plane = _hatch_red_mask(True)
+    lines, _ = shutter_obstacle._floor_side_lines(polygon, red, rays, plane, settings, axis)
+    assert len(lines) == 1 and abs(abs(lines[0]['offset']) - 0.405) < 0.03 and lines[0]['coverage'] >= 0.9
+
+
+def test_far_end_edge_is_top_flat_edge_only():
+    """잘린 변을 뺀 변 중 화면 가장 위의 누운 변(먼 끝, 벽 쪽)만 고르고 비스듬한 좌우 선 쪽 변은 고르지 않는다.
+
+    2026-10-15 robot3 녹화에서 구역 꼭짓점이 벽 위에 걸려 바닥 좌표 비교로는 먼 변을 좌우 선으로 잘못 분류했던 모양이다.
+    """
+    polygon = np.array([[703, 688], [0, 702], [0, 486], [175, 418], [539, 434], [703, 488]])
+    border = shutter_obstacle._edge_on_image_border(polygon, (704, 704))
+    far = shutter_obstacle._far_end_edges(polygon, (704, 704), border)
+    assert far.tolist() == [False, False, False, True, False, False]
