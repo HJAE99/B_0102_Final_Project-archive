@@ -590,6 +590,13 @@ def start_lidar(nav):
     from sensor_msgs.msg import LaserScan
     got = []
     sub = nav.create_subscription(LaserScan, 'scan', lambda m: got.append(1), qos_profile_sensor_data)
+    end_t = time.time() + 4.0                          # 이미 돌고 있으면 부르지 않음 — 도는 모터에 start_motor 를 다시 보내면
+    while time.time() < end_t and not got:             # 드라이버가 죽는 것으로 보임 (10/15 robot4 · robot3, undock 뒤 rplidar 노드 사라짐)
+        rclpy.spin_once(nav, timeout_sec=0.2)
+    if got:
+        nav.get_logger().info('Dock 위 — 라이다가 이미 돎, start_motor 부르지 않음 (작업이 오면 undock)')
+        nav.destroy_subscription(sub)
+        return
     cli = nav.create_client(Empty, 'start_motor')
     deadline = time.time() + 60.0
     while not cli.wait_for_service(timeout_sec=2.0):
