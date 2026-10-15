@@ -325,3 +325,60 @@ dl.kv dd { margin: 0; overflow-wrap: anywhere; }
 .cc.revisit { background: #ede9fe; border-color: #8b5cf6; color: #5b21b6; }
 .cc.missed { background: #fee2e2; border-color: #ef4444; color: #991b1b; }
 .cc.nolog { background: #f1f5f9; border-color: #cbd5e1; color: #64748b; }
+
+/* ---------------------------------------------------------------- 10/15 UI 시안 (희재) — 지도 전체 폭 · 로봇 카드 · 레이어 */
+main.mon .pagehead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+main.mon .pagehead h2 { margin-bottom: 2px; }
+main.mon .pagehead .ctl { display: flex; align-items: center; gap: 8px; }
+main.mon .pagehead .live { font-size: 12px; font-weight: 600; color: #8a969e; margin-right: 6px; }
+main.mon .pagehead .live.on { color: #1f6b4f; }
+main.mon .startwhy { font-size: 12px; color: #b45309; margin: 4px 0 0; }
+.sumbar { display: flex; flex-wrap: wrap; gap: 8px 28px; align-items: center; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px 18px; margin: 14px 0; font-size: 13px; color: var(--muted); }
+.sumbar b { color: var(--ink, #1f2a30); margin-left: 6px; font-size: 14px; }
+h3.sect { font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.rcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.rcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.rch { display: flex; align-items: center; gap: 10px; }
+.rch .badge { font-weight: 700; font-size: 12px; border-radius: 7px; padding: 6px 7px; }
+.rch div { display: flex; flex-direction: column; line-height: 1.2; }
+.rch small { color: var(--muted); font-size: 11px; }
+.rch .chip { margin-left: auto; }
+.rcb { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.rcl { display: flex; justify-content: space-between; gap: 8px; }
+.rcl.small { font-size: 11.5px; }
+.rcbar { display: grid; grid-template-columns: 58px 1fr 42px; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.rcbar i { height: 6px; background: #e5eaee; border-radius: 4px; overflow: hidden; display: block; }
+.rcbar i b { display: block; height: 100%; border-radius: 4px; }
+.rcbar .num { text-align: right; color: var(--ink, #1f2a30); }
+.rcwhy { font-size: 11.5px; color: #b45309; }
+.rcard details.raw summary { font-size: 11px; color: var(--muted); cursor: pointer; }
+.rcard details.raw .rkv { font-size: 11px; }
+.mapbox .head { align-items: center; }
+.mapbox .head .orient { margin-left: auto; font-size: 12px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+.layerbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.layerbar .fixed { font-size: 12px; color: #0f766e; margin-right: 6px; }
+.layerbar .lyr { font-size: 12px; padding: 4px 10px; border-radius: 7px; border: 1px solid var(--line); background: #f4f6f7; color: var(--muted); cursor: pointer; }
+.layerbar .lyr.on { border-color: #0f766e; background: #e6f4f1; color: #0f5d56; font-weight: 600; }
+.layerbar .lyr:disabled { opacity: .45; cursor: not-allowed; }
+.layerbar .lyrbtns { margin-left: auto; display: inline-flex; gap: 6px; }
+main #map { height: 64vh; min-height: 420px; }
+.heatpane { filter: blur(7px); }
+.leaflet-image-layer.mapimg { opacity: .55; image-rendering: pixelated; }
+.maplegend { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; padding: 8px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); }
+.maplegend .lk { display: inline-flex; align-items: center; gap: 6px; }
+.maplegend i.ln { width: 18px; height: 0; border-top: 2.5px solid #475569; display: inline-block; }
+.maplegend i.ln.dash { border-top-style: dashed; }
+.maplegend .grad i.bar { width: 120px; height: 8px; border-radius: 4px; display: inline-block;
+  background: linear-gradient(90deg, hsl(12,72%,52%), hsl(60,67%,48%), hsl(120,60%,44%), hsl(175,52%,40%)); }
+.maplegend .grad small { font-size: 10.5px; }
+.maplegend i.um { width: 12px; height: 12px; background: #e2e8f0; border: 1px solid #94a3b8; display: inline-block; }
+.maplegend i.ff { width: 14px; height: 14px; border: 2px solid #dc2626; background: #fecaca; color: #dc2626; font-style: normal; font-size: 12px; line-height: 10px; text-align: center; display: inline-block; }
+.maplegend i.sp { width: 8px; height: 8px; border-radius: 50%; background: hsl(120,60%,44%); display: inline-block; }
+.maplegend input[type=range] { width: 90px; }
+.map-scale { background: rgba(255,255,255,.85); padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #475569; display: flex; align-items: center; gap: 6px; }
+.map-scale i { display: inline-block; height: 0; border-top: 2px solid #475569; }
+.fail-x { color: #dc2626; font-weight: 800; font-size: 15px; line-height: 16px; text-align: center; }
+.cell-val { font-size: 10px; color: #334155; text-align: center; transform: translate(-50%, -50%); white-space: nowrap; }
+.cell-val b { font-weight: 700; }
+.scrollbox { max-height: 320px; overflow: auto; }

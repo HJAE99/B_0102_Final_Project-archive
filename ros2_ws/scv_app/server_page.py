@@ -2259,7 +2259,7 @@ def api_run_events(run_id: int, request: Request):
 
 
 @app.get("/api/runs/{run_id}")
-def api_run_detail(run_id: int, request: Request):
+def api_run_detail(run_id: int, request: Request, lite: bool = False):
     """이력 탭 run 하나 — run · tasks · candidates(칸 · 정밀측정 최고 중앙값 · finding) · inspections(설비 · 사진 키) · aps ·
     heat(칸 → AP → [평균 RSSI, 표본 수], LIVE_CELLS) · 표본 수 · 의심 기준값(thr). 읽기만 (LIVE_CELLS는 없으면 채움)"""
     current_user(request)
@@ -2284,10 +2284,18 @@ def api_run_detail(run_id: int, request: Request):
         live = live_cells(conn, run_id)
         n_samples = conn.execute("SELECT count(*) AS n FROM net_samples WHERE run_id = %s", (run_id,)).fetchone()["n"]
         thr = fset(settings_values(conn), "rssi_suspect_dbm", -72)
+        # 10/15 UI 시안: 방문 궤적(robot_status_log 1 Hz) · NetSample 점 (lite=1 이면 표본 점은 뺌 — 모니터 2초 갱신용)
+        tracks: dict[str, list] = {}
+        for r in conn.execute("SELECT robot_id, extract(epoch FROM ts) AS t, x, y FROM robot_status_log "
+                              "WHERE run_id = %s AND x IS NOT NULL ORDER BY ts", (run_id,)):
+            tracks.setdefault(r["robot_id"], []).append([round(float(r["t"]), 1), round(r["x"], 3), round(r["y"], 3)])
+        points = [] if lite else conn.execute(
+            "SELECT robot_id, seq, stamp, x, y, pose_ok, ap_id, rssi_dbm, cell_id, task_id FROM net_samples "
+            "WHERE run_id = %s ORDER BY stamp LIMIT 5000", (run_id,)).fetchall()
     with MEM_LOCK:                                     # 히트맵 = 칸 · AP별 평균(sum / n)
         heat = {cid: {ap: [round(v[1] / v[0], 1), int(v[0])] for ap, v in d.items() if v[0]} for cid, d in live.items()}
     return {"run": run, "tasks": tasks, "candidates": cands, "inspections": ins, "aps": aps, "heat": heat,
-            "samples": n_samples, "thr": thr, "current": CURRENT_RUN["run_id"]}
+            "samples": n_samples, "thr": thr, "current": CURRENT_RUN["run_id"], "tracks": tracks, "points": points}
 
 
 def cell_key(grid: dict[str, Any], x: float, y: float) -> dict[str, Any] | None:
