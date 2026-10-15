@@ -9,3 +9,37 @@
 
 기존 기본 HSV·바늘 조건에는 미확인으로 반환되었다. 수정 후에는 왼쪽 위 방향 바늘이 약 130도,
 청록색 눈금 구간이 약 71~96도로 검출되어 범위 밖으로 판독된다. 압력 수치의 실측 정답은 포함하지 않는다.
+
+# 방화셔터 검사 rosbag 검토 GIF (2026-10-15)
+
+robot4에서 녹화한 `shutter_1015_1043` rosbag(28.4초, Depth 284장)을 셔터 검사 코드로 재생한 결과를 GIF로 만든 자료다.
+rosbag 원본(약 72MB)은 저장소에 올리지 않았고 녹화한 PC의 `~/final_ws/bags/shutter_1015_1043`에 있다.
+
+| 파일 | 화면 구성 (왼쪽 → 오른쪽) |
+|---|---|
+| `shutter_1015_1043_review.gif` | RGB 원본 · Depth 색상 지도(0.3~4.0m) · 셔터 검사 결과 화면 |
+| `shutter_1015_1043_floor_removed.gif` | RGB + 검사 구역 테두리 · Depth 원본 · RANSAC 바닥 평면에서 바닥 분류 거리 안의 Depth를 지운 영상 |
+
+맨 위 줄에는 프레임 번호, 녹화 시작 후 시간, 판정·사유(또는 평면 값과 바닥 분류 거리)를 적었다.
+
+## 녹화 조건
+
+- 토픽: `/robot4/oakd/rgb/image_raw/compressed`, `/robot4/oakd/stereo/image_raw/compressedDepth`, 두 CameraInfo, `tf`, `tf_static`
+- 카메라 설정 변경 후: RGB·Depth 모두 704×704, 10Hz, K = 569.95 / 353.4, 354.1. RGB·Depth 촬영 시각 차이 0.08ms.
+- 장면: 앞 약 10초는 빈 구역, 약 11초부터 흰 상자를 구역 안에 놓음. 로봇은 정지.
+
+## 만든 방법
+
+- 매니저와 같은 순서로 처리했다: 촬영 시각이 맞는 RGB·Depth 짝 → `depth_for_rgb` → TF 위쪽 방향 →
+  `inspect`(구역 추적 포함, 바닥 평면은 RANSAC) → `stabilize_report`(3프레임·0.5초 확인) → `draw_result`.
+- 사용한 코드는 2026-10-15 11시 무렵 작업 폴더의 `shutter_obstacle.py`·`scv_detection_manager.py`이며,
+  이 커밋에는 코드 변경을 포함하지 않았다. Depth 화면 배율 보정 없음, 장애물 최소 높이 7cm다.
+- 10fps 영상을 2장마다 1장(5fps, 142장), 가로 760px, 128색으로 줄였다. 실제 처리 속도를 나타내지 않는다.
+
+## 확인 결과
+
+- 0~10초(빈 구역): 가짜 장애물 0개, 최종 판정 `UNCONFIRMED / zone_partial`
+  (구역 테두리 일부가 화면 밖이라 정상 대신 미확인).
+- 약 11초(상자 놓음): 장애물 1개, `confirmation_pending`. 약 12초부터 `ABNORMAL`, 높이 약 158~160mm로 유지.
+- 바닥 제거 영상에서 평면은 프레임마다 거의 같고(d 약 0.42~0.43m), 바닥 분류 거리는 약 33~44mm다.
+  구역 안에 남는 가로 줄 모양 점은 이 거리를 조금 넘는 Depth 잡음이며 장애물 기준(7cm)보다 낮다.
