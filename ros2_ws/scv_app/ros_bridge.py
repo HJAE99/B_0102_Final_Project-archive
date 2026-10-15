@@ -68,7 +68,7 @@ class Bridge(Node):
             self.create_subscription(NetSample, f"/{rid}/survey/sample", lambda m, r=rid: self.on_sample(r, m), SAMPLE_QOS)
             self.create_subscription(Path, f"/{rid}/plan", lambda m, r=rid: self.on_plan(r, m), STATUS_QOS)
         self.create_subscription(Alert, "/inspection/alerts", self.on_alert, 10)
-        self.clients_ = {n: self.create_client(Trigger, f"/inspection/{n}") for n in ("start", "estop", "resume")}
+        self.clients_ = {n: self.create_client(Trigger, f"/inspection/{n}") for n in ("start", "estop", "resume", "abort")}
         self.create_timer(1.0, self.flush_samples)
 
     # ------------------------------------------------------------ B2 버튼
@@ -87,7 +87,7 @@ class Bridge(Node):
         self.refresh_run()
         if r.success and name in ("estop", "resume"):
             self.sp.ESTOP["on"] = name == "estop"
-        elif r.success and name == "start":
+        elif r.success and name in ("start", "abort"):
             self.sp.ESTOP["on"] = False
         return {"ok": bool(r.success), "message": r.message}
 
@@ -139,7 +139,7 @@ class Bridge(Node):
             self.refresh_run()
             run_id = self.sp.CURRENT_RUN["run_id"]
             rid = m.robot_id
-            if m.code in ("E7", "RESUMED", "RUN_COMPLETED"):  # 다른 브라우저에서 누른 것도 맞춤
+            if m.code in ("E7", "RESUMED", "RUN_COMPLETED", "RUN_ABORTED"):  # 다른 브라우저에서 누른 것도 맞춤
                 self.sp.ESTOP["on"] = m.code == "E7"
             task = self.known_task(m.ref) if m.code in ("E1", "TASK_FAILED") else self.task.get(rid)
             ev = {"event_uid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{rid}|{m.code}|{m.ref}|{m.stamp.sec}.{m.stamp.nanosec}")),

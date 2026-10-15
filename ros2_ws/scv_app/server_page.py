@@ -2226,6 +2226,15 @@ def api_run_resume(request: Request):
     return ros_call("resume")
 
 
+@app.post("/api/runs/{run_id}/stop")
+def api_run_stop(run_id: int, request: Request):
+    """순찰 종료 (ros 모드, 10/15) — /inspection/abort: 작업 취소 · 회차 aborted"""
+    current_user(request)
+    if RUN_OWNER != "ros":
+        return abort_run(run_id, "ADMIN_STOP")
+    return ros_call("abort")
+
+
 @app.post("/api/runs/{run_id}/abort")
 def api_run_abort(run_id: int, request: Request):
     """순찰 중단 (관리자) → abort_run(reason ADMIN_STOP) → {ok, canceled}"""

@@ -297,6 +297,11 @@ class InspectionManager(Node):
             "/inspection/estop",
             self.on_estop,
         )
+        self.abort_service = self.create_service(      # 10/15: 웹 「순찰 종료」 — 회차를 aborted 로 닫음
+            Trigger,
+            "/inspection/abort",
+            self.on_abort,
+        )
         self.resume_service = self.create_service(
             Trigger,
             "/inspection/resume",
@@ -1260,6 +1265,39 @@ class InspectionManager(Node):
         )
         response.success = True
         response.message = "비상정지 요청 완료"
+        return response
+
+    def on_abort(self, request, response):
+        """순찰 종료 — 로봇 작업을 모두 취소(정지)하고 회차를 aborted 로 닫는다. 로봇은 그 자리에 선다"""
+        del request
+        if self.core.run_state not in {RunState.RUNNING, RunState.ESTOPPED}:
+            response.success = False
+            response.message = "진행 중인 순찰이 없습니다."
+            return response
+        run_id = self.core.run_id
+        self.core.estop()
+        self.canceling_task_ids.update(
+            task.task_id for task in self.core.tasks.values() if task.state == TaskState.CANCELED
+        )
+        for goal_handle in self.active_goals.values():
+            goal_handle.cancel_goal_async()
+        try:
+            self.store.close_run(run_id, "aborted")
+        except (RuntimeError, AttributeError) as exc:
+            self.get_logger().error(f"회차를 닫지 못했습니다: {exc}")
+        for robot_id in self.core.robots:
+            self.publish_mask(robot_id, set())
+        self.core.complete_run()
+        self.publish_alert(
+            level=Alert.LEVEL_WARN,
+            code="RUN_ABORTED",
+            robot_id="",
+            ref=str(run_id),
+            message=f"run_id={run_id} 순찰을 종료했습니다 (관리자).",
+        )
+        self.get_logger().warning(f"run_id={run_id} 순찰 종료 (관리자 abort)")
+        response.success = True
+        response.message = f"run {run_id} 종료"
         return response
 
     def on_resume(self, request, response):
