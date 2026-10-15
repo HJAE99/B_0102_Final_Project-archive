@@ -9,6 +9,7 @@
 # 작업 종류
 #   SURVEY_SEGMENT: waypoints 를 navigate_through_poses 로 통과
 #   FACILITY_CHECK: 마지막 waypoint 에 정밀 도착 → {ns}/inspect_facility 서비스 (IF-05, 10/14 PM 결정: 액션 → 서비스, 자세 보정 없음)
+#                   관측 자리가 장애물에 막히면 둘레 0.15–0.45 m 빈 자리(최대 3곳)에서 같은 방향으로 점검, 결과 reason 에 ALT_VIEW
 #   REINSPECTION:   마지막 waypoint 에 정밀 도착 → {ns}/survey/precise 10~15초
 #   DOCK:           waypoints(없으면 undock 위치)로 가서 dock
 # 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
@@ -56,6 +57,8 @@ BACKOFF = 0.25         # 막힌 점 대신 갈 줄 위의 점: 줄이 inscribed 
                        # inflation 비용으로 고르면(100 미만) 6 cm 까지 붙어 돌지 못하고 55 초 서 있었음 (10/14 시뮬)
 NEAR_GOAL = 0.5        # 골 둘레 이 안에 새 장애물(지도엔 빈칸, costmap 엔 장애물)이 보여야 줄 막힘을 골 막힘으로 봄 (m)
 MIN_STEP = 0.15        # 대신 갈 점이 앞 점(또는 지금 위치)에서 이보다 가까우면 그냥 뺌 (m)
+ALT_RINGS = (0.15, 0.25, 0.35, 0.45)   # 설비 관측 자리가 막혔을 때 대체 자리를 찾는 거리 (m, 10/15)
+ALT_MAX_COST = 100     # 대체 자리는 costmap 비용이 이 미만인 곳만 (inscribed 253 보다 충분히 여유)
 
 
 class MissionExecutor(Node):
@@ -204,6 +207,30 @@ class MissionExecutor(Node):
         p.pose.orientation = pose.pose.orientation
         return p
 
+    def alternative_views(self, view, limit=3):
+        """막힌 관측 자리 둘레(ALT_RINGS m)에서 갈 만한 빈 자리 — 가까운 순, 같은 거리면 보는 방향 뒤쪽(설비에서 조금 멀어지는 쪽) 먼저.
+        방향(yaw)은 원래 관측 자세 그대로 (정밀 도착이 마지막에 그 방향으로 돎). 지도 장애물 · costmap ALT_MAX_COST 이상은 뺌"""
+        x0, y0 = xy(view)
+        q = view.pose.orientation
+        yaw = 2 * math.atan2(q.z, q.w)
+        found = []
+        for r in ALT_RINGS:
+            for k in range(16):
+                a = k * math.tau / 16
+                x, y = x0 + r * math.cos(a), y0 + r * math.sin(a)
+                c = self.cost(x, y)
+                if c >= ALT_MAX_COST or self.on_static_map(x, y):
+                    continue
+                behind = abs(math.remainder(a - (yaw + math.pi), math.tau))   # 0 = 바로 뒤
+                found.append((r, behind, c, x, y))
+        out = []
+        for r, _, _, x, y in sorted(found)[:limit]:
+            p = PoseStamped(header=view.header)
+            p.pose.position.x, p.pose.position.y = x, y
+            p.pose.orientation = view.pose.orientation
+            out.append(p)
+        return out
+
     def on_odom(self, msg):
         v = msg.twist.twist
         self.odom = (time.monotonic(), math.hypot(v.linear.x, v.linear.y), abs(v.angular.z))
@@ -250,8 +277,20 @@ class MissionExecutor(Node):
                 ok, reason = self.follow(gh, g.waypoints)
             elif g.type == T.FACILITY_CHECK:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
+                alt = None
+                # 관측 자리가 장애물에 막히면 둘레의 빈 자리에서 같은 방향을 보고 점검 (10/15 통합 브랜치, cmd_vel 강제 이동 대신)
+                for alt in ([] if ok or not reason.startswith('BLOCKED') else self.alternative_views(g.waypoints[-1])):
+                    if gh.is_cancel_requested:
+                        break
+                    self.get_logger().warn(f'{g.target_ref}: 관측 자리 막힘 → 대체 자리 '
+                                           f'({alt.pose.position.x:.2f}, {alt.pose.position.y:.2f}) 에서 같은 방향으로 점검')
+                    ok, reason = self.follow(gh, [alt], precise=True)
+                    if ok:
+                        break
                 if ok:
                     ok, reason = self.inspect(gh, g)
+                    if alt is not None:
+                        reason = f'ALT_VIEW ({alt.pose.position.x:.2f}, {alt.pose.position.y:.2f}) {reason}'
             elif g.type == T.REINSPECTION:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
                 if ok:

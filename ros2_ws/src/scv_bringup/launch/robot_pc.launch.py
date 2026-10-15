@@ -61,7 +61,7 @@ def _nodes(context):
     if arg('vision') == 'true':          # 실제 비전 (T2-6). 화면 창은 기본으로 끔 (원격 실행 · 디스플레이 없음)
         nodes.append(Node(package='scv_detection', executable='scv_detection_manager', namespace=ns, output='screen',
                           parameters=[{'show': arg('vision_show') == 'true', 'device': arg('vision_device'),
-                                       # 10/15 run 10: 1036 이면 카메라 높이 비율 0.92 → 비전 노드가 권한 953 (robot4 OAK-D)
+                                       # 10/15 run 10: 1036 이면 카메라 높이 비율 0.92 → 비전 노드 권장값 953 (robot4 OAK-D)
                                        'shutter_focal_length_px': float(arg('shutter_focal_px'))}]))
     elif arg('fake_vision') == 'true':
         nodes.append(script(os.path.join(manager_test, 'mock_inspect_facility_server.py')))
