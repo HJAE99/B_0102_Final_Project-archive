@@ -685,8 +685,8 @@ function MonitorPage({ onAuthLost }) {
       : `순찰 run ${runId}을 중단할까요? 로봇은 하던 일을 멈추고 도크로 돌아갑니다.`)) return;
     try { await api(`/api/runs/${runId}/abort`, { method: 'POST' }); setMsg(''); } catch (e) { setMsg(e.message); }
   };
-  const stop = async (runId) => {                     // 순찰 종료 — 회차를 aborted 로 닫음 (로봇은 그 자리에 섬)
-    if (!confirm(`순찰 run ${runId}을 종료할까요? 남은 작업은 취소되고 회차가 「중단」으로 닫힙니다. 로봇은 그 자리에 멈춥니다.`)) return;
+  const stop = async (runId) => {                     // 순찰 종료 — 회차를 aborted 로 닫고 로봇은 도크로 귀환 (비상정지 = 그 자리 정지)
+    if (!confirm(`순찰 run ${runId}을 종료할까요? 남은 작업은 취소되고 회차가 「중단」으로 닫힙니다. 로봇은 도크로 돌아갑니다.`)) return;
     try { await api(`/api/runs/${runId}/stop`, { method: 'POST' }); setMsg(''); } catch (e) { setMsg(e.message); }
   };
   const resume = async () => {                        // ROS 관제(SCV_RUN_OWNER=ros) — 비상정지 뒤 /inspection/resume
