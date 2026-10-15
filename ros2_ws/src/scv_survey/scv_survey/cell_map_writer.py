@@ -74,7 +74,7 @@ class CellMapWriter(Node):
         count = lambda s: sum(1 for r in rows if r['state'] == s)
         res.success = True
         res.message = (f'{zone}: {n}칸 (음영 {count(SHADOW)} · 미검출 {count(MISS)} · '
-                       f'low {sum(1 for r in rows if r["n"] < 2)}), run_id={run_id}')
+                       f'low {sum(1 for r in rows if r["n"] < 3)}), run_id={run_id}')
         self.get_logger().info(res.message)
         return res
 

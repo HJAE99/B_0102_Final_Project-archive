@@ -352,19 +352,22 @@ def remeasure_targets(
     limit: int,
     include_unmeasured: bool = True,
     blocked: set = frozenset(),
+    min_samples: int = 0,
 ) -> list[tuple[int, int]]:
-    """재측정할 칸: 미검출 → 음영(중앙값 낮은 것부터) → 미측정.
+    """재측정할 칸: 미검출 → 약한 신호(평균 낮은 것부터) → 미측정.
 
     cells 는 {(ix, iy): 줄(state, median, …)}, reachable 은 그 로봇이 갈 수 있는 칸.
     blocked 는 이번 회차 측정 중 장애물로 못 간 칸 — 미측정이면 채우러 가지 않는다 (값이 있으면 그대로 후보).
     """
-    miss = sorted(c for c in reachable if c in cells and cells[c].state == "miss")
+    eligible = {c for c in cells if cells[c].n >= min_samples}
+    miss = sorted(c for c in reachable if c in eligible and cells[c].state == "miss")
     shadow = sorted(
-        (c for c in reachable if c in cells and cells[c].state == "shadow"),
-        key=lambda c: (cells[c].median, c),
+        (c for c in reachable if c in eligible and cells[c].state == "shadow"),
+        key=lambda c: (cells[c].mean if cells[c].mean is not None else cells[c].median, c),
     )
     unmeasured = sorted(reachable - set(cells) - set(blocked)) if include_unmeasured else []
-    return (miss + shadow + unmeasured)[:limit]
+    targets = miss + shadow + unmeasured
+    return targets[:limit] if limit > 0 else targets
 
 
 def mask_cells(

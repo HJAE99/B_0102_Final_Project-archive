@@ -79,7 +79,7 @@ class NetworkMapEngine(Node):
         mask_topic = self.declare_parameter('mask_topic', '/keepout_mask').value
         self.shadow_dbm = float(self.declare_parameter('shadow_dbm', float(SHADOW_DBM)).value)
         self.mask_margin = float(self.declare_parameter('mask_margin', 0.0).value)
-        self.mask_min_samples = int(self.declare_parameter('min_samples_for_mask', 2).value)
+        self.mask_min_samples = int(self.declare_parameter('min_samples_for_mask', 3).value)
 
         self.grid = SurveyGrid(cell_size=cell)
         self.dirty = True
@@ -220,7 +220,7 @@ class NetworkMapEngine(Node):
             text.pose.orientation.w = 1.0
             text.scale.z = cell * 0.3
             text.color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
-            med = st.median
+            med = st.mean
             text.text = f'{med:.0f}' if med is not None else 'X'
             out.markers.append(text)
 

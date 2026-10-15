@@ -55,6 +55,8 @@ class FakeInspectionManager:
         }
         self.seen_candidate_ids = set()
         self.pending_candidates = {}
+        self.pending_remeasure_results = {}
+        self.confirmed_cells = set()
         self.seen_inspection_results = set()
         self.alerts = []
         self.store = FakeStore()

@@ -1,7 +1,7 @@
 """RSSI 샘플을 격자 칸으로 모으고 색을 정한다 (ROS 와 무관, pytest 대상).
 
 - 칸 번호는 지도 원점(origin) 기준: i = floor((x - ox) / cell), j = floor((y - oy) / cell)
-- 칸 대표값은 검출된 RSSI 의 중앙값. 미검출 샘플은 통계에 넣지 않고 따로 센다
+- 칸 대표값·약한 신호 판정은 검출된 RSSI 의 산술평균. 중앙값은 진단용. 미검출 샘플은 통계에 넣지 않고 따로 센다
 - (robot_id, seq) 가 같은 샘플은 한 번만, pose_ok 가 False 인 샘플은 버린다
 - 회피 마스크: 미검출·음영 칸(0.5 m 칸 그대로, margin 을 주면 그만큼 넓혀)은 100, 나머지(정상·측정 안 한 칸) 0 인 OccupancyGrid 값
 """
@@ -23,6 +23,8 @@ MISS_COLOR: Color = (0.4, 0.4, 0.4)    # 회색 (미검출 — 파랑(약함)과
 # 칸 상태 (회피 마스크용). 음영 기준은 BR-T04 의 −72 dBm
 SHADOW_DBM = -72
 NORMAL, SHADOW, MISS = 'normal', 'shadow', 'miss'
+UNKNOWN = 'unmeasured'
+MIN_SAMPLES = 3
 # Keepout filter값
 # ROS지도(OccupancyGrid)에서 100은 "벽처럼 막힘"을 뜻함. Nav2가 이 값을 보고 그 칸을 피함.
 KEEPOUT = 100   
@@ -81,6 +83,10 @@ class CellStats:
         return statistics.median(self.rssi) if self.rssi else None
 
     @property
+    def mean(self) -> Optional[float]:
+        return statistics.fmean(self.rssi) if self.rssi else None
+
+    @property
     def miss_ratio(self) -> float: # 신호 못 잡은 비율 (0으로 나누기 방지)
         return self.n_missed / self.n_total if self.n_total else 0.0
 
@@ -110,27 +116,32 @@ def pose_usable(age_s: Optional[float], cov_xy: Optional[float],
     return True, ''
 
 # 칸의 색상 정하는 함수. 다른 함수에서 계산된 값 받아옴.
-# 신호가 안잡히거나 절반 이상 못잡으면 회색. 중앙값 평균으로 색상 정함
+# 신호가 안잡히거나 절반 이상 못잡으면 회색. 검출 평균으로 색상 정함
 def cell_color(stats: CellStats, miss_ratio_thresh: float = 0.5,
                strong: float = STRONG_DBM, weak: float = WEAK_DBM) -> Color:
     if stats.n_detected == 0 or stats.miss_ratio >= miss_ratio_thresh:
         return MISS_COLOR
-    return rssi_to_color(stats.median, strong, weak)
+    return rssi_to_color(stats.mean, strong, weak)
 
-# 칸 상태를 판정 -72dBm보다 작은값이면 음영구역
+# 약한 신호 후보: 검출 RSSI 산술평균 < -72. 미측정과 미검출을 구분한다.
 def cell_status(stats: CellStats, shadow_dbm: float = SHADOW_DBM,
                 miss_ratio_thresh: float = 0.5) -> str:
-    """미검출(회색과 같은 조건) / 음영(중앙값 < shadow_dbm) / 정상"""
-    if stats.n_detected == 0 or stats.miss_ratio >= miss_ratio_thresh:
+    """미측정 / 미검출 비율 이상 / 약한 신호 / 정상. 신뢰도(최소 표본)는 호출자가 검사."""
+    return rf_status(stats.mean, stats.n_detected, stats.n_missed, shadow_dbm, miss_ratio_thresh)
+
+
+def rf_status(mean, n_detected, n_missed, threshold=SHADOW_DBM, miss_ratio=.5):
+    total = n_detected + n_missed
+    if total == 0:
+        return UNKNOWN
+    if n_detected == 0 or n_missed / total >= miss_ratio:
         return MISS
-    if stats.median < shadow_dbm:
-        return SHADOW
-    return NORMAL
+    return SHADOW if mean < threshold else NORMAL
 
 # Nav2가 피해야할 칸 목록
-# 2번 이상 잰 칸(min_sample 이상)만 판정함
+# 최소 전체 표본 수 이상인 칸만 판정함
 def keepout_cells(cells: Dict[Tuple[int, int], CellStats], shadow_dbm: float = SHADOW_DBM,
-                  miss_ratio_thresh: float = 0.5, min_samples: int = 2) -> Dict[Tuple[int, int], str]:
+                  miss_ratio_thresh: float = 0.5, min_samples: int = MIN_SAMPLES) -> Dict[Tuple[int, int], str]:
     """회피할 칸 → 상태(MISS·SHADOW). 샘플이 min_samples 개보다 적은 칸은 한 번 튄 값일 수 있어 뺀다"""
     # [GRID-2] 표본 수·미검출·RSSI 기준으로 회피 셀 선택
     out = {}

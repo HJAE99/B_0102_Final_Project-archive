@@ -15,10 +15,10 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import yaml
 
-from scv_survey.heatmap import MISS, NORMAL, SHADOW, SHADOW_DBM, CellStats, cell_center, cell_status
+from scv_survey.heatmap import MISS, NORMAL, SHADOW, SHADOW_DBM, MIN_SAMPLES, CellStats, cell_center, cell_status
 
 Cell = Tuple[int, int]
-MIN_SAMPLES_OK = 2      # 이보다 적으면 confidence 'low' (network_map_engine 의 min_samples_for_mask 와 같은 값)
+MIN_SAMPLES_OK = MIN_SAMPLES      # 통합 재점검의 최소 전체 표본 수; 미검출도 1회로 센다
 TO_DB = {NORMAL: 'normal', SHADOW: 'coverage_suspect', MISS: 'unknown'}
 FROM_DB = {v: k for k, v in TO_DB.items()}
 
@@ -28,6 +28,9 @@ class CellRow(NamedTuple):
     median: Optional[float]
     n: int
     confidence: str         # ok · low
+    mean: Optional[float] = None
+    n_detected: Optional[int] = None
+    n_missed: Optional[int] = None
 
 
 class MapInfo(NamedTuple):
@@ -81,11 +84,13 @@ def rows_from_stats(cells: Dict[Cell, CellStats], origin: Tuple[float, float], c
     """SurveyGrid.cells() → 저장할 줄. 통계는 검출된 값만으로 낸다"""
     out = []
     for (i, j), st in sorted(cells.items()):
+        if st.n_total == 0:
+            continue  # 미측정은 통계 행을 만들지 않는다
         cx, cy = cell_center(i, j, origin[0], origin[1], cell)
         r = st.rssi
         out.append({
             'ix': i, 'iy': j, 'cx': round(cx, 3), 'cy': round(cy, 3),
-            'n': st.n_total, 'n_detected': st.n_detected,
+            'n': st.n_total, 'n_detected': st.n_detected, 'n_missed': st.n_missed,
             'median': st.median, 'mean': statistics.fmean(r) if r else None,
             'var': statistics.pvariance(r) if r else None,
             'min': min(r) if r else None, 'max': max(r) if r else None,
@@ -95,7 +100,8 @@ def rows_from_stats(cells: Dict[Cell, CellStats], origin: Tuple[float, float], c
 
 
 def _row(c: dict) -> CellRow:
-    return CellRow(c['state'], c['median'], c['n'], 'ok' if c['n'] >= MIN_SAMPLES_OK else 'low')
+    return CellRow(c['state'], c['median'], c['n'], 'ok' if c['n'] >= MIN_SAMPLES_OK else 'low',
+                   c.get('mean'), c.get('n_detected'), c.get('n_missed'))
 
 
 class FileStore:
@@ -129,17 +135,26 @@ class FileStore:
     def read_cells(self, run_id: int) -> Dict[Cell, CellRow]:
         out = {}
         for p in sorted(self.dir.glob('*.json')):
-            for c in json.loads(p.read_text())['cells']:
+            doc = json.loads(p.read_text())
+            if doc['run_id'] != run_id:
+                continue
+            for c in doc['cells']:
                 out[(c['ix'], c['iy'])] = _row(c)
         return out
 
-    def update_cell(self, run_id: int, ix: int, iy: int, state: str, median: Optional[float], n: int) -> bool:
-        files = sorted(self.dir.glob('*.json'))
+    def update_cell(self, run_id: int, ix: int, iy: int, state: str, median: Optional[float], n: int,
+                    *, mean=None, n_detected=None, n_missed=0) -> bool:
+        n_detected = n if n_detected is None else n_detected
+        if n != n_detected + n_missed:
+            raise ValueError('전체 표본 수와 검출/미검출 수가 다릅니다')
+        files = [p for p in sorted(self.dir.glob('*.json'))
+                 if json.loads(p.read_text())['run_id'] == run_id]
         for p in files:
             doc = json.loads(p.read_text())
             for c in doc['cells']:
                 if (c['ix'], c['iy']) == (ix, iy):
-                    c.update(state=state, median=median, n=n, n_detected=n)
+                    c.update(state=state, median=median, mean=mean, n=n, n_detected=n_detected,
+                             n_missed=n_missed, var=None, min=None, max=None)
                     p.write_text(json.dumps(doc, ensure_ascii=False, indent=1))
                     return True
         if not files:
@@ -147,7 +162,8 @@ class FileStore:
         doc = json.loads(files[0].read_text())  # 미측정이던 칸: 새 줄
         cx, cy = cell_center(ix, iy, *self.map.origin, self.cell)
         doc['cells'].append({'ix': ix, 'iy': iy, 'cx': round(cx, 3), 'cy': round(cy, 3),
-                             'n': n, 'n_detected': n, 'median': median, 'state': state})
+                             'n': n, 'n_detected': n_detected, 'n_missed': n_missed,
+                             'mean': mean, 'median': median, 'state': state})
         files[0].write_text(json.dumps(doc, ensure_ascii=False, indent=1))
         return True
 
@@ -156,7 +172,7 @@ class FileStore:
 
 
 class DbStore:
-    """PostgreSQL 직접 (scv_db 01_schema.sql 의 runs · grid_cells · aps · grid_stats). 스키마는 바꾸지 않는다"""
+    """PostgreSQL 직접 (scv_db 01_schema.sql 의 runs · grid_cells · aps · grid_stats). RSSI 확장 스키마(01_schema.sql 재적용)가 필요하다"""
 
     def __init__(self, map_yaml, cell_size: float = 0.5, dsn_env: str = 'SCV_DB_DSN', ap_ssid: str = ''):
         if not ap_ssid:     # 빈 값이면 DB 에 뜻 없는 AP 줄이 생긴다
@@ -255,29 +271,41 @@ class DbStore:
     def write_cells(self, run_id: int, zone: str, rows: List[dict], ap_ssid: str = '') -> int:
         ap, ids = self.ap_id, self._cell_ids()
         vals = [(run_id, ids[(c['ix'], c['iy'])], ap, c['n'], c['mean'], c['median'], c['var'], c['min'], c['max'],
-                 'ok' if c['n'] >= MIN_SAMPLES_OK else 'low', TO_DB[c['state']])
+                 'ok' if c['n'] >= MIN_SAMPLES_OK else 'low', TO_DB[c['state']],
+                 c['n_detected'], c['n_missed'])
                 for c in rows if (c['ix'], c['iy']) in ids]     # grid_cells 에 없는 칸(벽)은 건너뜀
         if vals:
-            self._q('INSERT INTO grid_stats (run_id, cell_id, ap_id, n, mean, median, var, min, max, confidence, state) '
-                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) '
+            self._q('INSERT INTO grid_stats (run_id, cell_id, ap_id, n, mean, median, var, min, max, confidence, state, n_detected, n_missed) '
+                    'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) '
                     'ON CONFLICT (run_id, cell_id, ap_id) DO UPDATE SET n = EXCLUDED.n, mean = EXCLUDED.mean, '
                     'median = EXCLUDED.median, var = EXCLUDED.var, min = EXCLUDED.min, max = EXCLUDED.max, '
-                    'confidence = EXCLUDED.confidence, state = EXCLUDED.state, computed_at = now()', many=vals)
+                    'confidence = EXCLUDED.confidence, state = EXCLUDED.state, n_detected = EXCLUDED.n_detected, '
+                    'n_missed = EXCLUDED.n_missed, computed_at = now()', many=vals)
         return len(vals)
 
     def read_cells(self, run_id: int) -> Dict[Cell, CellRow]:
-        rows = self._q('SELECT g.ix, g.iy, s.state, s.median, s.n, s.confidence FROM grid_stats s '
+        rows = self._q('SELECT g.ix, g.iy, s.state, s.median, s.n, s.confidence, s.mean, s.n_detected, s.n_missed FROM grid_stats s '
                        'JOIN grid_cells g USING (cell_id) WHERE s.run_id = %s AND s.ap_id = %s', (run_id, self.ap_id))
-        return {(i, j): CellRow(FROM_DB[st], med, n, conf) for i, j, st, med, n, conf in rows}
+        return {(i, j): CellRow(FROM_DB[st], med, n, conf, mean, nd, nm)
+                for i, j, st, med, n, conf, mean, nd, nm in rows}
 
-    def update_cell(self, run_id: int, ix: int, iy: int, state: str, median: Optional[float], n: int) -> bool:
+    def update_cell(self, run_id: int, ix: int, iy: int, state: str, median: Optional[float], n: int,
+                    *, mean=None, n_detected=None, n_missed=0) -> bool:
         cid, ap = self._cell_ids().get((ix, iy)), self.ap_id
         if cid is None:
             return False
-        self._q('INSERT INTO grid_stats (run_id, cell_id, ap_id, n, median, confidence, state) '
-                "VALUES (%s, %s, %s, %s, %s, 'ok', %s) ON CONFLICT (run_id, cell_id, ap_id) DO UPDATE SET "
-                "n = EXCLUDED.n, median = EXCLUDED.median, confidence = 'ok', state = EXCLUDED.state, "
-                'computed_at = now()', (run_id, cid, ap, n, median, TO_DB[state]))
+        n_detected = n if n_detected is None else n_detected
+        if n != n_detected + n_missed:
+            raise ValueError('전체 표본 수와 검출/미검출 수가 다릅니다')
+        self._q('INSERT INTO grid_stats (run_id, cell_id, ap_id, n, mean, median, confidence, state, n_detected, n_missed) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) '
+                'ON CONFLICT (run_id, cell_id, ap_id) DO UPDATE SET '
+                'n = EXCLUDED.n, mean = EXCLUDED.mean, median = EXCLUDED.median, '
+                'n_detected = EXCLUDED.n_detected, n_missed = EXCLUDED.n_missed, '
+                'confidence = EXCLUDED.confidence, state = EXCLUDED.state, '
+                'var = NULL, min = NULL, max = NULL, interpolated = false, baseline_delta = NULL, computed_at = now()',
+                (run_id, cid, ap, n, mean, median, 'ok' if n >= MIN_SAMPLES_OK else 'low',
+                 TO_DB[state], n_detected, n_missed))
         return True
 
     def grid_cells(self) -> List[Tuple[int, int, float, float]]:
