@@ -136,6 +136,10 @@ class RssiScanner(Node):
         freqs = self.tracker.next_freqs(time.monotonic())
         if freqs == []:                                # 전체 대역 스캔 간격 사이 — 스캔 없이 미검출로 보냄
             self.publish(self.get_clock().now(), False, None)
+            # 측정 창(상태 요약의 「최근 측정 N (검출/미검출)」)과 측정 로그에도 미검출로 남김 — 건너뛰면 집계에서 빠짐 (10/15 PM)
+            wait = self.tracker.full_scan_interval - (time.monotonic() - self.tracker.last_full)
+            self.log_sample(f"'{self.tracker.ssid or self.pattern}' 미검출 (채널 모름 — 다음 전체 스캔까지 {max(0.0, wait):.0f} s, 이번엔 스캔 안 함)",
+                            None, None)
             return
         res, fresh = self.scan_once(freqs)
         t_start = res.start_boottime
