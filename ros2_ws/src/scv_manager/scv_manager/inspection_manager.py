@@ -688,7 +688,7 @@ class InspectionManager(Node):
             return
 
         feedback = feedback_message.feedback
-        self.core.update_task_progress(task_id, feedback.progress)
+        self.core.update_task_progress(task_id, feedback.progress, feedback.waypoint_index)
         self.get_logger().info(
             f"{robot_id}: {task_id} 진행률 "
             f"{feedback.progress * 100:.0f}% "

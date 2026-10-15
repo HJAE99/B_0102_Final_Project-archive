@@ -4,6 +4,7 @@ from scv_manager.manager_core import (
     RobotStatusSnapshot,
     RunState,
     TaskState,
+    Waypoint,
 )
 
 
@@ -151,6 +152,22 @@ def test_estop_and_resume_requeue_active_task():
     assert core.run_state == RunState.RUNNING
     assert core.tasks["survey"].state == TaskState.PENDING
     assert core.tasks["survey"].robot_id is None
+
+
+def test_resume_keeps_only_waypoints_not_reached():
+    core = ManagerCore(["robot3"])
+    run_id = core.start_run()
+    points = tuple(Waypoint(float(i), 0.0, 0.0) for i in range(5))
+    core.create_task(task_id="survey", run_id=run_id, task_type=0, priority=1,
+                     target_ref="Z2", waypoints=points)
+    core.assign_task("survey", "robot3")
+    core.start_task("survey")
+    core.update_task_progress("survey", 0.4, 2)     # 점 2 로 가던 중
+
+    core.estop()
+    core.resume()
+    assert core.tasks["survey"].waypoints == points[2:]
+    assert core.tasks["survey"].waypoint_index == 0
 
 
 def test_fixed_role_task_is_not_reassigned_to_other_robot():

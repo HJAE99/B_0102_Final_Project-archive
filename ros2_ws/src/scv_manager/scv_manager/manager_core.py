@@ -78,6 +78,7 @@ class TaskRecord:
     robot_id: Optional[str] = None
     progress: float = 0.0
     reason: str = ""
+    waypoint_index: int = 0     # 로봇이 지금 향하는 점 (feedback, 보낸 waypoints 기준)
 
 
 TERMINAL_TASK_STATES = {
@@ -216,8 +217,9 @@ class ManagerCore:
     def start_task(self, task_id: str) -> None:
         self.tasks[task_id].state = TaskState.RUNNING
 
-    def update_task_progress(self, task_id: str, progress: float) -> None:
+    def update_task_progress(self, task_id: str, progress: float, waypoint_index: int = 0) -> None:
         self.tasks[task_id].progress = progress
+        self.tasks[task_id].waypoint_index = waypoint_index
 
     def finish_task(self, task_id: str, *, ok: bool, reason: str) -> None:
         task = self.tasks[task_id]
@@ -274,6 +276,10 @@ class ManagerCore:
             if task.state in {TaskState.ASSIGNED, TaskState.RUNNING}:
                 task.state = TaskState.CANCELED
                 task.reason = "ESTOP"
+                # 재개 때 지나온 점으로 되돌아가지 않게, 향하던 점부터 남긴다 (그 점은 아직 못 감)
+                if 0 < task.waypoint_index < len(task.waypoints):
+                    task.waypoints = task.waypoints[task.waypoint_index:]
+                task.waypoint_index = 0
 
     def resume(self) -> None:
         self.run_state = RunState.RUNNING
