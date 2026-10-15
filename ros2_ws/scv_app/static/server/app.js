@@ -290,9 +290,13 @@ const freeRect = (m) => new Promise((ok) => {
     ];
     const box = { x0: m.origin_x + cr[0] * r, x1: m.origin_x + (cr[1] + 1) * r, y0: m.origin_y + (h - 1 - rr[1]) * r, y1: m.origin_y + (h - rr[0]) * r };
     const near = 0.3;                                  // 외벽과 나란히 붙은 줄(기울어진 외벽이 안으로 들어온 것)은 빼고 칸막이만
+    const snap = (v, lo, hi) => (v - lo < 0.4 ? lo : hi - v < 0.4 ? hi : v);   // 외벽 0.4 m 안에서 끝나는 칸막이는 외벽에 붙임
     box.walls = walls.filter(([a, b]) => (a[0] === b[0]
       ? Math.min(a[0] - box.x0, box.x1 - a[0]) > near
-      : Math.min(a[1] - box.y0, box.y1 - a[1]) > near));
+      : Math.min(a[1] - box.y0, box.y1 - a[1]) > near))
+      .map(([a, b]) => (a[0] === b[0]
+        ? [[a[0], snap(a[1], box.y0, box.y1)], [b[0], snap(b[1], box.y0, box.y1)]]
+        : [[snap(a[0], box.x0, box.x1), a[1]], [snap(b[0], box.x0, box.x1), b[1]]]));
     ok(box);
   };
   img.onerror = () => ok(null);
