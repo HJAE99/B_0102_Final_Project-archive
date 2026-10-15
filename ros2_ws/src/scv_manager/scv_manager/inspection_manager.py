@@ -225,6 +225,12 @@ class InspectionManager(Node):
         except (RuntimeError, ImportError) as exc:
             self.store = None
             self.get_logger().error(f"칸 맵 저장소를 열지 못했습니다: {exc}")
+            self.publish_alert(
+                level=Alert.LEVEL_ERROR,
+                code="DB_UNAVAILABLE",
+                robot_id="",
+                message=f"칸 맵 저장소를 열지 못했습니다: {exc}",
+            )
         # 관제를 다시 띄우면 DB 에 running 회차가 남아 웹 「순찰 시작」이 막힘 (10/15 실기 run 4) — 기동 때 닫음
         if self.store is not None and bool(self.get_parameter("close_stale_run").value) \
                 and hasattr(self.store, "close_stale_runs"):
@@ -233,12 +239,6 @@ class InspectionManager(Node):
                     self.get_logger().warning(f"관제 재시작 — 남아 있던 run_id={run_id} 를 aborted 로 닫음")
             except RuntimeError as exc:
                 self.get_logger().error(f"남은 회차를 닫지 못했습니다: {exc}")
-            self.publish_alert(
-                level=Alert.LEVEL_ERROR,
-                code="DB_UNAVAILABLE",
-                robot_id="",
-                message=f"칸 맵 저장소를 열지 못했습니다: {exc}",
-            )
 
         self.execute_task_clients = {
             robot_id: ActionClient(
