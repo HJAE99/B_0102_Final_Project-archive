@@ -703,7 +703,10 @@ def main():
     home = nav.getPoseStamped(xyyaw[:2], xyyaw[2])
     # stay_docked:=true 일 때만: 켤 때 undock 하지 않고 도크에서 라이다만 켜 Nav2 를 띄운다 (Dock 에서는 power_saver 가
     # 라이다를 꺼 AMCL 이 map TF 를 못 냄). 작업이 오면 execute() 가 undock → home 다시 → settle 로 맞춘다
+    # getDockedStatus 는 dock_status 가 올 때까지 로그 없이 기다림 (Pi 를 막 켰을 때 수십 초) — 기다리는 중임을 남김
+    nav.get_logger().info('dock_status 기다리는 중 (Pi 의 create3 가 올라오면 이어 감)')
     docked = nav.getDockedStatus()
+    nav.get_logger().info(f'dock_status 받음: {"도크 위" if docked else "도크 밖"}')
     # 10/15 오후: 도크 위에서 start_motor 를 부르면 rplidar 드라이버가 죽는 일이 4번 재현 (robot4 ×3, robot3 ×1, 호출 직후 노드 사라짐)
     # → 기본은 오전 방식(켤 때 undock, 1~5회차 라이다 문제 0번). -p stay_docked:=true 일 때만 도크에 머물며 라이다를 켬
     stay = nav.declare_parameter('stay_docked', False).value

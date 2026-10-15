@@ -247,7 +247,9 @@ class HotspotTracker:
         hits = match_ssid(fresh, ssid=self.ssid)
         if not hits:
             self.misses += 1
-            if self.misses == self.rescan_after_miss:
+            if self.misses == self.rescan_after_miss and self.fixed:
+                events.append(f'{self.misses} 회 연속 미검출 — 채널 {self.fixed} MHz 고정 (핫스팟이 꺼졌거나 채널이 바뀌었으면 rssi_freq 확인)')
+            elif self.misses == self.rescan_after_miss:
                 self.last_full = -math.inf     # 첫 재탐색은 바로
                 events.append(f'{self.misses} 회 연속 미검출 → {self.full_scan_interval:.0f} s 마다 '
                               '전체 대역 스캔으로 채널 재탐색')

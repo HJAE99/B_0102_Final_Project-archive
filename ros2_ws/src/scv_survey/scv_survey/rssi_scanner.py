@@ -82,7 +82,8 @@ class RssiScanner(Node):
                       f"자동 — SSID 에 '{self.pattern}' 가 들어간 AP 중 처음 가장 센 것")
             self.get_logger().info(
                 f'측정 시작: iw dev {self.iface} scan, 대상 {target}, {rate} Hz, robot_id={self.robot_id}. '
-                '처음엔 전체 대역 스캔(약 5 s)으로 채널을 찾는다')
+                + (f'채널 {self.fixed_freq} MHz 고정 — 전체 대역 스캔 안 함' if self.fixed_freq
+                   else '처음엔 전체 대역 스캔(약 5 s)으로 채널을 찾는다'))
         else:
             self.get_logger().info(
                 f'측정 시작: iw dev {self.iface} link (붙어 있는 AP), '
