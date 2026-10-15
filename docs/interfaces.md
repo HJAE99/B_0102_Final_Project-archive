@@ -1,7 +1,12 @@
-# SCV 인터페이스 (초안 v0.2)
+# SCV 인터페이스 — 통신 계약 (v0.3, 10/15 실기 통합 기준)
 
 
-> 2026-10-15 `feature/Integration_RSSI` 변경: 이번 사용자 지시에 따라 RSSI 재점검 판단은 **검출 산술평균 < −72 dBm 또는 미검출 비율 ≥ 0.5**, 전체 표본 최소 3개, **정지 10~15초(기본 15초)**로 변경했다. 아래 10/12 기록의 중앙값·30초·검출 수 0이면 이상이라는 규칙을 이 분기의 재점검에 적용하지 않는다. IF-04/IF-11 결과에 `rssi_mean / n_total / n_missed / duration_s / measurement_valid / measurement_reason`을 추가했다. 기존 `n_samples`는 검출 수, 중앙값·IQR은 진단용으로 유지한다. 무표본·부족·위치/정지 조건 실패는 판정 불가다. 미측정 채우기는 별도 N-8 과제다. 변경 인터페이스는 관제·로봇 PC를 함께 재빌드해야 하며, 전체 DB 후보/이력 연결 완료를 뜻하지 않는다. 세부 범위는 [구현 계획](control/RSSI_REINSPECTION_PLAN.md)의 진행 기록을 본다.
+> **v0.3 (2026-10-15 최종 통합 `temp/integration-1014`, 실기 두 대 순찰로 확인한 계약)** — 아래 표가 지금 코드와 같습니다. 옛 버전 기록(v0.2.x)은 경위로만 남깁니다.
+> - IF-05 설비 점검은 **서비스**이고 서버는 비전 노드(`scv_detection_manager`, 노드 이름 `detection_alert`)입니다. 옛 action 정의는 삭제했습니다.
+> - RSSI 재측정(IF-04 · IF-11 결과)에 `rssi_mean · n_total · n_missed · duration_s · measurement_valid · measurement_reason` 추가 (RSSI 팀 수정). **판정은 1차 · 재측정 모두 검출 RSSI 중앙값 < −72 dBm 또는 미검출 비율 ≥ 0.5, 전체 표본 최소 3개** (10/15 PM 결정 — RSSI 분기의 평균 판정은 적용하지 않음). 정지 측정 10~15초(기본 15초). **재측정은 1차 측정 경로에서 미검출된 칸만** 갑니다.
+> - 미검출 표본도 DB 에 남깁니다 (`net_samples.detected=false`, `rssi_dbm` NULL). 평균 · 히트맵은 검출 값만.
+> - 새 토픽 IF-20 `{ns}/camera/preview` (블랙박스), 새 서비스 `/inspection/abort` (순찰 종료).
+> - `scv_msgs` 를 바꾸면 관제 PC · 로봇 PC 를 **함께** 다시 빌드해야 서로 통신됩니다.
 
 2026-10-10 · 작성 도윤 (PM) · **팀 검토 전 초안입니다. 피드백을 받아 고칩니다.**
 
@@ -65,22 +70,23 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 
 | IF | 이름 | 종류 · 타입 | 보내는 쪽 → 받는 쪽 | QoS · 주기 | 주인 |
 | --- | --- | --- | --- | --- | --- |
-| 02 | `{ns}/survey/raw` | topic · `scv_msgs/NetRaw` | rssi_scanner → survey_buffer (같은 로봇 PC) | reliable · transient_local · KEEP_LAST 600 · 1 Hz | RSSI A |
-| 04 | `{ns}/survey/precise` | action · `scv_msgs/PreciseMeasure` | mission_executor → rssi_scanner (같은 로봇 PC) | — | RSSI A |
-| 05 | `{ns}/inspect_facility` | service · `scv_msgs/InspectFacility` (10/14 action → service) | mission_executor → detection_alert (같은 로봇 PC) | 설비마다 1회 · 자세 보정 주행 없음 (판정 못 하면 UNCONFIRMED) | 비전 B |
+| 02 | `{ns}/survey/raw` | topic · `scv_msgs/NetRaw` | rssi_scanner → manual_tagger · precise_server (같은 로봇 PC). 측정 채널 고정 `rssi_freq` (전체 대역 스캔은 통신을 끊음), 스캔하지 않은 tick 은 보내지 않음 | reliable · transient_local · KEEP_LAST 600 · 1 Hz | RSSI A |
+| 04 | `{ns}/survey/precise` | action · `scv_msgs/PreciseMeasure` | mission_executor → precise_server (같은 로봇 PC). 요청 10~15 s, 측정 전 정지 · 칸 · 위치 확인(measurement_guard) | 재측정 칸마다 1회 | RSSI A |
+| 05 | `{ns}/inspect_facility` | service · `scv_msgs/InspectFacility` | mission_executor → detection_alert (`scv_detection_manager`, 같은 로봇 PC). 종류별 검사(소화기 · 유도등 YOLO, 셔터 RGB-D, 랙 기준 사진)를 `facility_window_s`(6 s) 켜고 판정 → 끄고 IF-19 발행. 관측 자리가 막히면 둘레 0.15–0.45 m 대체 자리에서 같은 방향으로 (reason `ALT_VIEW`) | 설비마다 1회 · 응답 최대 30 s · 자세 보정 주행 없음 | 비전 B |
 | 06 | `{ns}/dock` · `{ns}/undock` | action · `irobot_create_msgs` | mission_executor (로봇 PC) → Create 3 | — | 주행 |
 | 07 | `{ns}/scan` · `odom` · `tf` · `tf_static` / `{ns}/cmd_vel` | topic · 표준 타입 | RPi ↔ Nav2 (로봇 PC) | 센서 best effort · cmd_vel reliable | 주행 |
-| 08 | `{ns}/survey/sample` | topic · `scv_msgs/NetSample` | survey_buffer (로봇 PC) → ros_bridge · network_map_engine (관제 PC) | reliable · depth 50 · 1 Hz (sync 재발행은 depth를 넘지 않게 천천히, 예: 20 Hz 이하) | RSSI A |
-| 09 | `{ns}/survey/sync` | service · `scv_msgs/SyncSamples` | ros_bridge (관제 PC) → survey_buffer (로봇 PC) | 재연결 때 | RSSI A |
-| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | inspection_manager (관제 PC, DB 맵을 읽어) → Nav2 (두 로봇 PC — 시작부터 빈 마스크, 로봇마다 점검 작업 전에 남은 칸으로, v0.2.9) | reliable · transient_local | 관제 A |
+| 08 | `{ns}/survey/sample` | topic · `scv_msgs/NetSample` | manual_tagger (로봇 PC, 위치는 TF map→base_link) → ros_bridge · cell_map_writer (관제 PC). 미검출도 보냄, 관제는 진행 중 회차 · 도크 밖 표본만 저장 | reliable · depth 50 · 1 Hz (sync 재발행은 depth를 넘지 않게 천천히, 예: 20 Hz 이하) | RSSI A |
+| 09 | `{ns}/survey/sync` | service · `scv_msgs/SyncSamples` | ros_bridge (관제 PC) → survey_buffer (로봇 PC) — **미구현** (survey_buffer 없음, 정의만 남김) | 재연결 때 | RSSI A |
+| 10 | `{ns}/keepout_mask` | topic · `nav_msgs/OccupancyGrid` | inspection_manager (관제 PC) → Nav2 (두 로봇 PC — 시작부터 빈 마스크, 점검 작업 전에 **재측정 뒤에도 미검출로 저장된 칸**만, Dock 0.6 m 제외) | reliable · transient_local | 관제 A |
 | 11 | `{ns}/execute_task` | action · `scv_msgs/ExecuteTask` | inspection_manager (관제 PC) → mission_executor (로봇 PC) | — | 관제 A |
 | 12 | `{ns}/status` | topic · `scv_msgs/RobotStatus` | mission_executor (로봇 PC) → inspection_manager · ros_bridge (관제 PC) | reliable · 1 Hz | 관제 A |
-| 14 | `{ns}/oakd/rgb/image_raw/compressed` · depth | topic · `sensor_msgs/CompressedImage` | OAK-D (RPi) → detection_alert (로봇 PC) · CAM 탭 (관제 PC) | best effort · 구독할 때만 | 비전 B |
+| 14 | `{ns}/oakd/rgb/image_raw/compressed` · `oakd/stereo/image_raw/compressedDepth` | topic · `sensor_msgs/CompressedImage` | OAK-D (RPi) → detection_alert · camera_preview (로봇 PC). 관제 PC 는 원본을 받지 않음 (Wi-Fi 대역) | best effort · 구독할 때만 | 비전 B |
 | 15 | `/inspection/candidates` | topic · `scv_msgs/Candidate` | network_map_engine → inspection_manager (관제 PC 안) | reliable · transient_local · KEEP_LAST 100 | RSSI B |
 | 16 | `/inspection/alerts` | topic · `scv_msgs/Alert` | inspection_manager → 관제 웹 (관제 PC 안) | reliable | 관제 A |
-| 16 | `/inspection/start` · `/inspection/estop` · `/inspection/resume` | service · `std_srvs/Trigger` | 관제 웹 → inspection_manager | — | 관제 A |
+| 16 | `/inspection/start` · `/inspection/estop` · `/inspection/resume` · `/inspection/abort` | service · `std_srvs/Trigger` | 관제 웹(ros_bridge) → inspection_manager. abort = 순찰 종료(작업 취소 → 로봇마다 DOCK → 회차 aborted), estop = 멈추고 재개 대기(재개 때 남은 waypoint 만) | — | 관제 A |
 | 16 | `/inspection/reassign` | service · `scv_msgs/Reassign` | 관제 웹 → inspection_manager | — | 관제 A |
-| 19 | `{ns}/inspect/result` | topic · `scv_msgs/InspectionResult` | detection_alert (로봇 PC) → inspection_manager · ros_bridge (관제 PC) | reliable · transient_local · KEEP_LAST 50 | 비전 B |
+| 19 | `{ns}/inspect/result` | topic · `scv_msgs/InspectionResult` | detection_alert (로봇 PC) → inspection_manager · ros_bridge (관제 PC). IF-05 판정마다 1건(회차 · 작업 · 설비 id · 근거 사진 640 px). 소화기면 `detail` 이 JSON `{text, aruco:[{marker_id, manufacture_date, manufacture_number, expiry_date, expiry_status}]}` → DB `inspections.aruco`. (비전 원래의 주행 중 불량 이벤트는 같은 토픽 VOLATILE · id 없음 → 관제는 무시) | reliable · transient_local · KEEP_LAST 50 | 비전 B |
+| 20 | `{ns}/camera/preview` | topic · `sensor_msgs/CompressedImage` | camera_preview (로봇 PC, 주행 중만 · 640 px 1 Hz, 비전이 있으면 검출을 그린 화면) → ros_bridge (관제 PC) → 블랙박스 파일 `scv_media/recordings/r{run}/{robot}/{ms}.jpg` (이력 탭 재생) | best effort · depth 1~5 | 관제 B |
 
 ## 타입 한눈에
 
@@ -94,11 +100,32 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `Alert` | 알림: 수준, 코드, 로봇, 대상, 문구, 늦게 전달됐는지 |
 | `SyncSamples` (srv) | 회차와 `from_seq` 를 주면 그 뒤 샘플을 `survey/sample` 로 다시 발행 |
 | `Reassign` (srv) | 한 로봇의 남은 작업을 다른 로봇으로 (받는 로봇 비우면 manager가 고름) |
-| `ExecuteTask` (action) | 작업 한 건: 종류(SURVEY_SEGMENT·FACILITY_CHECK·REINSPECTION·DOCK), 웨이포인트, 대상, 회차 → 결과 ok·사유, REINSPECTION 이면 RSSI 중앙값·IQR·표본 수 |
-| `PreciseMeasure` (action) | 정지 측정: 시간 → RSSI 중앙값·IQR·표본 수 |
-| `InspectFacility` (srv) | 설비 점검: 설비·회차 → 판정 한 번 (자세 보정 없음, 10/14 · 옛 action 은 T2-6 에서 지움) |
+| `ExecuteTask` (action) | 작업 한 건: 종류(SURVEY_SEGMENT·FACILITY_CHECK·REINSPECTION·DOCK), 웨이포인트, 대상, 회차 → 결과 ok·사유, REINSPECTION 이면 `rssi_median · rssi_iqr · n_samples(검출 수) · n_total · n_missed · rssi_mean · duration_s · measurement_valid · measurement_reason` |
+| `PreciseMeasure` (action) | 정지 측정: 시간(10~15 s) → 위 9개 결과 필드 (중앙값으로 판정, 무표본 · 3개 미만 · 조건 실패는 판정 불가) |
+| `InspectFacility` (srv) | 설비 점검: 작업 · 회차 · 설비 · 종류 → 판정 · 설명 · 원본 경로 (자세 보정 없음, 옛 action 은 10/15 삭제) |
 
 필드와 상수는 각 `.msg` · `.srv` · `.action` 파일의 주석을 보세요.
+
+## 관제 PC 안의 계약 — DB · 웹 API (ros 모드, 10/15)
+
+순찰의 주인은 `inspection_manager`(ROS)이고, 웹(`server_page`)은 같은 프로세스 안 `ros_bridge` 로 ROS 와 이어져 보여 주고 버튼으로 부르기만 합니다. DB 는 PostgreSQL 16 (`scv_db/sql/01_schema.sql`, 여러 번 적용해도 되는 업그레이드 포함).
+
+| 데이터 | 쓰는 쪽 | 표 · 칼럼 | 비고 |
+| --- | --- | --- | --- |
+| 회차 · 작업 | inspection_manager | `runs` · `tasks` (1초마다 sync) | 관제 재시작 때 남은 running 회차는 aborted |
+| 로봇 상태 | ros_bridge ← IF-12 | `robot_status_log` (1 Hz) | 30초 무수신이면 E3 |
+| RSSI 표본 | ros_bridge ← IF-08 | `net_samples` (`detected`, 미검출이면 `rssi_dbm` NULL) | 진행 중 회차 · 도크 밖만, 측정 AP(`aps.is_target`)로 등록된 SSID 만 |
+| 칸 통계 | cell_map_writer · inspection_manager | `grid_stats` (`median` 판정, `mean`, `n_detected`, `n_missed`) | 재측정 결과로 갱신 |
+| 설비 점검 | ros_bridge ← IF-19 | `inspections` (`aruco` JSONB) · `media` (근거 사진) | 설비는 `facilities` 에 등록돼 있어야 저장 (외래키) |
+| 알림 | ros_bridge ← IF-16 alerts | `robot_events` | E1 막힘 · E3 무응답 · E6 판정 못 함 · E7 비상정지 · CLEARED/REMAINS/UNCONFIRMED · SAVE_PENDING |
+| 블랙박스 | ros_bridge ← IF-20 | 파일 `scv_media/recordings/r{run}/{robot}/{ms}.jpg` | DB 표 없음 |
+
+| 웹 API (로그인 쿠키) | 하는 일 |
+| --- | --- |
+| `POST /api/runs` · `/api/runs/{id}/abort` · `/api/runs/{id}/stop` · `/api/runs/resume` | 순찰 시작 · 비상정지 · 순찰 종료 · 재개 → IF-16 서비스 |
+| `GET /api/runs/{id}` (`?lite=1`) | 회차 · 작업 · 후보 · 점검(사진 · ArUco) · 히트맵 · 방문 궤적 |
+| `GET /api/runs/{id}/recording` | 블랙박스 프레임 목록 (로봇별 촬영 시각 · 경로) |
+| `WS /ws/ui` | 로봇 상태 · 알림 · 계획 경로 · 순찰 시작 가능 여부 (1초) |
 
 ## 설계 문서에 없어서 PM 이 채운 부분 — 검토해 주세요
 
@@ -116,7 +143,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | `Candidate` 종류 | 혼잡·로밍 의심은 범위에서 빠져 상수에서 뺌 (1 과 4 만 남김) | RSSI B |
 | `ExecuteTask` 종류 | 다이어그램에 있는 `DOCK` 을 추가. DOCK 작업은 inspection_manager 가 만든다 (측정 → DOCK → 재측정 → DOCK → 점검 → DOCK, 10/12) | 관제 A · 주행 |
 | 회차 전달 | manager가 `ExecuteTask.run_id`에 넣고, mission_executor가 `RobotStatus.run_id`로 내보내고, survey_buffer가 그것을 읽음 · 설비 점검은 mission_executor가 `InspectFacility` 요청의 `run_id`로 넘기고 detection_alert가 `InspectionResult.run_id`에 넣음 (10/12) | 관제 A · 주행 · RSSI A |
-| 재측정 결과 (10/12) | mission_executor가 `PreciseMeasure` 결과(중앙값·IQR·표본 수)를 `ExecuteTask` 결과의 `rssi_median`·`rssi_iqr`·`n_samples`에 그대로 넣음. inspection_manager가 그 칸을 DB에 고침 — 중앙값 −72 dBm 이상이면 해제, 미만이거나 `n_samples` 0 이면 남음 | 주행 · 관제 A |
+| 재측정 결과 (10/15 갱신) | mission_executor가 `PreciseMeasure` 결과 9개 필드를 `ExecuteTask` 결과에 그대로 넣음. inspection_manager가 유효성(measurement_valid · 10~16 s · n_total = 검출 + 미검출) 확인 뒤 중앙값 · 미검출 비율로 판정하고, **저장에 성공한 뒤에만** CLEARED/REMAINS 알림. 저장 실패면 SAVE_PENDING 알림 · 순찰은 계속 · 같은 결과로 재시도 | 주행 · 관제 A · RSSI |
 | 근거 사진 축소본 | JPEG, 긴 변 640 px 이하. 원본은 로봇 PC `image_ref` | 비전 B · 관제 B |
 | 네트워크 후보의 `robot_id` | 측정한 로봇의 이름 (10/12: 두 로봇이 각자 섹터를 측정) | RSSI B · 관제 A |
 | `Reassign` 형식 | 보낼 로봇 · 받을 로봇(비우면 manager) → 옮긴 작업 수 | 관제 A |
@@ -159,7 +186,7 @@ cd ros2_ws
 colcon build --symlink-install
 source install/setup.bash
 ros2 interface list | grep scv_msgs
-# 11개 (msg 6 · srv 2 · action 3)
+# 11개 (msg 6 · srv 3 · action 2)
 ```
 
 `scv_msgs` 를 고치면 그것을 쓰는 패키지도 다시 빌드해야 합니다.
