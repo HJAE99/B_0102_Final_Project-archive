@@ -168,11 +168,14 @@ def match_ssid(bss: Sequence[ScanBss], ssid: str = '', pattern: str = '') -> Lis
 
 
 def run_iw_scan(iface: str, freqs: Optional[Sequence[int]] = None,
-                timeout: float = 10.0) -> ScanResult:
-    """iw scan 을 한 번 실행한다. freqs 가 비면 전체 대역 (iwlwifi 에서 약 5 s)."""
+                timeout: float = 10.0, ssid: str = '') -> ScanResult:
+    """iw scan 을 한 번 실행한다. freqs 가 비면 전체 대역 (iwlwifi 에서 약 5 s).
+    ssid 를 주면 그 SSID 만 묻는 probe(directed probe)를 보낸다 — 주변 AP 전체에 묻지 않음 (10/15)."""
     cmd = ['iw', 'dev', iface, 'scan']
     if freqs:
         cmd += ['freq'] + [str(int(f)) for f in freqs]
+    if ssid:
+        cmd += ['ssid', ssid]
     t0 = _boottime()
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)

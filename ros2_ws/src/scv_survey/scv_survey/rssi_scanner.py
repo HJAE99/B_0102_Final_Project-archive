@@ -128,7 +128,7 @@ class RssiScanner(Node):
             self.log_sample(f"'{self.link_ssid}' 미검출 (link, 지금 SSID: {name})", None, None)
 
     def scan_once(self, freqs):
-        res = run_iw_scan(self.iface, freqs)
+        res = run_iw_scan(self.iface, freqs, ssid=self.tracker.ssid if freqs else '')   # 채널을 알면 iPhone 만 물음
         return res, (fresh_bss(res.bss, res.start_boottime, res.duration_s) if res.ok else [])
 
     def measure_scan(self):
