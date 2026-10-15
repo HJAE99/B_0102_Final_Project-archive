@@ -242,7 +242,7 @@ function OrientSelect() {
 }
 function MapLegend({ opacity, setOpacity, history }) {
   return html`<div class="maplegend">
-    <span class="lk"><i class="ln dash" style="border-top-color:#eab308"></i>계획 경로</span><span class="lk"><i class="ln"></i>방문 궤적</span>
+    <span class="lk"><i class="ln dash" style=${{ borderTopColor: PLAN_COLOR }}></i>계획 경로</span><span class="lk"><i class="ln"></i>방문 궤적</span>
     <span class="lk grad">RSSI <i class="bar"></i><small>약 −90</small><small>−65</small><small>−40 dBm 강</small></span>
     <label class="lk">농도 <input type="range" min="0.15" max="0.9" step="0.05" value=${opacity} onInput=${(e) => setOpacity(Number(e.target.value))} /></label>
     ${history && html`<span class="lk"><i class="um"></i>미측정 · 표본 없음</span><span class="lk"><i class="ff">×</i>도달 실패 · 실행 사유 있음</span>
