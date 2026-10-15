@@ -153,22 +153,31 @@ class Bridge(Node):
 
     # ------------------------------------------------------------ B6 표본
     def on_sample(self, rid: str, m: NetSample):
-        if not (m.run_id and m.detected):                 # 회차 밖 · 미검출(RSSI 없음)은 넣지 않음
+        if not m.detected:                                 # 미검출(RSSI 없음)은 넣지 않음
             return
         with self.lock:
-            self.samples.setdefault((rid, m.run_id), []).append(
+            self.samples.setdefault(rid, []).append(
                 {"seq": m.seq, "stamp": iso(m.stamp), "x": m.x, "y": m.y, "yaw": m.yaw, "pose_ok": m.pose_ok,
                  "rssi_dbm": m.rssi_dbm, "task_id": self.task.get(rid)})
 
     def flush_samples(self):
         with self.lock:
             batches, self.samples = self.samples, {}
-        for (rid, run_id), rows in batches.items():
+        if not batches:
+            return
+        # 표본의 run_id 는 쓰지 않는다 — manual_tagger 는 run_id 파라미터(기본 1)를 고정으로 찍는다.
+        # cell_map_writer 처럼 지금 진행 중인 회차에 붙이고, 진행 중인 회차가 없으면 버린다.
+        try:
+            with self.sp.pool.connection() as conn:
+                r = conn.execute("SELECT run_id FROM runs WHERE status = 'running'").fetchone()
+        except Exception as e:
+            self.get_logger().warning(f"samples: 진행 중 회차 조회 실패: {e}")
+            return
+        if not r:
+            return
+        run_id = r["run_id"]
+        for rid, rows in batches.items():
             try:
-                with self.sp.pool.connection() as conn:     # 끝난 회차 — 로봇은 도크에서도 마지막 run_id 로 계속 보냄
-                    r = conn.execute("SELECT status FROM runs WHERE run_id = %s", (run_id,)).fetchone()
-                if not r or r["status"] != "running":
-                    continue
                 ssid = self.target.get(run_id)
                 if ssid is None:                           # NetSample 에 SSID 가 없어 그 회차 지도의 측정 AP 로
                     with self.sp.pool.connection() as conn:
