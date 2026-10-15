@@ -583,16 +583,33 @@ def restart_nav2(nav):
 
 
 def start_lidar(nav):
-    # TurtleBot4 power_saver 가 Dock 에서 끈 RPLIDAR 모터를 켬 (rplidar_ros 의 {ns}/start_motor, std_srvs/Empty)
+    # TurtleBot4 power_saver 가 Dock 에서 끈 RPLIDAR 모터를 켬 (rplidar_ros 의 {ns}/start_motor, std_srvs/Empty).
+    # 서비스 발견이 늦을 수 있어(10/15 robot4: 5 s 안에 못 찾아 포기 → scan 0 Hz → Nav2 bringup 중단) 60 s 까지 찾고,
+    # 부른 뒤 scan 이 실제로 오는지 보고 안 오면 다시 부름 (최대 5번)
     from std_srvs.srv import Empty
+    from sensor_msgs.msg import LaserScan
+    got = []
+    sub = nav.create_subscription(LaserScan, 'scan', lambda m: got.append(1), qos_profile_sensor_data)
     cli = nav.create_client(Empty, 'start_motor')
-    if not cli.wait_for_service(timeout_sec=5.0):
-        nav.get_logger().warn('start_motor 서비스 없음 — 라이다가 꺼져 있으면 Nav2 bringup 이 멈출 수 있음')
-        return
-    fut = cli.call_async(Empty.Request())
-    rclpy.spin_until_future_complete(nav, fut, timeout_sec=5.0)
-    nav.get_logger().info('Dock 위 — undock 하지 않고 라이다를 켬 (작업이 오면 undock)')
-    time.sleep(2.0)   # 모터가 돌고 scan 이 나올 때까지
+    deadline = time.time() + 60.0
+    while not cli.wait_for_service(timeout_sec=2.0):
+        if time.time() > deadline:
+            nav.get_logger().warn('start_motor 서비스 60 s 동안 없음 — 라이다가 꺼져 있으면 Nav2 bringup 이 멈출 수 있음')
+            nav.destroy_subscription(sub)
+            return
+        nav.get_logger().info('start_motor 서비스 기다리는 중')
+    for n in range(1, 6):
+        fut = cli.call_async(Empty.Request())
+        rclpy.spin_until_future_complete(nav, fut, timeout_sec=5.0)
+        got.clear()
+        end_t = time.time() + 6.0
+        while time.time() < end_t and not got:
+            rclpy.spin_once(nav, timeout_sec=0.2)
+        if got:
+            nav.get_logger().info(f'Dock 위 — undock 하지 않고 라이다를 켬 (작업이 오면 undock), scan 확인 ({n}번째)')
+            break
+        nav.get_logger().warn(f'start_motor 뒤 scan 이 안 옴 — 다시 부름 ({n}/5)')
+    nav.destroy_subscription(sub)
 
 
 def settle(nav):
