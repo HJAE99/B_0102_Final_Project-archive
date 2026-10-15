@@ -533,6 +533,27 @@ def localize(nav, home):
             rclpy.spin_once(nav, timeout_sec=0.1)
 
 
+def wait_nav2_active(nav, node_name='bt_navigator'):
+    # waitUntilNav2Active(localizer='robot_localization') 와 같이 bt_navigator 가 active 가 될 때까지 기다리되,
+    # get_state 한 번에 3초 제한 — 응답을 놓치면 클라이언트를 새로 만들어 다시 부름
+    from lifecycle_msgs.srv import GetState
+    while rclpy.ok():
+        cli = nav.create_client(GetState, f'{node_name}/get_state')
+        if not cli.wait_for_service(timeout_sec=2.0):
+            nav.get_logger().info(f'{node_name}/get_state 서비스 대기 중')
+            nav.destroy_client(cli)
+            continue
+        fut = cli.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(nav, fut, timeout_sec=3.0)
+        state = fut.result().current_state.label if fut.done() and fut.result() is not None else None
+        nav.destroy_client(cli)
+        if state == 'active':
+            nav.get_logger().info('Nav2 is ready for use!')
+            return
+        nav.get_logger().info(f'{node_name} 상태 {state or "응답 없음 — 다시 물음"}')
+        time.sleep(1.0)
+
+
 def start_lidar(nav):
     # TurtleBot4 power_saver 가 Dock 에서 끈 RPLIDAR 모터를 켬 (rplidar_ros 의 {ns}/start_motor, std_srvs/Empty)
     from std_srvs.srv import Empty
@@ -572,7 +593,7 @@ def main():
         start_lidar(nav)
     # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
     localize(nav, home)
-    nav.waitUntilNav2Active(localizer='robot_localization')   # 'amcl' 이면 공분산 0 인 (0,0) 초기 pose 를 다시 보냄
+    wait_nav2_active(nav)   # nav.waitUntilNav2Active 는 get_state 응답을 시간 제한 없이 기다려 놓치면 영원히 멈춤 (10/15 robot3 두 번)
     if not docked:
         settle(nav)   # 도크 위에서는 돌지 않음
     node = MissionExecutor(nav, home)
