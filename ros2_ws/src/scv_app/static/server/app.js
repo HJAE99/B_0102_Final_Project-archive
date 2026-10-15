@@ -648,20 +648,40 @@ const ago = (iso) => {
 };
 
 // 로봇 카드 (10/15 UI 시안) — 지도 위 가로 카드: 담당 구역 · 현재 작업 · 진행률 · 배터리 · 대기 사유. 미수신 값은 — 로
-// 로봇 카드 카메라 (10/15): 주행 중(도킹 · 도킹 중 아님)에만 1초마다 /api/robots/{id}/camera — 로봇 PC 가 320 px 2 Hz 로 줄여 보냄
-function RobotCamera({ id }) {
-  const [t, setT] = useState(Date.now());
-  const [ok, setOk] = useState(true);
-  useEffect(() => { const h = setInterval(() => setT(Date.now()), 1000); return () => clearInterval(h); }, []);
-  return html`<div class="rcam">
-    <img src=${`/api/robots/${id}/camera?t=${t}`} alt="" style=${{ display: ok ? 'block' : 'none' }}
-      onLoad=${() => setOk(true)} onError=${() => setOk(false)} />
-    ${!ok && html`<span>영상 대기 중…</span>`}</div>`;
+// 로봇 카드 설비 점검 (10/15): 이번 회차에서 이 로봇의 가장 최근 판정 — 새 결과가 오면 12초 동안 강조(팝업)
+const FINAL_LABEL = { normal: '정상', abnormal: '이상', unconfirmed: '판정 못 함' };
+const EXPIRY_LABEL = { VALID: '유효', EXPIRED: '만료', UNKNOWN: '미확인' };
+// 소화기 ArUco 제조 정보 한 줄씩: ID · 제조년월 · 제조번호 · 만료 상태 (inspections.aruco)
+const arucoLines = (list) => (list || []).map((a) => html`<small key=${a.marker_id} class="aruco">
+  ArUco ${a.marker_id} · 제조 ${(a.manufacture_date || '—').slice(0, 7)} · ${a.manufacture_number || '—'} · <b class=${'exp ' + (a.expiry_status || '')}>${EXPIRY_LABEL[a.expiry_status] || a.expiry_status || '—'}</b></small>`);
+function InspectionPop({ list }) {
+  const last = list.length ? list[list.length - 1] : null;
+  const [fresh, setFresh] = useState(false);
+  const seen = useRef(null);
+  useEffect(() => {
+    if (!last || seen.current === last.inspection_id) return;
+    const first = seen.current === null;
+    seen.current = last.inspection_id;
+    if (first && Date.now() - new Date(last.inspected_at) > 15000) return;   // 화면을 연 때 이미 있던 결과는 강조하지 않음
+    setFresh(true);
+    const h = setTimeout(() => setFresh(false), 12000);
+    return () => clearTimeout(h);
+  }, [last && last.inspection_id]);
+  if (!last) return html`<div class="rinsp none"><span>설비 점검 결과가 여기에 뜹니다</span></div>`;
+  const photo = (last.photos || [])[0];
+  return html`<div class=${'rinsp ' + (fresh ? 'fresh' : '')} style=${{ borderColor: FINAL_COLOR[last.final] }}>
+    ${photo ? html`<a href=${'/media/' + photo} target="_blank"><img src=${'/media/' + photo} alt="" /></a>` : html`<div class="noimg">사진 없음</div>`}
+    <div class="rinsp-t">
+      <b>${last.facility_id}</b> <small>${FAC_LABEL[last.facility_type] || last.facility_type || ''}</small>
+      <span class="cand" style=${{ background: FINAL_COLOR[last.final] }}>${FINAL_LABEL[last.final] || last.final}</span>
+      <small class="no">${last.detail} · ${fmtTime(last.inspected_at)}</small>
+      ${arucoLines(last.aruco)}
+      <small class="no">이번 순찰 점검 ${list.length}건 · 이상 ${list.filter((i) => i.final === 'abnormal').length}</small>
+    </div></div>`;
 }
 
-function RobotCard({ r, sector, why, timeout }) {
+function RobotCard({ r, sector, why, timeout, insp }) {
   const [k, label] = robotPhase(r), st = r.state;
-  const driving = r.connected && st && !st.is_docked && !['DOCKED', 'DOCKING'].includes(st.nav_state);
   const prog = st && st.progress !== null && st.progress !== undefined ? Math.round(st.progress * 100) : null;
   const bat = st && st.battery_pct !== null && st.battery_pct !== undefined ? st.battery_pct : null;
   const col = robotColor(r.robot_id);
@@ -676,7 +696,7 @@ function RobotCard({ r, sector, why, timeout }) {
         <div class="rcbar"><span>배터리</span><i><b style=${{ width: (bat || 0) + '%', background: bat !== null && bat <= 30 ? '#dc2626' : '#0f766e' }}></b></i><span class="num">${bat === null ? '—' : bat.toFixed(0) + '%'}</span></div>
         <div class="rcl small"><span>위치 ${fmtNum(st.x)}, ${fmtNum(st.y)}${st.yaw === null ? '' : ' · ' + (st.yaw * 180 / Math.PI).toFixed(0) + '°'}</span>
           <span class="no">${r.connected ? '마지막 보고 ' + ago(st.ts) : '마지막 위치 · ' + ago(st.ts)}</span></div>
-        ${driving ? html`<${RobotCamera} id=${r.robot_id} />` : html`<div class="rcam off"><span>${st.is_docked || st.nav_state === 'DOCKED' ? '도킹 중 — 카메라 꺼짐' : st.nav_state === 'DOCKING' ? '도킹하는 중' : '카메라 없음'}</span></div>`}
+        <${InspectionPop} list=${insp || []} />
         ${why && html`<div class="rcwhy">${why}</div>`}
         ${r.is_active && st.raw && html`<details class="raw"><summary>관제 메모리 상태 · E3까지 ${st.ttl_s}초</summary>
           <div class="rkv mono">${Object.entries(st.raw).map(([kk, v]) => html`<span key=${kk}>${kk}</span><span>${v === '' ? '—' : v}</span>`)}</div></details>`}
@@ -758,7 +778,8 @@ function MonitorPage({ onAuthLost }) {
     </div>
     <h3 class="sect">로봇 현황 · ${ui ? ui.robots.length : 0}대</h3>
     <div class="rcards">${ui && ui.robots.length ? ui.robots.map((r) => html`<${RobotCard} key=${r.robot_id} r=${r}
-      sector=${sectorOf[r.robot_id]} why=${whyOf[r.robot_id]} timeout=${ui.timeout_s} />`) : html`<p class="no">등록된 로봇이 없습니다.</p>`}</div>
+      sector=${sectorOf[r.robot_id]} why=${whyOf[r.robot_id]} timeout=${ui.timeout_s}
+      insp=${((run && run.inspections) || []).filter((i) => i.robot_id === r.robot_id)} />`) : html`<p class="no">등록된 로봇이 없습니다.</p>`}</div>
     <div class="mapbox">
       <div class="head">
         <b>현재 점검 지도</b>
@@ -850,6 +871,35 @@ function StartModal({ onClose, onStarted }) {
     <div class="tools"><span class="sp"></span>
       <button class="btn primary" disabled=${busy || !form || !form.can_start} onClick=${submit}>순찰 시작</button></div>
   </div></div>`;
+}
+
+// 이력 › 블랙박스 (10/15): 주행 중 로봇 카메라 1 Hz 프레임 (비전 로봇은 검출을 그린 화면). 로봇 골라 넘겨 보기 · 재생(4배속)
+function Recording({ runId }) {
+  const [rec, setRec] = useState(null);
+  const [rid, setRid] = useState('');
+  const [i, setI] = useState(0);
+  const [play, setPlay] = useState(false);
+  useEffect(() => {
+    setRec(null); setI(0); setPlay(false);
+    if (runId) api(`/api/runs/${runId}/recording`).then((x) => { setRec(x); setRid(Object.keys(x)[0] || ''); }).catch(() => setRec({}));
+  }, [runId]);
+  const frames = (rec && rec[rid]) || [];
+  useEffect(() => {
+    if (!play) return;
+    const h = setInterval(() => setI((v) => (v + 1 < frames.length ? v + 1 : (setPlay(false), v))), 250);
+    return () => clearInterval(h);
+  }, [play, frames.length]);
+  const f = frames[Math.min(i, frames.length - 1)];
+  return html`<div class="panel"><div class="ttl"><b>주행 영상 기록 (블랙박스)</b><code>recordings</code><span class="n">${frames.length}</span></div>
+    ${!rec ? html`<p class="no">불러오는 중…</p>` : !Object.keys(rec).length ? html`<p class="no">이 순찰의 영상 기록이 없습니다 (주행 중 1초에 한 장 저장).</p>` : html`
+      <div class="recbar">
+        ${Object.keys(rec).map((k) => html`<button key=${k} class=${'btn ' + (k === rid ? 'primary' : '')} onClick=${() => { setRid(k); setI(0); setPlay(false); }}>${k} · ${rec[k].length}장</button>`)}
+        <button class="btn" disabled=${!frames.length} onClick=${() => setPlay(!play)}>${play ? '멈춤' : '재생 ×4'}</button>
+        <span class="mono">${f ? new Date(f[0]).toLocaleTimeString('ko-KR', { hour12: false }) : '—'} · ${frames.length ? i + 1 : 0} / ${frames.length}</span>
+      </div>
+      <input class="recslider" type="range" min="0" max=${Math.max(0, frames.length - 1)} value=${i} onInput=${(e) => { setPlay(false); setI(+e.target.value); }} />
+      ${f && html`<div class="recview"><img src=${f[1]} alt="" /></div>`}`}
+  </div>`;
 }
 
 function HistoryPage({ onAuthLost }) {
@@ -962,12 +1012,14 @@ function HistoryPage({ onAuthLost }) {
           <td class="mono">${c.reinspect_task_id || '—'}</td><td>${c.precise_best === null ? '—' : fmtNum(c.precise_best) + ' dBm'}</td>
           <td><span class="cand" style=${{ background: CAND_COLOR[c.outcome || c.status] }}>${c.outcome || c.status}</span>${c.finding_id ? ' · 확정 이상 ' + c.finding_id : ''}</td></tr>`)}
         </tbody></table>` : html`<p class="no">후보 없음 — 칸 중앙값(가장 센 AP)이 ${d.thr} dBm 미만인 칸이 나오면 생깁니다.</p>`}</div>
+      <${Recording} runId=${runId} />
       <div class="panel"><div class="ttl"><b>설비 탐지 (1회 판정)</b><code>inspections</code><span class="n">${d.inspections.length}</span></div>
-        ${d.inspections.length ? html`<table class="grid"><thead><tr><th>설비</th><th>판정</th><th>최종</th><th>정면</th><th>보정</th><th>압력계</th><th>사진</th></tr></thead>
+        ${d.inspections.length ? html`<table class="grid"><thead><tr><th>설비</th><th>판정</th><th>최종</th><th>정면</th><th>보정</th><th>압력계</th><th>ArUco 제조 정보</th><th>사진</th></tr></thead>
         <tbody>${d.inspections.map((i) => html`<tr key=${i.inspection_id}>
           <td class="mono">${i.facility_id}</td><td>${i.detail}</td>
           <td><span class="cand" style=${{ background: FINAL_COLOR[i.final] }}>${i.final}</span></td>
           <td>${i.frontal ? '예' : '아니요'}</td><td>${i.pose_retry}</td><td>${i.gauge_state || '—'}</td>
+          <td>${i.aruco && i.aruco.length ? html`<div class="arucol">${arucoLines(i.aruco)}</div>` : '—'}</td>
           <td>${(i.photos || []).map((k) => html`<a key=${k} href=${'/media/' + k} target="_blank"><img class="thumb" src=${'/media/' + k} /></a>`)}</td></tr>`)}
         </tbody></table>` : html`<p class="no">판정 없음</p>`}</div>
     </div>`}

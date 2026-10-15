@@ -53,7 +53,7 @@ def _nodes(context):
     if arg('rssi') == 'true':
         nodes.append(include('scv_survey', 'laptop_test.launch.py', pose_source='tf', robot_ns=ns, rviz='false',
                              iface=arg('iface'), ssid=arg('ssid'), rssi_freq=arg('rssi_freq')))
-    # 관제 웹 로봇 카드 카메라: 주행 중만 320 px 2 Hz 로 줄여 {ns}/camera/preview. 비전이 있으면 검출을 그린 화면을 보냄
+    # 블랙박스: 주행 중만 640 px 1 Hz 로 줄여 {ns}/camera/preview → 관제가 회차별 저장(이력 탭). 비전이 있으면 검출을 그린 화면
     if arg('camera_preview') == 'true':
         source = 'fire_extinguisher/detections/compressed' if arg('vision') == 'true' else 'oakd/rgb/image_raw/compressed'
         nodes.append(Node(package='scv_monitor', executable='camera_preview', namespace=ns, output='screen',
@@ -80,7 +80,7 @@ def generate_launch_description():
                               description='Nav2 를 띄우는 시간 [s]. mission_executor 가 undock·초기 pose 를 끝낸 뒤여야 한다'),
         DeclareLaunchArgument('rssi_freq', default_value='0', description='측정 AP 채널 고정 [MHz] (0 = 찾기, 전체 대역 스캔이 통신을 끊음)'),
         DeclareLaunchArgument('rssi', default_value='true', description='RSSI 측정(rssi_scanner · manual_tagger). 로봇에 얹지 않은 PC 면 false'),
-        DeclareLaunchArgument('camera_preview', default_value='true', description='관제 웹 로봇 카드 카메라 (주행 중만, 320 px 2 Hz)'),
+        DeclareLaunchArgument('camera_preview', default_value='true', description='블랙박스 프레임 (주행 중만, 640 px 1 Hz, 관제가 이력으로 저장)'),
         DeclareLaunchArgument('vision', default_value='false', description='실제 비전 노드 scv_detection_manager (켜면 fake_vision 무시)'),
         DeclareLaunchArgument('vision_show', default_value='false', description='비전 결과 창 (로봇 PC 에 화면이 있을 때만)'),
         DeclareLaunchArgument('vision_device', default_value='auto', description='YOLO 장치 (auto · cpu · cuda:0)'),

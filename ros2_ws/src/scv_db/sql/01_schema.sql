@@ -283,6 +283,8 @@ CREATE TABLE IF NOT EXISTS inspections (
     CONSTRAINT inspections_gauge_needs_frontal CHECK (gauge_state IS NULL OR frontal),
     CONSTRAINT inspections_facility_fkey FOREIGN KEY (map_id, facility_id) REFERENCES facilities (map_id, facility_id)
 );
+-- 10/15: 소화기 ArUco 마커의 제조 정보 [{marker_id, manufacture_date, manufacture_number, expiry_date, expiry_status}] (비전 IF-05 결과)
+ALTER TABLE inspections ADD COLUMN IF NOT EXISTS aruco JSONB;
 CREATE INDEX IF NOT EXISTS inspections_facility_time_idx ON inspections (facility_id, inspected_at);   -- 설비별 이력 (지도 조건은 run으로)
 CREATE INDEX IF NOT EXISTS inspections_task_idx ON inspections (task_id);
 

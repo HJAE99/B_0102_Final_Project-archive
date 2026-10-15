@@ -352,11 +352,23 @@ h3.sect { font-size: 13px; color: var(--muted); margin: 0 0 8px; font-weight: 60
 .rcbar i b { display: block; height: 100%; border-radius: 4px; }
 .rcbar .num { text-align: right; color: var(--ink, #1f2a30); }
 .rcwhy { font-size: 11.5px; color: #b45309; }
-.rcam { margin-top: 8px; aspect-ratio: 16 / 9; background: #0f172a; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.rcam img { width: 100%; height: 100%; object-fit: contain; }
-.rcam span { color: #94a3b8; font-size: 11.5px; }
-.rcam.off { aspect-ratio: auto; padding: 6px; background: var(--bg, #f1f5f9); }
-.rcam.off span { color: var(--muted); }
+.rinsp { margin-top: 8px; display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; padding: 6px; transition: box-shadow .3s, background .3s; }
+.rinsp img, .rinsp .noimg { width: 96px; height: 72px; object-fit: cover; border-radius: 4px; background: #0f172a; flex: none; }
+.rinsp .noimg { display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 11px; }
+.rinsp-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 12px; }
+.rinsp-t .cand { align-self: flex-start; }
+.rinsp.none { border-left-width: 1px; justify-content: center; padding: 10px; }
+.rinsp.none span { color: var(--muted); font-size: 11.5px; }
+.rinsp.fresh { animation: rinsp-pop 1.2s ease-in-out 3; box-shadow: 0 0 0 3px rgba(234, 179, 8, .45); }
+@keyframes rinsp-pop { 50% { transform: scale(1.03); } }
+.aruco { display: block; font-size: 11px; }
+.aruco .exp.EXPIRED { color: #dc2626; }
+.aruco .exp.VALID { color: #16a34a; }
+.arucol { display: flex; flex-direction: column; }
+.recbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.recslider { width: 100%; }
+.recview { margin-top: 6px; background: #0f172a; border-radius: 6px; display: flex; justify-content: center; }
+.recview img { max-width: 100%; max-height: 420px; }
 .rcard details.raw summary { font-size: 11px; color: var(--muted); cursor: pointer; }
 .rcard details.raw .rkv { font-size: 11px; }
 .mapbox .head { align-items: center; }

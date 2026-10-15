@@ -1,4 +1,4 @@
-"""로봇 PC: 관제 웹 로봇 카드용 작은 카메라 영상 (10/15).
+"""로봇 PC: 관제 블랙박스용 카메라 프레임 (10/15). 실시간 표시는 없고 관제가 회차별로 저장해 이력 탭에서 본다.
 
 {ns}/<source> (CompressedImage) 를 받아 가로 width px · rate Hz JPEG 로 줄여 {ns}/camera/preview 로 낸다.
 도킹 중(mission_executor 의 {ns}/status 가 DOCKED · DOCKING)에는 카메라를 구독하지 않는다 — Pi 가 이 PC 로 원본을 보내지 않게.
@@ -25,8 +25,8 @@ class CameraPreview(Node):
     def __init__(self):
         super().__init__('camera_preview')
         self.source = self.declare_parameter('source', 'oakd/rgb/image_raw/compressed').value
-        self.width = int(self.declare_parameter('width', 320).value)
-        self.period = 1.0 / float(self.declare_parameter('rate', 2.0).value)
+        self.width = int(self.declare_parameter('width', 640).value)
+        self.period = 1.0 / float(self.declare_parameter('rate', 1.0).value)
         self.quality = int(self.declare_parameter('quality', 60).value)
         self.pub = self.create_publisher(CompressedImage, 'camera/preview', PREVIEW_QOS)
         self.sub = None

@@ -830,7 +830,7 @@ class ScvDetectionManager(Node):
             if not started.success:
                 detail = f'{mode}: {started.message}'
             else:
-                seen, last = None, None
+                seen, last, markers = None, None, {}
                 end = time.monotonic() + self.facility_window
                 while time.monotonic() < end and not self._stop_event.is_set():
                     if any(k == kind for k, _ in self._facility_defects):
@@ -840,6 +840,10 @@ class ScvDetectionManager(Node):
                     if outcome and outcome.get('time') != seen:
                         seen = outcome.get('time')
                         last = self._facility_status(kind, outcome) or last
+                        for rep in outcome.get('aruco_markers') or []:     # 소화기 ArUco 제조 정보 (ID 별 마지막 값)
+                            for mk in rep.get('markers') or []:
+                                markers[mk['marker_id']] = {k: mk.get(k) for k in (
+                                    'marker_id', 'manufacture_date', 'manufacture_number', 'expiry_date', 'expiry_status')}
                     time.sleep(0.1)
                 with self._state_lock:
                     still = self._inspection_mode == mode
@@ -852,6 +856,8 @@ class ScvDetectionManager(Node):
                     verdict, detail = InspectionResult.NORMAL, f'{mode}: NORMAL'
                 else:
                     detail = f'{mode}: 판정 못 함 ({last or "결과 없음"}, {self.facility_window:.0f}s)'
+                if markers:                                       # 관제가 inspections.aruco 로 저장 (ros_bridge 가 풂)
+                    detail = json.dumps({'text': detail, 'aruco': [markers[k] for k in sorted(markers)]}, ensure_ascii=False)
             self._facility_defects = None
         self._publish_facility_result(request, verdict, detail)
         self.get_logger().info(f'inspect_facility {request.facility_id} kind={kind} → verdict={verdict} {detail[:120]}')
@@ -1864,8 +1870,7 @@ class ScvDetectionManager(Node):
             if mode == 'yolo':
                 summary = ', '.join(detections) if detections else 'none'
                 self.get_logger().info(f'detections={len(detections)} [{summary}]')
-                for log in extinguisher_aruco.ExtinguisherAruco.format_logs(aruco_reports):
-                    self.get_logger().info(log)
+                # ArUco 제조 정보는 로그 대신 IF-05 결과로 관제 DB(inspections.aruco)에 저장한다 (10/15)
             elif rack_report is not None:
                 self.get_logger().info(f"rack verdict={rack_report['verdict']} reason={rack_report['reason']}")
             elif shutter_report is not None:

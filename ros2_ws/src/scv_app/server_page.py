@@ -53,7 +53,7 @@ import yaml
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from psycopg import sql
@@ -1408,7 +1408,6 @@ CURRENT_RUN: dict[str, Any] = {"run_id": None}         # 메모리 — 진행 �
 RECENT_EVENTS: collections.deque = collections.deque(maxlen=1000)   # 메모리 — 최근 이벤트 (시작할 때 robot_events에서)
 ROBOT_PLAN: dict[str, list] = {}                         # ros 모드 — robot_id → Nav2 전역 경로 점 [(x, y)] (ros_bridge, 모니터 지도)
 ESTOP: dict[str, bool] = {"on": False}                   # ros 모드 — 비상정지 중 (ros_bridge, 「재개」 버튼)
-CAMERA: dict[str, tuple[float, bytes]] = {}              # ros 모드 — robot_id → (받은 시각, 작은 JPEG). 로봇 PC camera_preview, 주행 중만
 LIVE_CELLS: dict[int, dict[int, dict[int, list[float]]]] = {}       # 메모리 — run → cell → ap → [n, sum, sumsq, last] (히트맵)
 AP_SEEN: dict[int, float] = {}                         # ap_id → 그 SSID 값을 마지막으로 받은 시각(monotonic)
 GRID_CACHE: dict[int, dict[str, Any]] = {}             # map_id → {"cells": {(ix, iy): (cell_id, sector)}, "ox", "oy", "g"}
@@ -2053,12 +2052,12 @@ def on_inspection(rid: str, b: dict[str, Any]) -> dict[str, Any]:
             return {"ok": True, "stored": 0, "reason": "없는 task"}
         row = conn.execute(
             "INSERT INTO inspections (inspection_uid, task_id, run_id, robot_id, map_id, facility_id, detail, final, frontal, "
-            "pose_retry, gauge_state, confidence, bbox, model_version, inspected_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING inspection_id",
+            "pose_retry, gauge_state, confidence, bbox, model_version, inspected_at, aruco) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING inspection_id",
             (b["inspection_uid"], b["task_id"], t["run_id"], rid, t["map_id"], b["facility_id"], b["detail"], b["final"],
              bool(b["frontal"]), int(b.get("pose_retry", 0)), b.get("gauge_state"), b.get("confidence"),
              Jsonb(b["bbox"]) if b.get("bbox") is not None else None, str(b.get("model_version", "unknown"))[:32],
-             b["inspected_at"])).fetchone()
+             b["inspected_at"], Jsonb(b["aruco"]) if b.get("aruco") else None)).fetchone()
     return {"ok": True, "inspection_id": row and row["inspection_id"]}
 
 
@@ -2269,14 +2268,16 @@ def api_run_events(run_id: int, request: Request):
     return {"events": rows}
 
 
-@app.get("/api/robots/{robot_id}/camera")
-def api_robot_camera(robot_id: str, request: Request):
-    """로봇 카드 카메라 — 최근 5 s 안에 받은 작은 JPEG. 도킹 중이거나 끊기면 404 (화면은 「영상 없음」)"""
+@app.get("/api/runs/{run_id}/recording")
+def api_run_recording(run_id: int, request: Request):
+    """이력 탭 블랙박스 — 로봇별 [촬영 시각 ms, /media 경로] (ros_bridge 가 주행 중 1 Hz 로 저장한 프레임)"""
     current_user(request)
-    ts, jpeg = CAMERA.get(robot_id, (0.0, b""))
-    if time.time() - ts > 5.0:
-        raise HTTPException(404, "영상 없음")
-    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    base = MEDIA_DIR / "recordings" / f"r{run_id}"
+    out = {}
+    for d in sorted(base.iterdir()) if base.is_dir() else []:
+        frames = sorted(int(f.stem) for f in d.glob("*.jpg") if f.stem.isdigit())
+        out[d.name] = [[t, f"/media/recordings/r{run_id}/{d.name}/{t}.jpg"] for t in frames]
+    return out
 
 
 @app.get("/api/runs/{run_id}")
@@ -2297,7 +2298,7 @@ def api_run_detail(run_id: int, request: Request, lite: bool = False):
             "LEFT JOIN findings f USING (candidate_id) WHERE c.run_id = %s ORDER BY c.candidate_id", (run_id,)).fetchall()
         ins = conn.execute(
             "SELECT i.inspection_id, i.task_id, i.robot_id, i.facility_id, i.detail, i.final, i.frontal, i.pose_retry, "
-            "i.gauge_state, i.confidence, i.inspected_at, f.expected_x, f.expected_y, f.facility_type, "
+            "i.gauge_state, i.confidence, i.inspected_at, i.aruco, f.expected_x, f.expected_y, f.facility_type, "
             "(SELECT array_agg(md.object_key ORDER BY md.media_id) FROM media md WHERE md.inspection_id = i.inspection_id) AS photos "
             "FROM inspections i JOIN facilities f ON f.map_id = i.map_id AND f.facility_id = i.facility_id "
             "WHERE i.run_id = %s ORDER BY i.inspection_id", (run_id,)).fetchall()

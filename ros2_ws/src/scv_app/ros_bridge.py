@@ -8,13 +8,15 @@
   (작업 줄 tasks 는 inspection_manager 가 직접 DB 에 쓴다 — sync_tasks. 이 다리는 읽기만)
   B6 /{rid}/survey/sample (NetSample)        → on_samples (1초 묶음)             (히트맵 · 칸별 측정값)
   B7 /{rid}/plan (nav_msgs/Path, Nav2 전역 경로) → sp.ROBOT_PLAN (모니터 지도에 점, RViz 처럼)
-  B8 /{rid}/camera/preview (CompressedImage, 로봇 PC camera_preview — 주행 중만, 320 px 2 Hz) → sp.CAMERA (로봇 카드 영상)
+  B8 /{rid}/camera/preview (CompressedImage, 로봇 PC camera_preview — 주행 중만, 640 px 1 Hz) → 블랙박스 파일
+     scv_media/recordings/r{run}/{rid}/{ms}.jpg (진행 중 회차 · 도크 밖일 때만) — 이력 탭에서 넘겨 봄 (실시간 표시는 없음)
   비상정지 여부: estop · resume 응답과 E7 · RESUMED 알림 → sp.ESTOP["on"] (모니터 「재개」 버튼)
 server_page 를 import 하지 않고 시작할 때 모듈(sp)을 받아 쓴다 (server_page 는 __main__ 으로 뜨므로)."""
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import threading
 import time
 import uuid
@@ -42,7 +44,7 @@ DB_CODES = {"E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "CANDIDATE", "CONFIR
 CONTROL_CODES = {"E3", "E8"}
 NEED_TASK = {"CANDIDATE", "CONFIRMED", "CLEARED", "UNCONFIRMED"}
 LEVEL = ("info", "warn", "error")
-CAMERA_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)   # 최신 1장만, 놓쳐도 됨
+CAMERA_QOS = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)   # 블랙박스 프레임 — 놓쳐도 됨
 STATUS_QOS = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 RESULT_QOS = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 SAMPLE_QOS = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -71,7 +73,7 @@ class Bridge(Node):
             self.create_subscription(NetSample, f"/{rid}/survey/sample", lambda m, r=rid: self.on_sample(r, m), SAMPLE_QOS)
             self.create_subscription(Path, f"/{rid}/plan", lambda m, r=rid: self.on_plan(r, m), STATUS_QOS)
             self.create_subscription(CompressedImage, f"/{rid}/camera/preview",
-                                     lambda m, r=rid: self.sp.CAMERA.__setitem__(r, (time.time(), bytes(m.data))), CAMERA_QOS)
+                                     lambda m, r=rid: self.on_frame(r, m), CAMERA_QOS)
         self.create_subscription(Alert, "/inspection/alerts", self.on_alert, 10)
         self.clients_ = {n: self.create_client(Trigger, f"/inspection/{n}") for n in ("start", "estop", "resume", "abort")}
         self.create_timer(1.0, self.flush_samples)
@@ -97,6 +99,19 @@ class Bridge(Node):
         return {"ok": bool(r.success), "message": r.message}
 
     # ------------------------------------------------------------ B7 Nav2 경로
+    def on_frame(self, rid: str, m: CompressedImage):
+        """블랙박스: 진행 중 회차 · 도크 밖 프레임만 파일로 (파일 이름 = 촬영 시각 ms). 이력 탭이 목록을 읽어 재생"""
+        run_id = self.sp.CURRENT_RUN["run_id"]
+        if not run_id or self.docked.get(rid) or not m.data:
+            return
+        ms = m.header.stamp.sec * 1000 + m.header.stamp.nanosec // 1_000_000 or int(time.time() * 1000)
+        d = self.sp.MEDIA_DIR / "recordings" / f"r{run_id}" / rid
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{ms}.jpg").write_bytes(bytes(m.data))
+        except OSError as e:
+            self.get_logger().warning(f"블랙박스 {rid}: {e}", throttle_duration_sec=30.0)
+
     def on_plan(self, rid: str, m: Path):
         """전역 경로를 약 0.1 m 간격 점으로 줄여 둠 — 웹이 1초마다 가져감"""
         pts, last = [], None
@@ -183,9 +198,13 @@ class Bridge(Node):
                 return
             uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{rid}|{m.run_id}|{m.task_id}|{m.facility_id}"))
             detail, final = VERDICT.get(m.verdict, ("OCCLUDED", "unconfirmed"))
+            try:                                            # 비전이 소화기 ArUco 제조 정보를 detail JSON 에 실어 보냄 (10/15)
+                aruco = json.loads(m.detail).get("aruco") if m.detail.startswith("{") else None
+            except (ValueError, AttributeError):
+                aruco = None
             self.sp.on_inspection(rid, {"inspection_uid": uid, "task_id": m.task_id, "facility_id": m.facility_id,
                                         "detail": detail, "final": final, "frontal": m.verdict != 5, "pose_retry": 0,
-                                        "model_version": "yolo26n", "inspected_at": iso(m.stamp)})
+                                        "model_version": "yolo26n", "inspected_at": iso(m.stamp), "aruco": aruco})
             if m.image.data and self.sp.MAIN_LOOP is not None:
                 meta = {"inspection_uid": uid, "index": 1, "kind": "rgb", "captured_at": iso(m.stamp)}
                 asyncio.run_coroutine_threadsafe(self.sp.on_media(rid, meta, bytes(m.image.data)), self.sp.MAIN_LOOP)
