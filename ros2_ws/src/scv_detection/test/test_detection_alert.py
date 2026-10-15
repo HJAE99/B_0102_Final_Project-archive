@@ -84,7 +84,8 @@ def test_topics_and_qos(make_node, namespace):
     assert node.subscription.qos_profile.depth == 1
     assert node.subscription.qos_profile.reliability == module.ReliabilityPolicy.RELIABLE
     assert node.result_topic == 'inspect/result'
-    assert node.result_publisher.topic_name == prefix + '/inspect/result'
+    assert node.facility_result_publisher.topic_name == prefix + '/inspect/result'
+    assert node.result_publisher.topic_name == prefix + '/inspect/defects'
     assert node.result_publisher.qos_profile.depth == 10
     assert node.result_publisher.qos_profile.reliability == module.ReliabilityPolicy.RELIABLE
     assert node.result_publisher.qos_profile.durability.name == 'VOLATILE'

@@ -404,7 +404,9 @@ class ScvDetectionManager(Node):
         self.device = 'cpu'
         self.topic = 'oakd/rgb/image_raw/compressed'
         self.output_topic = 'fire_extinguisher/detections/compressed'
-        self.result_topic = 'inspect/result'
+        self.result_topic = 'inspect/result'      # IF-05 판정 (회차 · 작업 · 설비 id, TRANSIENT_LOCAL) — 관제가 저장
+        self.defect_topic = 'inspect/defects'     # 검사 중 순간 불량 이벤트 (VOLATILE) — 같은 토픽에 QoS 가 다른 발행자가
+        #                                           둘이면 관제(TRANSIENT_LOCAL 구독)에 「incompatible QoS」 가 나서 나눔 (10/16)
         self.conf = float(self.get_parameter("conf").value)
         self.iou = float(self.get_parameter("iou").value)
         self.imgsz = int(self.get_parameter("imgsz").value)
@@ -440,8 +442,8 @@ class ScvDetectionManager(Node):
         self.publisher = self.create_publisher(
             CompressedImage, self.output_topic, sensor_qos
         )
-        # 불량은 저장된 옛 상태가 아닌 현재 검출 이벤트다. 기본 VOLATILE QoS로 새 결과만 보낸다.
-        self.result_publisher = self.create_publisher(InspectionResult, self.result_topic, 10)
+        # 불량은 저장된 옛 상태가 아닌 현재 검출 이벤트다. 기본 VOLATILE QoS로 새 결과만 inspect/defects 로 보낸다.
+        self.result_publisher = self.create_publisher(InspectionResult, self.defect_topic, 10)
         # IF-05 판정 결과 (회차 · 작업 · 설비 id 포함) — 관제가 이것으로 점검 이력 · 사진을 저장한다
         self.facility_result_publisher = self.create_publisher(InspectionResult, self.result_topic, FACILITY_RESULT_QOS)
         self.subscription = self.create_subscription(

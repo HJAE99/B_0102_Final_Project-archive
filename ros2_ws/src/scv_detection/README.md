@@ -174,7 +174,7 @@ ros2 run scv_detection scv_detection_manager --ros-args -p pressure_enabled:=fal
 | rack_loading_match_margin | 0.10 | 연결 후보의 상위 두 IoU 차이가 이 값 이하면 연결 보류 |
 
 설정은 노드 재시작 후 적용한다. 기본값은 실제 영상으로 검증하지 않은 초기 설정이다.
-불량은 기존 `inspect/result`에 `KIND_RACK=4`, `ABNORMAL=4`로 랙당 한 건 발행한다.
+불량은 `inspect/defects`에 `KIND_RACK=4`, `ABNORMAL=4`로 랙당 한 건 발행한다.
 `detail.source="yolo_rack_box_containment"`, `rack_bbox`, `rack_track_id`, `inspection_id`,
 `tolerance_ratio`, `protrusions`를 담는다. 각 불량 박스에는 `bbox`, `box_track_id`,
 `directions`, `overflow_px`, `overflow_ratio`, `association_overlap_ratio`, 연속 확인 횟수를 기록한다.
@@ -234,7 +234,7 @@ YOLO 요청에서는 YOLO만, 랙 요청에서는 랙만 실행한다.
 
 응답의 success는 시작·중지 성공 여부다. message의 `started`/`stopped`로 확인한다.
 서비스는 최종 판정을 기다리지 않는다. 실제 검출·랙 판정은 영상과 로그로 표시하고,
-불량만 아래 `inspect/result` 토픽으로 발행한다.
+불량만 아래 `inspect/defects` 토픽으로 발행한다.
 랙은 기본 3프레임 연속 판정 후 확정한다. 첫 YOLO 시작은 모델 로딩 시간이 걸릴 수 있다.
 카메라가 없거나 최근 2초 동안 유효 영상이 없으면 시작 요청을 실패시킨다.
 중지 요청은 카메라가 끊겼거나 기준 사진이 없어도 처리한다.
@@ -242,7 +242,9 @@ YOLO 요청에서는 YOLO만, 랙 요청에서는 랙만 실행한다.
 
 ## 불량 판정 토픽 확인
 
-기본 토픽은 `/robot4/inspect/result`, 메시지 타입은 `scv_msgs/msg/InspectionResult`다.
+기본 토픽은 `/robot4/inspect/defects`, 메시지 타입은 `scv_msgs/msg/InspectionResult`다 (VOLATILE).
+`/robot4/inspect/result` 는 관제가 요청한 설비 점검(IF-05 `inspect_facility`)의 최종 판정 전용이다 (TRANSIENT_LOCAL, 회차 · 작업 · 설비 id 포함).
+두 가지를 한 토픽에 QoS 를 달리해 보내면 관제 구독에 「incompatible QoS」 경고가 나서 10/16 에 나눴다.
 켜져 있는 검사 모드에서 불량이 검출되면 서비스 중지나 로그 주기를 기다리지 않고 발행한다.
 
 | 모드 | 발행 조건 | kind | verdict |
@@ -268,20 +270,20 @@ YOLO 요청에서는 YOLO만, 랙 요청에서는 랙만 실행한다.
 노드를 실행한 뒤 다른 터미널에서 전체 메시지를 본다.
 
 ```bash
-ros2 topic echo /robot4/inspect/result scv_msgs/msg/InspectionResult
+ros2 topic echo /robot4/inspect/defects scv_msgs/msg/InspectionResult
 ```
 
 불량 원인만 간단히 보려면:
 
 ```bash
-ros2 topic echo /robot4/inspect/result scv_msgs/msg/InspectionResult --field detail --full-length
+ros2 topic echo /robot4/inspect/defects scv_msgs/msg/InspectionResult --field detail --full-length
 ```
 
 한 건만 확인하거나 토픽 정보를 확인하려면:
 
 ```bash
-ros2 topic echo /robot4/inspect/result scv_msgs/msg/InspectionResult --once
-ros2 topic info /robot4/inspect/result
+ros2 topic echo /robot4/inspect/defects scv_msgs/msg/InspectionResult --once
+ros2 topic info /robot4/inspect/defects
 ```
 
 `echo`는 검사 시작 후 불량이 검출될 때까지 기다린다. 다른 로봇을 쓰면 주소의 robot4를 변경한다.
@@ -381,7 +383,7 @@ ROI 테두리와 검사 범위는 랙 검사 중에만 표시된다.
 로봇 이름공간이 각 토픽 앞에 붙는다. 출력 header는 입력에서 복사한다.
 현재 QoS는 RELIABLE / KEEP_LAST / depth 1이다.
 Depth는 별도 콜백 그룹에서 BEST_EFFORT / KEEP_LAST / depth 1로 구독한다.
-불량은 `inspect/result`에 `InspectionResult`로 발행한다. `Alert` 및 운영용 액션 연동은 아직 구현하지 않았다.
+불량은 `inspect/defects`에 `InspectionResult`로 발행한다 (설비 점검 최종 판정은 `inspect/result`). `Alert` 및 운영용 액션 연동은 아직 구현하지 않았다.
 
 ## 설치
 

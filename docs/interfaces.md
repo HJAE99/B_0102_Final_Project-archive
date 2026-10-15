@@ -85,7 +85,7 @@ IF 번호는 시스템 다이어그램과 같습니다 (IF-03·13 은 삭제된 
 | 16 | `/inspection/alerts` | topic · `scv_msgs/Alert` | inspection_manager → 관제 웹 (관제 PC 안) | reliable | 관제 A |
 | 16 | `/inspection/start` · `/inspection/estop` · `/inspection/resume` · `/inspection/abort` | service · `std_srvs/Trigger` | 관제 웹(ros_bridge) → inspection_manager. abort = 순찰 종료(작업 취소 → 로봇마다 DOCK → 회차 aborted), estop = 멈추고 재개 대기(재개 때 남은 waypoint 만) | — | 관제 A |
 | 16 | `/inspection/reassign` | service · `scv_msgs/Reassign` | 관제 웹 → inspection_manager | — | 관제 A |
-| 19 | `{ns}/inspect/result` | topic · `scv_msgs/InspectionResult` | detection_alert (로봇 PC) → inspection_manager · ros_bridge (관제 PC). IF-05 판정마다 1건(회차 · 작업 · 설비 id · 근거 사진 640 px). 소화기면 `detail` 이 JSON `{text, aruco:[{marker_id, manufacture_date, manufacture_number, expiry_date, expiry_status}]}` → DB `inspections.aruco`. (비전 원래의 주행 중 불량 이벤트는 같은 토픽 VOLATILE · id 없음 → 관제는 무시) | reliable · transient_local · KEEP_LAST 50 | 비전 B |
+| 19 | `{ns}/inspect/result` | topic · `scv_msgs/InspectionResult` | detection_alert (로봇 PC) → inspection_manager · ros_bridge (관제 PC). IF-05 판정마다 1건(회차 · 작업 · 설비 id · 근거 사진 640 px). 소화기면 `detail` 이 JSON `{text, aruco:[{marker_id, manufacture_date, manufacture_number, expiry_date, expiry_status}]}` → DB `inspections.aruco`. (비전 원래의 검사 중 순간 불량 이벤트는 10/16 부터 별도 토픽 `{ns}/inspect/defects`(VOLATILE · id 없음, 관제는 구독 안 함) — 같은 토픽에 QoS 가 다른 발행자가 있어 나던 「incompatible QoS」 경고를 없앰) | reliable · transient_local · KEEP_LAST 50 | 비전 B |
 | 20 | `{ns}/camera/preview` | topic · `sensor_msgs/CompressedImage` | camera_preview (로봇 PC, 주행 중만 · 640 px 1 Hz, 비전이 있으면 검출을 그린 화면) → ros_bridge (관제 PC) → 블랙박스 파일 `scv_media/recordings/r{run}/{robot}/{ms}.jpg` (이력 탭 재생) | best effort · depth 1~5 | 관제 B |
 
 ## 타입 한눈에

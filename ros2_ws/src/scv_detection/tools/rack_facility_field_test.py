@@ -3,7 +3,7 @@
 
 떠 있는 robot_pc.launch(Nav2 · mission_executor · 비전 detection_alert)는 그대로 둔다. 이 스크립트 한 프로세스가
   1. 시험용 비전 노드 detection_alert_test 를 띄운다 (이 파일이 있는 저장소의 scv_detection 코드).
-     inspect_facility 서비스 · 결과 · 미리보기 토픽은 rack_test/… 로 바꿔 관제 DB · mission_executor 와 섞이지 않게 한다.
+     inspect_facility 서비스 · 결과 · 순간 불량 · 미리보기 토픽은 rack_test/… 로 바꿔 관제 DB · mission_executor 와 섞이지 않게 한다.
   2. dock_status 를 20 s 안에 받지 못하면 움직이지 않고 끝냄. 도크 위면 undock(도크를 벗어났는지 확인)
      → AMCL 초기 자세(HOME) → 좌우 settle (mission_executor 와 같은 함수)
   3. facilities.yaml 의 랙 view 로 Nav2 이동 → 2 s 정지 → inspect_facility 와 같은 코드로 판정
@@ -135,6 +135,7 @@ def main():
         cli_args=['--ros-args', '-r', '__node:=detection_alert_test',
                   '-r', 'inspect_facility:=rack_test/inspect_facility',
                   '-r', 'inspect/result:=rack_test/result',
+                  '-r', 'inspect/defects:=rack_test/defects',
                   '-r', 'fire_extinguisher/detections/compressed:=rack_test/detections/compressed'],
         parameter_overrides=[Parameter('show', value=False), Parameter('device', value='cuda:0'),
                              Parameter('weights', value=str(SRC / 'scv_detection' / 'models' / 'best.pt')),
