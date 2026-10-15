@@ -648,8 +648,20 @@ const ago = (iso) => {
 };
 
 // 로봇 카드 (10/15 UI 시안) — 지도 위 가로 카드: 담당 구역 · 현재 작업 · 진행률 · 배터리 · 대기 사유. 미수신 값은 — 로
+// 로봇 카드 카메라 (10/15): 주행 중(도킹 · 도킹 중 아님)에만 1초마다 /api/robots/{id}/camera — 로봇 PC 가 320 px 2 Hz 로 줄여 보냄
+function RobotCamera({ id }) {
+  const [t, setT] = useState(Date.now());
+  const [ok, setOk] = useState(true);
+  useEffect(() => { const h = setInterval(() => setT(Date.now()), 1000); return () => clearInterval(h); }, []);
+  return html`<div class="rcam">
+    <img src=${`/api/robots/${id}/camera?t=${t}`} alt="" style=${{ display: ok ? 'block' : 'none' }}
+      onLoad=${() => setOk(true)} onError=${() => setOk(false)} />
+    ${!ok && html`<span>영상 대기 중…</span>`}</div>`;
+}
+
 function RobotCard({ r, sector, why, timeout }) {
   const [k, label] = robotPhase(r), st = r.state;
+  const driving = r.connected && st && !st.is_docked && !['DOCKED', 'DOCKING'].includes(st.nav_state);
   const prog = st && st.progress !== null && st.progress !== undefined ? Math.round(st.progress * 100) : null;
   const bat = st && st.battery_pct !== null && st.battery_pct !== undefined ? st.battery_pct : null;
   const col = robotColor(r.robot_id);
@@ -664,6 +676,7 @@ function RobotCard({ r, sector, why, timeout }) {
         <div class="rcbar"><span>배터리</span><i><b style=${{ width: (bat || 0) + '%', background: bat !== null && bat <= 30 ? '#dc2626' : '#0f766e' }}></b></i><span class="num">${bat === null ? '—' : bat.toFixed(0) + '%'}</span></div>
         <div class="rcl small"><span>위치 ${fmtNum(st.x)}, ${fmtNum(st.y)}${st.yaw === null ? '' : ' · ' + (st.yaw * 180 / Math.PI).toFixed(0) + '°'}</span>
           <span class="no">${r.connected ? '마지막 보고 ' + ago(st.ts) : '마지막 위치 · ' + ago(st.ts)}</span></div>
+        ${driving ? html`<${RobotCamera} id=${r.robot_id} />` : html`<div class="rcam off"><span>${st.is_docked || st.nav_state === 'DOCKED' ? '도킹 중 — 카메라 꺼짐' : st.nav_state === 'DOCKING' ? '도킹하는 중' : '카메라 없음'}</span></div>`}
         ${why && html`<div class="rcwhy">${why}</div>`}
         ${r.is_active && st.raw && html`<details class="raw"><summary>관제 메모리 상태 · E3까지 ${st.ttl_s}초</summary>
           <div class="rkv mono">${Object.entries(st.raw).map(([kk, v]) => html`<span key=${kk}>${kk}</span><span>${v === '' ? '—' : v}</span>`)}</div></details>`}

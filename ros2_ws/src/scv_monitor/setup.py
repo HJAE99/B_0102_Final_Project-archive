@@ -18,6 +18,7 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
+            'camera_preview = scv_monitor.camera_preview:main',   # 로봇 PC: 관제 웹 로봇 카드 카메라 (10/15)
         ],
     },
 )

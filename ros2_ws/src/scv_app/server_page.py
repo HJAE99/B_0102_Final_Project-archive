@@ -53,7 +53,7 @@ import yaml
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from psycopg import sql
@@ -91,7 +91,7 @@ DEFAULT_SECTOR_ROBOTS = {"1": "robot3", "2": "robot4"}
 # ros 모드 — 섹터 · 담당 로봇은 inspection_manager 와 같은 zones.yaml (SCV_ZONES, 기본 scv_bringup/config/zones.yaml)
 ZONES: list[tuple[int, list]] = []
 if RUN_OWNER == "ros":
-    _zf = Path(os.environ.get("SCV_ZONES", BASE.parent / "src" / "scv_bringup" / "config" / "zones.yaml"))
+    _zf = Path(os.environ.get("SCV_ZONES", BASE.parent / "scv_bringup" / "config" / "zones.yaml"))   # scv_app 은 src 안 (10/15 이동)
     for _z in (yaml.safe_load(_zf.read_text(encoding="utf-8")) or {}).get("zones", []):
         _n = int("".join(ch for ch in str(_z["id"]) if ch.isdigit()))
         ZONES.append((_n, _z["polygon"]))
@@ -1408,6 +1408,7 @@ CURRENT_RUN: dict[str, Any] = {"run_id": None}         # 메모리 — 진행 �
 RECENT_EVENTS: collections.deque = collections.deque(maxlen=1000)   # 메모리 — 최근 이벤트 (시작할 때 robot_events에서)
 ROBOT_PLAN: dict[str, list] = {}                         # ros 모드 — robot_id → Nav2 전역 경로 점 [(x, y)] (ros_bridge, 모니터 지도)
 ESTOP: dict[str, bool] = {"on": False}                   # ros 모드 — 비상정지 중 (ros_bridge, 「재개」 버튼)
+CAMERA: dict[str, tuple[float, bytes]] = {}              # ros 모드 — robot_id → (받은 시각, 작은 JPEG). 로봇 PC camera_preview, 주행 중만
 LIVE_CELLS: dict[int, dict[int, dict[int, list[float]]]] = {}       # 메모리 — run → cell → ap → [n, sum, sumsq, last] (히트맵)
 AP_SEEN: dict[int, float] = {}                         # ap_id → 그 SSID 값을 마지막으로 받은 시각(monotonic)
 GRID_CACHE: dict[int, dict[str, Any]] = {}             # map_id → {"cells": {(ix, iy): (cell_id, sector)}, "ox", "oy", "g"}
@@ -2266,6 +2267,16 @@ def api_run_events(run_id: int, request: Request):
         rows = conn.execute("SELECT event_id, event_uid, robot_id, run_id, task_id, code, source, level, detail, ts "
                             "FROM robot_events WHERE run_id = %s ORDER BY event_id", (run_id,)).fetchall()
     return {"events": rows}
+
+
+@app.get("/api/robots/{robot_id}/camera")
+def api_robot_camera(robot_id: str, request: Request):
+    """로봇 카드 카메라 — 최근 5 s 안에 받은 작은 JPEG. 도킹 중이거나 끊기면 404 (화면은 「영상 없음」)"""
+    current_user(request)
+    ts, jpeg = CAMERA.get(robot_id, (0.0, b""))
+    if time.time() - ts > 5.0:
+        raise HTTPException(404, "영상 없음")
+    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/runs/{run_id}")
