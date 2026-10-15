@@ -10,7 +10,7 @@
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <RateController hz="0.333">
+        <RateController hz="1.0">   <!-- 원본 0.333: 측정 줄 위 상자를 3 초마다만 다시 봐 상자 옆에 붙음 (10/15 실기) -->
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
               <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.35"/>  <!-- 원본 0.7: 코너를 0.7 m 앞에서 지워 안쪽으로 질러감. 0.2 는 RPP 코너 최근접 0.21 m 라 못 지워 반복 (2026-10-12) -->
