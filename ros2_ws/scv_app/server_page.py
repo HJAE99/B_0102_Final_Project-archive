@@ -1726,7 +1726,7 @@ def start_form(conn) -> dict[str, Any]:
         why = []
         if not ok:
             why.append("비정상 (제어 PC 연결 · 상태 없음)")
-        elif not docked:
+        elif not docked and RUN_OWNER == "web":   # ros: mission_executor 가 켜지며 undock 하고 IDLE 로 기다림, 판단은 manager
             why.append("도킹 아님")
         if not (m and (m["dock_poses"] or {}).get(rid)):
             why.append("도크 접근 자세 없음")
