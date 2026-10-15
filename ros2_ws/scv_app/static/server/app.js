@@ -1,5 +1,6 @@
 // SCV server page — 3-3차 (login · 모니터(순찰 시작 · 중단) · 이력 · 정보)
-import { html, createRoot, useState, useEffect, useRef, useCallback } from '/static/vendor/react-htm.mjs';
+import { html, createRoot, useState, useEffect, useRef, useCallback, useMemo } from '/static/vendor/react-htm.mjs';
+import { signalColor, createHeatLayer } from '/static/server/heatmap.mjs';
 
 // ---------------------------------------------------------------- API
 async function api(path, opts = {}) {
@@ -23,9 +24,9 @@ async function api(path, opts = {}) {
 }
 
 const TABS = [
-  { id: 'monitor', label: '모니터' },
-  { id: 'history', label: '이력' },
-  { id: 'master', label: '정보' },
+  { id: 'monitor', label: '실시간 관제' },
+  { id: 'history', label: '점검 결과' },
+  { id: 'master', label: '설정' },
 ];
 const pageFromPath = () => (location.pathname.match(/^\/server\/(\w+)/) || [])[1] || 'login';
 
@@ -168,156 +169,145 @@ function mapBounds(m) {
   return [[Math.min(...ys) - pad, Math.min(...xs) - pad], [Math.max(...ys) + pad, Math.max(...xs) + pad]];
 }
 
-function MapView({ m, robots, overlay, mini }) {
-  const ref = useRef(null);
-  const mapRef = useRef(null);
-  const robotLayerRef = useRef(null);
-  const overlayRef = useRef(null);
+function MapView({ m, robots, overlay, mini, layers = {}, onSelect, linked = true, selection, paths }) {
+  const ref = useRef(null), mapRef = useRef(null), groups = useRef({}), markers = useRef({});
+  const select = useRef(onSelect); select.current = onSelect;
+  const options = { heat: true, smooth: true, opacity: 0.5, path: false, ...layers };
+  const [heatError, setHeatError] = useState('');
   useEffect(() => {
-    const L = window.L;
-    const map = L.map(ref.current, {
-      crs: L.CRS.Simple, minZoom: -3, maxZoom: 9, zoomSnap: 0.25, attributionControl: false,
-    });
-    // map 좌표(m): 가로 x = lng, 세로 y = lat. 이미지 왼쪽 아래 = origin
-    const g = m.grid_size_m;
+    const L = window.L, container = ref.current;
+    const map = L.map(container, { crs: L.CRS.Simple, minZoom: -3, maxZoom: 9, zoomSnap: 0.25, attributionControl: false });
     const bounds = mapBounds(m);
-    if (m.width && m.height) L.imageOverlay(m.image_url, bounds).addTo(map);
-    else {                                             // 지도 이미지 파일이 없음 — 격자 · 등록 정보 범위로 맞추고 알림
-      const Note = L.Control.extend({ onAdd: () => {
-        const d = L.DomUtil.create('div', 'map-note');
-        d.textContent = `지도 이미지 파일 없음 (${m.image_key}) — 격자 · 등록 정보만 표시`;
-        return d;
-      } });
-      new Note({ position: 'bottomleft' }).addTo(map);
-    }
-
-    // 격자 칸 (grid_cells) — 칸 범위 = origin + ix·g ~ origin + (ix+1)·g
-    const renderer = L.canvas({ padding: 0.5 });
-    L.layerGroup((m.cells || []).map(([id, ix, iy, sector]) => {
-      const x0 = m.origin_x + ix * g, y0 = m.origin_y + iy * g;
-      const col = SECTOR_COLOR[sector] || '#0b7a84';
-      return L.rectangle([[y0, x0], [y0 + g, x0 + g]], {
-        renderer, weight: 1, color: col, opacity: 0.6, fillColor: col, fillOpacity: 0.12,
-        interactive: false,
-      });
-    })).addTo(map);
-    // 격자 번호 — 칸이 화면에서 작으면 숨김, 크면 ix,iy도 함께
-    const labelLayer = L.layerGroup((m.cells || []).map(([id, ix, iy]) => {
-      const cx = m.origin_x + (ix + 0.5) * g, cy = m.origin_y + (iy + 0.5) * g;
-      return L.marker([cy, cx], {
-        interactive: false, keyboard: false,
-        icon: L.divIcon({ className: 'cell-label', iconSize: null,
-          html: `<b>${id}</b><small>${ix},${iy}</small>` }),
-      });
-    }));
-    const container = ref.current;
-    const updateLabels = () => {
-      const px = g * Math.pow(2, map.getZoom());       // CRS.Simple: 1 m = 2^zoom px
-      const show = px >= 26;
-      if (show && !map.hasLayer(labelLayer)) labelLayer.addTo(map);
-      if (!show && map.hasLayer(labelLayer)) map.removeLayer(labelLayer);
-      container.classList.toggle('cell-xy', px >= 46);
-    };
-    map.on('zoomend', updateLabels);
-    // 지도 전체 맞춤 — 처음 · 컨테이너 크기가 바뀔 때(탭 이동 · 표가 채워져 화면이 바뀜) 다시 맞춤.
-    // 사용자가 직접 움직이면 그 뒤로는 그대로 두고, 「전체 보기」 버튼으로 다시 맞춤
-    let userMoved = false;
-    const fit = () => { map.invalidateSize(); map.fitBounds(bounds, { padding: [8, 8], animate: false }); };
-    container.addEventListener('pointerdown', () => { userMoved = true; });
-    container.addEventListener('wheel', () => { userMoved = true; }, { passive: true });
+    map.createPane('basePane'); map.getPane('basePane').style.zIndex = 250;
+    if (m.width && m.height) L.imageOverlay(m.image_url, bounds, { className: 'base-map', pane: 'basePane', interactive: false }).addTo(map);
+    map.createPane('heatPane'); map.getPane('heatPane').style.zIndex = 350;
+    let moved = false;
+    const markMoved = () => { moved = true; };
+    container.addEventListener('pointerdown', markMoved);
+    container.addEventListener('wheel', markMoved, { passive: true });
+    const fit = () => { map.invalidateSize(); map.fitBounds(bounds, { padding: [24, 24], animate: false }); };
     const FitAll = L.Control.extend({ onAdd: () => {
       const b = L.DomUtil.create('a', 'leaflet-bar map-fit');
-      b.href = '#'; b.title = '전체 보기'; b.textContent = '⤢';
-      L.DomEvent.on(b, 'click', (e) => { L.DomEvent.stop(e); fit(); userMoved = false; });
-      L.DomEvent.disableClickPropagation(b);
-      return b;
+      b.href = '#'; b.title = '지도 전체 보기'; b.textContent = '⤢'; b.setAttribute('aria-label', b.title);
+      L.DomEvent.on(b, 'click', (e) => { L.DomEvent.stop(e); fit(); moved = false; });
+      L.DomEvent.disableClickPropagation(b); return b;
     } });
     new FitAll({ position: 'topleft' }).addTo(map);
-    fit();
-    updateLabels();
-    const ro = new ResizeObserver(() => { if (userMoved) map.invalidateSize(); else fit(); });
-    ro.observe(container);
-    // 지도 위 등록 정보 (3차) — 도크(maps.dock_poses) · AP 설치 위치(aps.x, y) · 점검 설비(facilities)
-    const info = L.layerGroup().addTo(map);
-    const label = (txt, cls) => ({ permanent: true, direction: 'right', offset: [8, 0], className: 'map-tip ' + cls });
-    Object.entries(m.dock_poses || {}).forEach(([rid, p]) => {
-      const c = robotColor(rid), d = 0.22;
-      L.rectangle([[p.y - d, p.x - d], [p.y + d, p.x + d]], { color: c, weight: 2, fillColor: c, fillOpacity: 0.25 })
-        .bindTooltip(`${rid} 도크`, label('', 'dock')).addTo(info);
-      L.polyline([[p.y, p.x], [p.y + Math.sin(p.yaw || 0) * 0.4, p.x + Math.cos(p.yaw || 0) * 0.4]],
-        { color: c, weight: 2, dashArray: '3 3', interactive: false }).addTo(info);
-    });
-    (m.aps || []).forEach((a) => {
-      L.marker([a.y, a.x], { icon: L.divIcon({ className: 'ap-icon', iconSize: [18, 18], html: '<b>📶</b>' }) })
-        .bindTooltip(`${a.is_target ? '측정 AP · ' : ''}${a.ssid}${a.is_active ? '' : ' (비활성)'}`, label('', a.is_target ? 'ap target' : 'ap')).addTo(info);
-    });
-    // 설비 종류 → 지도 아이콘 글자 · 색 (rack: 3-3 보완에서 추가)
-    const FAC = { extinguisher: ['소', '#dc2626'], shutter: ['셔', '#7c3aed'], exit_light: ['유', '#16a34a'], rack: ['랙', '#b45309'] };
-    (m.facilities || []).forEach((f) => {
-      const [ch, col] = FAC[f.facility_type] || ['?', '#555'];
-      const c = f.is_active ? col : '#9aa3aa', v = f.view_pose || {};
-      if (v.x !== undefined) {                           // 관측 자세 → 설비 (점선)
-        L.polyline([[v.y, v.x], [f.expected_y, f.expected_x]], { color: c, weight: 1.5, dashArray: '2 3', interactive: false }).addTo(info);
-        L.circleMarker([v.y, v.x], { radius: 3, color: c, weight: 1, fillColor: c, fillOpacity: 0.6, interactive: false }).addTo(info);
-      }
-      L.marker([f.expected_y, f.expected_x], { icon: L.divIcon({ className: 'fac-icon', iconSize: [20, 20],
-        html: `<b style="background:${c}">${ch}</b>` }) })
-        .bindTooltip(`${f.facility_id}${f.has_gauge ? ' · 압력계' : ''}${f.is_active ? '' : ' (비활성)'}`, label('', 'fac')).addTo(info);
-    });
-    overlayRef.current = L.layerGroup().addTo(map);    // 작업 탭 — 히트맵 · 경로 · 후보 · 판정 (3-3차)
-    robotLayerRef.current = L.layerGroup().addTo(map);  // 로봇 표시는 격자·번호 위
-    markersRef.current = {};
-    mapRef.current = map;
-    const onResize = () => map.invalidateSize();
-    addEventListener('resize', onResize);
-    return () => { ro.disconnect(); removeEventListener('resize', onResize); map.remove(); mapRef.current = null; };
-  }, [m.map_id, m.image_url]);
+    groups.current = Object.fromEntries(['grid', 'info', 'reference', 'heat', 'path', 'result', 'robot', 'selection'].map((k) => [k, L.layerGroup().addTo(map)]));
+    markers.current = {}; mapRef.current = map; fit();
+    const ro = new ResizeObserver(() => { map.invalidateSize(); if (!moved) fit(); }); ro.observe(container);
+    return () => { ro.disconnect(); container.removeEventListener('pointerdown', markMoved); container.removeEventListener('wheel', markMoved); map.remove(); mapRef.current = null; };
+  }, [m.map_id, m.image_url, m.width, m.height, m.origin_x, m.origin_y, m.resolution_m]);
 
-  // 로봇 위치 — /ws/ui로 1초마다 받은 값으로 마커를 옮김 (지도·마커는 다시 만들지 않음)
-  const markersRef = useRef({});
   useEffect(() => {
-    const L = window.L, layer = robotLayerRef.current, mk = markersRef.current;
+    const L = window.L, layer = groups.current.grid;
+    if (!layer) return; layer.clearLayers();
+    const g = m.grid_size_m;
+    if (options.grid) (m.cells || []).forEach(([id, ix, iy]) => {
+      const x = m.origin_x + ix * g, y = m.origin_y + iy * g;
+      L.rectangle([[y, x], [y + g, x + g]], { weight: 1, color: '#869ba7', fill: false, interactive: false }).addTo(layer);
+      L.marker([y + g / 2, x + g / 2], { interactive: false, icon: L.divIcon({ className: 'cell-label', iconSize: null, html: `<b>${id}</b>` }) }).addTo(layer);
+    });
+    if (options.zones) (m.configuration?.zones || []).forEach((z, i) => {
+      const poly = L.polygon(z.polygon.map(([x, y]) => [y, x]), { color: robotColor(z.robot), weight: 2, fillOpacity: 0.035, dashArray: '6 6' });
+      poly.bindTooltip(`${z.id} · ${z.robot}`, { direction: 'center' }).addTo(layer);
+    });
+  }, [m, options.grid, options.zones]);
+
+  useEffect(() => {
+    const L = window.L, info = groups.current.info, reference = groups.current.reference;
+    if (!info) return; info.clearLayers(); reference.clearLayers();
+    const click = (marker, data) => marker.on('click', () => select.current?.(data));
+    (m.aps || []).forEach((a) => {
+      if (!Number.isFinite(a.x) || !Number.isFinite(a.y)) return;
+      click(L.marker([a.y, a.x], { icon: L.divIcon({ className: 'asset ap-asset', iconSize: [26, 26], html: '<b>AP</b>' }) })
+        .bindTooltip(a.ssid).addTo(info), { kind: 'ap', data: a });
+    });
+    const FAC = { extinguisher: '소', shutter: '셔', exit_light: '유', rack: '랙' };
+    (m.facilities || []).forEach((f) => {
+      if (!Number.isFinite(f.expected_x) || !Number.isFinite(f.expected_y)) return;
+      click(L.marker([f.expected_y, f.expected_x], { icon: L.divIcon({ className: 'asset facility-asset', iconSize: [26, 26], html: `<b>${FAC[f.facility_type] || '?'}</b>` }) })
+        .bindTooltip(f.facility_id).addTo(info), { kind: 'facility', data: f });
+    });
+    // Physical Dock and calibrated undock reference have different meanings.
+    (m.configuration?.zones || []).forEach((z) => {
+      if (!z.dock) return;
+      L.circleMarker([z.dock.y, z.dock.x], { radius: 5, color: '#75828b', fillColor: '#fff', fillOpacity: 1, weight: 2 })
+        .bindTooltip(`${z.robot} 실제 Dock`).addTo(info);
+    });
+    if (options.references) (m.configuration?.references || []).forEach((p) => {
+      click(L.circleMarker([p.y, p.x], { radius: 7, color: robotColor(p.robot_id), weight: 2, fill: false, dashArray: '2 2' })
+        .bindTooltip(`${p.robot_id} 시작 참고점 · 실측 위치 아님`).addTo(reference), { kind: 'reference', data: p });
+    });
+  }, [m, options.references]);
+
+  useEffect(() => {
+    const L = window.L, layer = groups.current.robot, mk = markers.current;
     if (!layer) return;
     const seen = new Set();
     (robots || []).forEach((r) => {
       const st = r.state;
-      if (!st || st.x === null || st.y === null) return;
+      const live = linked && r.connected && st?.pose_ok !== false;
+      const p = live && Number.isFinite(st?.x) && Number.isFinite(st?.y) ? st : st?.last_valid_pose;
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
       seen.add(r.robot_id);
-      const live = r.connected;
-      const color = live ? robotColor(r.robot_id) : '#8a969e';
-      const yaw = st.yaw || 0, len = 0.45;
-      const head = [[st.y, st.x], [st.y + Math.sin(yaw) * len, st.x + Math.cos(yaw) * len]];
-      const tip = `${r.robot_id}${live ? '' : ' (연결 끊김)'}`;
-      let m = mk[r.robot_id];
-      if (!m || !layer.hasLayer(m.dot)) {
-        m = mk[r.robot_id] = {
+      const color = live ? robotColor(r.robot_id) : '#9ba9b5', yaw = p.yaw || 0;
+      const head = [[p.y, p.x], [p.y + Math.sin(yaw) * 0.36, p.x + Math.cos(yaw) * 0.36]];
+      const tip = `${r.robot_id}${live ? '' : ' · 마지막 유효 위치'}`;
+      if (!mk[r.robot_id]) {
+        mk[r.robot_id] = {
           line: L.polyline(head, { color, weight: 3, interactive: false }).addTo(layer),
-          dot: L.circleMarker([st.y, st.x], { radius: 9, color: '#fff', weight: 2, fillColor: color, fillOpacity: 0.95 })
-            .bindTooltip(tip, { permanent: true, direction: 'top', offset: [0, -8], className: 'robot-tip' }).addTo(layer),
+          dot: L.circleMarker([p.y, p.x], { radius: 10, color: '#fff', weight: 3, fillColor: color, fillOpacity: 1 })
+            .bindTooltip(tip, { permanent: true, direction: 'top', offset: [0, -10], className: 'robot-tip' })
+            .on('click', () => select.current?.({ kind: 'robot', data: { robot_id: r.robot_id } })).addTo(layer),
         };
-      } else {
-        m.line.setLatLngs(head).setStyle({ color });
-        m.dot.setLatLng([st.y, st.x]).setStyle({ fillColor: color, fillOpacity: live ? 0.95 : 0.6 });
-        m.dot.setTooltipContent(tip);
       }
+      mk[r.robot_id].line.setLatLngs(head).setStyle({ color, dashArray: live ? null : '3 3' });
+      mk[r.robot_id].dot.setLatLng([p.y, p.x]).setStyle({ fillColor: color, fillOpacity: live ? 1 : 0.55 }).setTooltipContent(tip);
     });
-    Object.keys(mk).forEach((rid) => {                 // 상태가 없어진 로봇은 지움
-      if (!seen.has(rid)) { layer.removeLayer(mk[rid].line); layer.removeLayer(mk[rid].dot); delete mk[rid]; }
-    });
-  }, [robots]);
-  // 작업 탭 표시 — overlay가 바뀔 때마다 다시 그림 (지도 · 격자는 그대로)
+    Object.keys(mk).forEach((rid) => { if (!seen.has(rid)) { layer.removeLayer(mk[rid].line); layer.removeLayer(mk[rid].dot); delete mk[rid]; } });
+  }, [robots, linked, m.map_id]);
+
   useEffect(() => {
-    const layer = overlayRef.current;
-    if (!layer) return;
-    layer.clearLayers();
-    if (overlay) drawOverlay(window.L, layer, m, overlay);
-  }, [overlay, m.map_id]);
-  return mini ? html`<div class="map-mini" ref=${ref}></div>` : html`<div id="map" ref=${ref}></div>`;
+    const group = groups.current, map = mapRef.current;
+    if (!group.heat || !map) return;
+    setHeatError('');
+    if (!overlay || !options.heat) return;
+    if (!overlay.readings) { drawOverlay(window.L, group.heat, m, { ...overlay, tasks: [], candidates: [], inspections: [], path: null, track: null }); return () => group.heat.clearLayers(); }
+    const heat = createHeatLayer(window.L, m, overlay, options, (d) => select.current?.(d), setHeatError);
+    heat.group.addTo(group.heat);
+    return () => { heat.dispose(); group.heat.removeLayer(heat.group); };
+  }, [overlay, m, options.heat, options.smooth, options.opacity]);
+  useEffect(() => {
+    const group = groups.current;
+    if (!group.path) return;
+    group.path.clearLayers();
+    if (options.path) (paths || []).forEach((p) => {
+      window.L.polyline(p.points.map((v) => [v.y,v.x]), {color:robotColor(p.robot_id),weight:2.5,opacity:.8,dashArray:'6 4'})
+        .bindTooltip(`${p.robot_id} · Nav2 계획 경로`).addTo(group.path);
+    });
+    if (overlay && (options.path || mini || overlay.path || overlay.track)) drawOverlay(window.L, group.path, m, { ...overlay, heat: null, readings: null, candidates: [], inspections: [] });
+  }, [overlay, m, options.path, mini, paths]);
+  useEffect(() => {
+    const group = groups.current;
+    if (!group.result) return; group.result.clearLayers();
+    if (overlay) drawOverlay(window.L, group.result, m, { candidates: overlay.candidates, inspections: overlay.inspections });
+  }, [overlay, m]);
+  useEffect(() => {
+    const layer = groups.current.selection;
+    if (!layer) return; layer.clearLayers();
+    if (selection?.kind !== 'cell') return;
+    const cell = (m.cells || []).find(([id]) => id === selection.data.cell_id);
+    if (!cell) return;
+    const x = m.origin_x + cell[1] * m.grid_size_m, y = m.origin_y + cell[2] * m.grid_size_m;
+    window.L.rectangle([[y,x],[y+m.grid_size_m,x+m.grid_size_m]], {color:'#234f66',weight:2,fill:false,interactive:false}).addTo(layer);
+  }, [selection, m]);
+  return html`<div class="map-surface">${heatError && html`<div class="msg">${heatError}</div>`}${mini ? html`<div class="map-mini" ref=${ref}></div>` : html`<div id="map" ref=${ref}></div>`}</div>`;
 }
 
 // ---------------------------------------------------------------- 작업 탭 지도 표시 (3-3차)
 // RSSI 색 — 기준(rssi_suspect_dbm, 기본 −72) 미만 빨강, 그 위 10 dB까지 주황, 더 세면 초록
-const rssiColor = (v, thr) => (v < thr ? '#dc2626' : v < thr + 10 ? '#f59e0b' : '#16a34a');
+const rssiColor = (v) => signalColor(v);
 const CAND_COLOR = { OPEN: '#ea580c', REINSPECTING: '#7c3aed', CONFIRMED: '#b91c1c', CLEARED: '#15803d', UNCONFIRMED: '#64748b' };
 const FINAL_COLOR = { normal: '#16a34a', abnormal: '#dc2626', unconfirmed: '#64748b' };
 function drawOverlay(L, layer, m, ov) {
@@ -332,7 +322,7 @@ function drawOverlay(L, layer, m, ov) {
       const [ap, [mean, n]] = vals.reduce((a, b) => (b[1][0] > a[1][0] ? b : a));
       const x0 = m.origin_x + c[0] * g, y0 = m.origin_y + c[1] * g, col = rssiColor(mean, ov.thr);
       L.rectangle([[y0, x0], [y0 + g, x0 + g]], { weight: 0, fillColor: col, fillOpacity: 0.42 })
-        .bindTooltip(`칸 ${cid} · ${ov.apName[ap] || ap} 평균 ${mean} dBm · 표본 ${n}`, { direction: 'top' }).addTo(layer);
+        .bindTooltip(`칸 ${cid} · ${ov.apName[ap] || ap} ${ov.readings ? '중앙값' : '평균'} ${mean} dBm · 표본 ${n}`, { direction: 'top' }).addTo(layer);
     });
   }
   (ov.tasks || []).forEach((t) => {                 // 경로 — 수행 중 실선, 대기 점선
@@ -373,12 +363,15 @@ function drawOverlay(L, layer, m, ov) {
 function useUiSocket(onAuthLost) {
   const [data, setData] = useState(null);
   const [linked, setLinked] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const lastRx = useRef(0);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   useEffect(() => {
     let ws, timer, alive = true;
     const open = () => {
       ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/ui`);
       ws.onopen = () => setLinked(true);
-      ws.onmessage = (e) => { try { const d = JSON.parse(e.data); if (d.type === 'robots') setData(d); } catch { /* 무시 */ } };
+      ws.onmessage = (e) => { try { const d = JSON.parse(e.data); if (d.type === 'robots') { lastRx.current = Date.now(); setData(d); } } catch { /* 무시 */ } };
       ws.onclose = (e) => {
         setLinked(false);
         if (!alive) return;
@@ -389,7 +382,7 @@ function useUiSocket(onAuthLost) {
     open();
     return () => { alive = false; clearTimeout(timer); ws && ws.close(); };
   }, []);
-  return [data, linked];
+  return [data, linked && now - lastRx.current < 5000];
 }
 
 const ago = (iso) => {
@@ -418,13 +411,13 @@ function RobotPanel({ data, linked, onStart, onAbort }) {
         <div class="rh"><i style=${{ background: robotColor(r.robot_id) }}></i><b>${r.robot_id}</b>
           <span class=${'chip ' + k}>${label}</span></div>
         ${st ? html`<div class="rkv">
-            <span>위치</span><span class="num">${fmtNum(st.x)}, ${fmtNum(st.y)} · ${st.yaw === null ? '—' : (st.yaw * 180 / Math.PI).toFixed(0) + '°'}</span>
-            <span>배터리</span><span class="num">${st.battery_pct === null ? '—' : st.battery_pct.toFixed(1) + '%'}</span>
+            <span>위치</span><span class="num">${st.pose_ok === false ? '위치 불확실·갱신 대기' : `${fmtNum(st.x)}, ${fmtNum(st.y)}`} · ${st.yaw == null ? '—' : (st.yaw * 180 / Math.PI).toFixed(0) + '°'}</span>
+            <span>배터리</span><span class="num">${st.battery_pct == null ? '미수신' : st.battery_pct.toFixed(1) + '%'}</span>
             <span>상태</span><span>${st.nav_state || '—'}${st.is_docked ? ' · 도킹' : ''}${st.estop ? ' · 정지' : ''}</span>
             <span>작업</span><span>${st.run_id ? `run ${st.run_id}` : '—'}${st.task_id ? ` · ${st.task_id}` : ''}</span>
             <span>마지막 보고</span><span>${ago(st.ts)}</span>
           </div>
-          ${r.is_active && st.raw && html`<details class="raw" open>
+          ${r.is_active && st.raw && html`<details class="raw">
             <summary>관제 PC 메모리 상태 <code>${r.robot_id}</code> 전체 · E3까지 ${st.ttl_s}초</summary>
             <div class="rkv mono">${Object.entries(st.raw).map(([k, v]) => html`<span key=${k}>${k}</span><span>${v === '' ? '—' : v}</span>`)}</div>
           </details>`}`
@@ -435,62 +428,150 @@ function RobotPanel({ data, linked, onStart, onAbort }) {
   </div>`;
 }
 
-function MonitorPage({ onAuthLost }) {
+function useMonitorData(onAuthLost) {
   const [state, setState] = useState({ loading: true });
-  const [ui, linked] = useUiSocket(onAuthLost);
-  const [starting, setStarting] = useState(false);
-  const [msg, setMsg] = useState('');
-  const abort = async (runId) => {
-    if (!confirm(`순찰 run ${runId}을 중단할까요? 로봇은 하던 일을 멈추고 도크로 돌아갑니다.`)) return;
-    try { await api(`/api/runs/${runId}/abort`, { method: 'POST' }); setMsg(''); } catch (e) { setMsg(e.message); }
-  };
+  const [detail, setDetail] = useState(null);
+  const [error, setError] = useState('');
   useEffect(() => {
-    api('/api/maps/active')
-      .then((d) => setState({ map: d.map }))
-      .catch((e) => (e.status === 401 ? onAuthLost() : setState({ error: e.message })));
+    let alive = true, timer;
+    const tick = async () => {
+      try {
+        const d = await api('/api/maps/active');
+        const r = await api('/api/runs');
+        if (alive) setState({ ...d, runId: r.current ?? r.runs[0]?.run_id ?? null, updated: new Date().toISOString() });
+      } catch (e) { if (alive) { if (e.status === 401) onAuthLost(); else setState((s) => ({ ...s, loading: false, error: e.message })); } }
+      if (alive) timer = setTimeout(tick, 5000);
+    };
+    tick(); return () => { alive = false; clearTimeout(timer); };
   }, []);
-  const m = state.map;
-  return html`<main>
-    <h2>모니터</h2>
-    <p class="sub">현재 지도(정보 › 지도에서 「현재 지도로」 선택한 지도)와 로봇 위치를 표시합니다.</p>
-    <div class="mapbox">
-      ${m && html`<div class="head">
-        <b>${m.name}</b>
-        <span>해상도 ${fmtNum(m.resolution_m)} m/px</span>
-        <span>크기 ${fmtNum(m.width * m.resolution_m)} × ${fmtNum(m.height * m.resolution_m)} m</span>
-        <span>원점 (${fmtNum(m.origin_x)}, ${fmtNum(m.origin_y)})</span>
-        <span>격자 ${fmtNum(m.grid_size_m)} m · ${m.cell_count}칸</span>
-        <span class="legend">
-          ${(m.sectors || []).filter((x) => x.cells).map((x) => html`<span key=${x.sector} class="lg">
-            <i style=${{ borderColor: SECTOR_COLOR[x.sector], background: SECTOR_COLOR[x.sector] + '26' }}></i>
-            섹터 ${x.sector} · ${x.cells}칸${x.robot ? ` · 기본 ${x.robot}` : ''}</span>`)}
-          <span class="lg"><i class="sq"></i>도크 ${Object.keys(m.dock_poses || {}).length}</span>
-          <span class="lg">📶 AP ${(m.aps || []).length}</span>
-          <span class="lg"><b class="fac-dot" style=${{ background: '#dc2626' }}>소</b><b class="fac-dot" style=${{ background: '#7c3aed' }}>셔</b><b class="fac-dot" style=${{ background: '#16a34a' }}>유</b><b class="fac-dot" style=${{ background: '#b45309' }}>랙</b>
-            설비 ${(m.facilities || []).length} (점선 끝 = 관측 자세)</span>
-          <span class="lg">큰 숫자 = 칸 번호(cell_id) · 작은 숫자 = ix,iy (칸이 작으면 숨김)</span>
-          ${m.running_run && html`<span class="lg run">순찰 run ${m.running_run} 진행 중 — 격자 변경 · 현재 지도 바꾸기 잠김</span>`}
-        </span>
-      </div>`}
-      ${state.loading ? html`<div class="empty">불러오는 중…</div>`
-        : state.error ? html`<div class="empty">${state.error}</div>`
-        : !m ? html`<div class="empty">현재 지도가 없습니다. 정보 › 지도에서 지도를 등록하고 「현재 지도로」를 누르세요.</div>`
-        : !m.width ? html`<div class="empty">지도 이미지 파일이 없습니다 (${m.image_key})</div>`
-        : html`<${MapView} m=${m} robots=${ui ? ui.robots : []} />`}
-    </div>
-    <div class="later">
-      <${RobotPanel} data=${ui} linked=${linked} onStart=${() => setStarting(true)} onAbort=${abort} />
-      <div class="panel"><h3>순찰</h3>${ui && ui.run_id ? html`<p>run ${ui.run_id} 진행 중 — 이력 탭에서 task · 후보 · 탐지 결과를 봅니다.</p>`
-        : html`<p class="no">진행 중인 순찰 없음 — 「로봇 상태」의 순찰 시작으로 시작합니다.</p>`}
-        ${ui && ui.start && ui.start.target_ap && html`<p class="no">측정 AP ${ui.start.target_ap.ssid} · ${ui.start.target_ap.active ? '활성' : '비활성'}</p>`}
-        ${msg && html`<div class="msg">${msg}</div>`}</div>
-      <div class="panel"><h3>이번 순찰 이벤트</h3>${ui && ui.run_id ? html`<${EventList} events=${ui.events} max=${10} />`
-        : html`<p class="no">순찰 중일 때 그 순찰의 이벤트만 보입니다.</p>`}</div>
-    </div>
-    ${starting && html`<${StartModal} onClose=${() => setStarting(false)} onStarted=${() => setStarting(false)} />`}
-  </main>`;
+  const runId = state.runId;
+  useEffect(() => {
+    let alive = true, timer;
+    setDetail(null); setError('');
+    if (!runId) return;
+    const tick = async () => {
+      let done = false;
+      try {
+        const d = await api(`/api/runs/${runId}`);
+        if (alive) { setDetail(d); setError(''); }
+        done = d.run.status !== 'running';
+      } catch (e) { if (alive) { if (e.status === 401) onAuthLost(); else setError(e.message); } }
+      if (alive && !done) timer = setTimeout(tick, 2000);
+    };
+    tick(); return () => { alive = false; clearTimeout(timer); };
+  }, [runId]);
+  return [state, detail, error];
 }
 
+function preferredAP(aps, readings) {
+  const measured = new Set((readings || []).map((r) => String(r.ap_id)));
+  const used = aps.filter((a) => measured.has(String(a.ap_id)));
+  return (used.find((a) => a.is_target) || used[0] || aps.find((a) => a.is_target) || aps[0])?.ap_id;
+}
+
+function readingOverlay(d, ap) {
+  if (!d || !ap) return null;
+  const heat = {};
+  (d.readings || []).filter((r) => String(r.ap_id) === String(ap) && r.median != null && r.n > 0 && !r.interpolated).forEach((r) => {
+    heat[r.cell_id] = { [r.ap_id]: [r.median, r.n] };
+  });
+  return { heat, readings: (d.readings || []).filter((r) => String(r.ap_id) === String(ap)), ap,
+    apName: Object.fromEntries(d.aps.map((a) => [a.ap_id, a.ssid])), thr: d.thr,
+    tasks: d.tasks, candidates: d.candidates, inspections: d.inspections };
+}
+
+function RobotCards({ robots, linked, onSelect }) {
+  return html`<section class="panel robot-cards"><div class="section-title"><h3>로봇 현황</h3><span class=${'live-dot ' + (linked ? 'on' : '')}>${linked ? '수신 중' : '연결 대기'}</span></div>
+    ${!robots.length && html`<p class="no">등록된 로봇 없음</p>`}
+    ${robots.map((r) => {
+      const s = r.state, fresh = linked && r.connected;
+      const label = !s ? '상태 미수신' : !fresh ? '연결 끊김' : s.nav_state || '상태 수신';
+      const progress = s && Number.isFinite(s.progress) ? Math.max(0, Math.min(1, s.progress)) : null;
+      return html`<button class="robot-card" onClick=${() => onSelect({ kind: 'robot', data: { robot_id: r.robot_id } })}>
+        <div class="robot-card-head"><span class="robot-symbol" style=${{ background: robotColor(r.robot_id) }}>R${r.robot_id.replace('robot', '')}</span><div><b>${r.robot_id}</b><small>${fresh && s?.pose_ok !== false ? '위치 수신' : s?.last_valid_pose ? '마지막 위치 보관' : '현재 위치 미수신'}</small></div><span class=${'chip ' + (!fresh ? 'off' : s?.warning || s?.estop ? 'bad' : 'ok')}>${label}</span></div>
+        <div class="robot-metrics"><span>배터리 <b>${fresh && s?.battery_pct != null ? `${Math.round(s.battery_pct)}%` : '미수신'}</b></span><span>${s?.task_id ? TYPE_LABEL[s.task_type] || ({0:'측정',1:'설비 점검',2:'정밀측정',3:'복귀'})[s.task_type] || '작업 중' : '배정 작업 없음'}</span></div>
+        <div class="progress-track"><i style=${{ width: `${fresh && progress != null ? Math.round(progress * 100) : 0}%`, background: robotColor(r.robot_id) }}></i></div>
+        <div class="robot-bottom"><span>${s?.task_id && progress != null ? `작업 진행 ${Math.round(progress * 100)}%` : '작업 대기'}</span><span>${s?.ts ? ago(s.ts) : '보고 대기'}</span></div>
+        ${s?.warning && html`<p class="robot-warning">${s.warning}</p>`}
+      </button>`;
+    })}</section>`;
+}
+
+function SelectionDetail({ selection, robots, d, m, ap, liveInspections }) {
+  if (!selection) return html`<section class="panel selection"><h3>선택 상세</h3><div class="selection-empty"><span>⌖</span><p>지도의 로봇·설비·측정 영역을<br/>선택하면 상세를 볼 수 있습니다.</p></div></section>`;
+  const { kind, data } = selection;
+  let title, body;
+  if (kind === 'robot') {
+    const r = robots.find((r) => r.robot_id === data.robot_id), s = r?.state;
+    title = data.robot_id;
+    body = html`<dl class="kv"><dt>현재 상태</dt><dd>${r?.connected ? s?.nav_state || '미수신' : '연결 끊김·미수신'}</dd><dt>위치</dt><dd>${r?.connected && s?.pose_ok && s.x != null ? `${fmtNum(s.x)}, ${fmtNum(s.y)} m` : '위치 불확실·미수신'}</dd><dt>작업</dt><dd>${s?.task_id || '없음'}</dd><dt>회차</dt><dd>${s?.run_id || '미배정'}</dd><dt>최근 수신</dt><dd>${s?.received_at ? ago(s.received_at) : '없음'}</dd></dl>`;
+  } else if (kind === 'cell') {
+    title = '측정 영역';
+    const rs = (d?.readings || []).filter((r) => r.cell_id === data.cell_id && String(r.ap_id) === String(ap));
+    const r = rs[0];
+    body = r ? html`<div class="signal-value">${r.median == null ? '—' : fmtNum(r.median)}<small>dBm</small></div><dl class="kv"><dt>통계</dt><dd>${r.statistic === 'committed_median' ? '저장된 중앙값' : '실시간 중앙값'}</dd><dt>측정 수</dt><dd>${r.n}개 · 미검출 ${r.misses}회</dd><dt>판정</dt><dd>${({normal:'정상',coverage_suspect:'커버리지 저하 의심',unknown:'판단 불가',unclassified:'판정 대기'})[r.state] || r.state}</dd><dt>표본 신뢰도</dt><dd>${r.confidence === 'ok' ? '충분' : '부족'}</dd></dl><p class="foot">색상 보간은 표시용입니다. 위 값과 판정은 원본 칸 데이터입니다.</p>` : html`<p class="no">이 AP의 유효 측정값이 없습니다.</p>`;
+  } else if (kind === 'facility') {
+    title = data.facility_id;
+    const ins = [...(d?.inspections || [])].reverse().find((i) => i.facility_id === data.facility_id);
+    const live = [...(liveInspections || [])].reverse().find((i) => i.facility_id === data.facility_id);
+    body = html`<dl class="kv"><dt>설비</dt><dd>${FAC_LABEL[data.facility_type] || data.facility_type}</dd><dt>저장 판정</dt><dd>${ins ? ({normal:'정상',abnormal:'이상',unconfirmed:'미확인'})[ins.final] : '저장된 판정 없음'}</dd><dt>실시간 판정</dt><dd>${live ? (['정상','미검출','가림','위치 이상','이상','미확인'][live.verdict] || live.detail) : '미수신'}</dd></dl>
+      ${(live?.photo_url || live?.photo) && html`<img class="detail-photo" src=${live.photo_url || live.photo} alt="ROS 실시간 근거 사진"/><p class="foot">실시간 수신 사진 · 이력 저장 여부는 별도</p>`}
+      ${(ins?.photos || []).map((p) => html`<a href=${'/media/' + p} target="_blank" rel="noreferrer"><img class="detail-photo" src=${'/media/' + p} alt="저장된 설비 점검 사진"/></a>`)}`;
+  } else if (kind === 'reference') {
+    title = `${data.robot_id} 시작 참고점`;
+    body = html`<p>기본 설정에서 읽은 undock 직후 참고 자세입니다.</p><dl class="kv"><dt>참고 좌표</dt><dd>${fmtNum(data.x)}, ${fmtNum(data.y)} m</dd><dt>방향</dt><dd>${(data.yaw * 180 / Math.PI).toFixed(1)}°</dd><dt>출처</dt><dd>공통 시작 설정</dd></dl><p class="foot">실측 현재 위치가 아닙니다. 실행 시 지정값은 별도로 적용될 수 있습니다.</p>`;
+  } else {
+    title = data.ssid;
+    body = html`<dl class="kv"><dt>측정 대상</dt><dd>${data.is_target ? '선택됨' : '대상 아님'}</dd><dt>설치 위치</dt><dd>${fmtNum(data.x)}, ${fmtNum(data.y)} m</dd></dl><p class="foot">등록 정보입니다. 수신 중인 신호 유무는 측정 결과로 확인합니다.</p>`;
+  }
+  return html`<section class="panel selection"><div class="section-title"><h3>${title}</h3></div>${body}</section>`;
+}
+
+function MonitorPage({ onAuthLost }) {
+  const [state, d, heatError] = useMonitorData(onAuthLost), [ui, linked] = useUiSocket(onAuthLost);
+  const [ap, setAp] = useState(''), [selection, setSelection] = useState(null);
+  const manualAP = useRef(false);
+  const [layers, setLayers] = useState({ heat: true, smooth: true, opacity: 0.5, path: false, grid: false, zones: false, references: false });
+  const [starting, setStarting] = useState(false), [message, setMessage] = useState('');
+  const m = state.map, sameMap = m && d?.run?.map_id === m.map_id;
+  const owner = state.run_owner || ui?.run_owner, ros = owner === 'ros';
+  const aps = d?.aps || m?.aps || [];
+  const apSignature = aps.map((a) => `${a.ap_id}:${a.is_target}`).join(',') + ':' + [...new Set((d?.readings || []).map((r) => r.ap_id))].join(',');
+  useEffect(() => { manualAP.current = false; }, [d?.run?.run_id]);
+  useEffect(() => { setAp((old) => manualAP.current && aps.some((a) => String(a.ap_id) === old) ? old : String(preferredAP(aps, d?.readings) || '')); }, [apSignature, d?.run?.run_id]);
+  useEffect(() => { setSelection(null); }, [m?.map_id, d?.run?.run_id]);
+  const robots = ui?.robots || [];
+  const safeRobots = robots.map((r) => ({ ...r, connected: linked && r.connected }));
+  const navPaths = linked && sameMap && m?.configuration?.status === 'ok' ? (ui?.telemetry?.paths || []).filter((p) => p.run_id === d.run.run_id) : [];
+  const liveInspections = sameMap ? (ui?.telemetry?.inspections || []).filter((i) => i.run_id === d.run.run_id) : [];
+  const alerts = ui?.telemetry?.alerts || [];
+  const overlay = useMemo(() => sameMap ? readingOverlay(d, ap) : null, [d, ap, sameMap]);
+  const toggle = (k) => setLayers((l) => ({ ...l, [k]: !l[k] }));
+  const abort = async () => {
+    if (!confirm('진행 중인 순찰을 중단하고 로봇을 복귀시킬까요?')) return;
+    try { await api(`/api/runs/${d.run.run_id}/abort`, { method:'POST' }); } catch(e) { setMessage(e.message); }
+  };
+  return html`<main class="dashboard">
+    ${ui?.preview && html`<div class="preview-banner">샘플 데이터 미리보기 · 실제 로봇 및 운영 DB 미연결</div>`}
+    <div class="dashboard-heading"><div><p class="eyebrow">SCV CONTROL CENTER</p><h2>통신·설비 점검 현황</h2></div><div class="connection-summary"><span class=${'live-dot ' + (linked ? 'on' : '')}>${linked ? '웹 상태 수신 중' : '서버 연결 대기'}</span><small>${ui?.ts ? `최근 갱신 ${hm(ui.ts)}` : '수신 대기'}</small></div></div>
+    ${(state.error || heatError || message) && html`<div class="msg">${state.error || heatError || message} · 마지막 수신값을 유지합니다.</div>`}
+    ${ros && ui?.telemetry?.bridge?.error && html`<div class="msg">ROS 상태 연결 실패: ${ui.telemetry.bridge.error}</div>`}
+    <div class="overview-strip"><div><small>표시 지도</small><b>${m?.name || '등록 대기'}</b></div><div><small>점검 회차</small><b>${d ? `#${d.run.run_id} · ${d.run.status === 'running' ? '점검 진행 중' : `최근 회차 · ${RUN_LABEL[d.run.status] || d.run.status}`}` : '회차 없음'}</b></div><div><small>수신 로봇</small><b>${safeRobots.filter((r) => r.connected).length} / ${robots.length}</b></div><div><small>측정 표본</small><b>${d?.samples?.toLocaleString() || '—'}</b></div><div><small>운용 방식</small><b>${ros ? 'ROS 관제 연결' : owner === 'web' ? '웹 관제' : '확인 중'}</b></div></div>
+    <div class="dashboard-grid"><section class="mapbox monitor-map"><div class="head"><b>점검 지도</b><span>${m?.name || ''}</span><span class="map-hint">대상을 눌러 상세 확인</span></div>
+      <div class="map-toolbar">${[['heat','히트맵'],['path','경로'],['zones','구역'],['references','시작 참고점'],['grid','격자·번호']].map(([k, label]) => html`<button class=${'layer-btn ' + (layers[k] ? 'on' : '')} aria-pressed=${layers[k]} onClick=${() => toggle(k)}>${label}</button>`)}
+        <select aria-label="측정 AP" value=${ap} onChange=${(e) => { manualAP.current = true; setAp(e.target.value); }}>${!aps.length && html`<option value="">측정 AP 없음</option>`}${aps.map((a) => html`<option value=${a.ap_id}>${a.ssid}${a.is_target ? ' · 등록 대상' : ''}</option>`)}</select></div>
+      ${state.loading ? html`<div class="empty">지도를 불러오고 있습니다.</div>` : !m ? html`<div class="empty">현재 지도가 없습니다. 설정에서 기준 지도를 등록해 주세요.</div>` : !m.width ? html`<div class="empty">지도 이미지 파일을 찾을 수 없습니다.</div>` : html`<${MapView} m=${m} robots=${ros && m.configuration?.status !== 'ok' ? [] : safeRobots} linked=${linked} overlay=${overlay} layers=${layers} onSelect=${setSelection} selection=${selection} paths=${navPaths}/>`}
+      <div class="heat-legend"><div><b>신호 세기</b><div class="signal-gradient"></div><div class="gradient-labels"><span>약함 −90</span><span>−65</span><span>−40 dBm 강함</span></div></div><label><input type="checkbox" checked=${layers.smooth} onChange=${() => toggle('smooth')}/> 부드럽게</label><label>농도 <input aria-label="히트맵 농도" type="range" min="0.15" max="0.8" step="0.05" value=${layers.opacity} onInput=${(e) => setLayers((l) => ({...l, opacity: Number(e.target.value)}))}/></label><small>점무늬: 미검출 · 빈 영역: 미측정<br/>중앙값 · 보간은 표시 전용${d ? ` · 의심 기준 ${d.thr} dBm` : ''}</small></div>
+      ${d && !sameMap && html`<div class="msg">회차와 지도가 달라 히트맵을 생략했습니다.</div>`}
+      ${m?.configuration?.status !== 'ok' && m?.configuration && html`<p class="map-status">${m.configuration.message}</p>`}
+      <details class="map-diagnostics"><summary>지도·데이터 정보</summary><p>해상도 ${m?.resolution_m} m/px · 격자 ${m?.grid_size_m} m · 최근 DB 조회 ${d?.fetched_at ? fmtTime(d.fetched_at) : '대기'}</p><p>${m?.configuration?.message}</p><p>경로는 DB 작업 경로점 또는 수신된 Nav2 계획 경로입니다. 실제 주행 궤적은 아닙니다. 미수신 경로는 표시하지 않습니다. 설비·AP는 DB 등록값이며 ROS 설정을 자동 덮어쓰지 않습니다.</p></details>
+    </section><aside class="dashboard-side"><${RobotCards} robots=${safeRobots} linked=${linked} onSelect=${setSelection}/><${SelectionDetail} selection=${selection} robots=${safeRobots} d=${sameMap ? d : null} m=${m} ap=${ap} liveInspections=${liveInspections}/>
+      ${owner === 'web' && html`<section class="panel"><button class="btn primary" onClick=${() => d?.run.status === 'running' ? abort() : setStarting(true)}>${d?.run.status === 'running' ? '순찰 중단' : '순찰 시작'}</button></section>`}
+    </aside></div>
+    <section class="panel alert-panel"><div class="section-title"><h3>경보·최근 기록</h3><span class="no">최근 수신 기준</span></div>${alerts.length ? html`<div class="alert-items">${alerts.slice(-5).reverse().map((a) => html`<div class=${'alert-item ' + a.level}><span class="alert-level">${a.level === 'error' ? '이상' : a.level === 'warn' ? '주의' : '안내'}</span><b>${a.robot_id || '관제'}</b><span>${a.message}</span><small>${ago(a.received_at)}${a.delayed ? ' · 지연 수신' : ''}</small></div>`)}</div>` : html`<p class="no">수신된 ROS 경보 없음${!linked ? ' · 연결 상태를 확인해 주세요.' : ''}</p>`}<details><summary>회차 이벤트 전체 보기</summary><${EventList} events=${ui?.events || []} max=${100}/></details></section>
+    ${starting && html`<${StartModal} onClose=${() => setStarting(false)} onStarted=${() => setStarting(false)}/>`}
+  </main>`;
+}
 
 // ---------------------------------------------------------------- 순찰 시작 창 · 이력 (3-3차)
 const TYPE_LABEL = { SURVEY_SEGMENT: '측정', REINSPECTION: '정밀측정', FACILITY_CHECK: '탐지', DOCK: '복귀' };
@@ -565,6 +646,7 @@ function HistoryPage({ onAuthLost }) {
   const [ap, setAp] = useState('');
   const [msg, setMsg] = useState('');
   const [detail, setDetail] = useState(null);       // 「자세히」 task_id
+  const [advanced, setAdvanced] = useState(false);
   const fail = (e) => (e.status === 401 ? onAuthLost() : setMsg(e.message));
   const loadRuns = () => api('/api/runs').then((r) => { setRuns(r); return r; }).catch(fail);
   useEffect(() => {                                  // 현재 지도의 순찰 목록 — 진행 중 순찰이 생기거나 끝나면 5초 안에 반영
@@ -575,21 +657,29 @@ function HistoryPage({ onAuthLost }) {
     return () => clearInterval(t);
   }, []);
   useEffect(() => {
-    if (!runId) { setD(null); setEvents([]); return; }
-    let alive = true;
-    const tick = () => {
-      api(`/api/runs/${runId}`).then((x) => alive && setD(x)).catch(fail);
-      api(`/api/runs/${runId}/events`).then((x) => alive && setEvents(x.events)).catch(fail);
+    let alive = true, timer;
+    setD(null); setEvents([]);
+    if (!runId) return;
+    const tick = async () => {
+      let completed = false;
+      try {
+        const x = await api(`/api/runs/${runId}`);
+        const events = await api(`/api/runs/${runId}/events`);
+        const map = await api(`/api/maps/${x.run.map_id}`);
+        if (alive) { setD(x); setM(map.map); setEvents(events.events); setMsg(''); }
+        completed = x.run.status !== 'running';
+      } catch (e) { if (alive) fail(e); }
+      if (alive && !completed) timer = setTimeout(tick, 2000);
     };
-    tick();
-    const t = setInterval(tick, 2000);
-    return () => { alive = false; clearInterval(t); };
+    tick(); return () => { alive = false; clearTimeout(timer); };
   }, [runId]);
+  const historyAPs = d?.aps || [];
+  useEffect(() => { setAp((a) => historyAPs.some((p) => String(p.ap_id) === a) ? a : String(preferredAP(historyAPs, d?.readings) || '')); }, [d?.run?.run_id]);
   const run = d && d.run;
   const apName = {};
   ((d && d.aps) || []).forEach((a) => { apName[a.ap_id] = a.ssid; });
   const sameMap = m && run && m.map_id === run.map_id;
-  const overlay = d && sameMap ? { heat: d.heat, ap, apName, thr: d.thr, tasks: d.tasks, candidates: d.candidates, inspections: d.inspections } : null;
+  const overlay = useMemo(() => d && sameMap ? readingOverlay(d, ap) : null, [d, sameMap, ap]);
   const tasks = ((d && d.tasks) || []).filter((t) => !filter || t.type === filter);
   const byRobot = {};
   ((d && d.tasks) || []).forEach((t) => {
@@ -597,8 +687,8 @@ function HistoryPage({ onAuthLost }) {
     b.n += 1; if (['DONE', 'FAILED', 'CANCELED'].includes(t.status)) b.done += 1; if (t.status === 'ACTIVE') b.active = t;
   });
   return html`<main>
-    <h2>이력</h2>
-    <p class="sub">현재 지도(${m ? m.name : '없음'})에서 수행된 순찰의 결과를 봅니다 — task(측정 · 정밀측정 · 탐지 · 복귀) · RSSI 히트맵 · 후보 · 설비 판정 · 이벤트. 순찰 시작 · 중단은 모니터에서 합니다.</p>
+    <h2>점검 결과</h2>
+    <p class="sub">회차를 선택해 통신 상태와 설비 점검 결과를 확인합니다. 색상은 중앙값이며, 작업·판정의 원본 표는 필요할 때 펼칠 수 있습니다.</p>
     <div class="runbar panel">
       <select value=${runId || ''} onChange=${(e) => setRunId(Number(e.target.value) || null)}>
         ${!runs.runs.length && html`<option value="">이 지도의 순찰 기록 없음</option>`}
@@ -619,11 +709,9 @@ function HistoryPage({ onAuthLost }) {
           ${d && html`<span>표본 ${d.samples}</span>`}
           <span class="legend">
             <span class="lg">히트맵 <select class="mini" value=${ap} onChange=${(e) => setAp(e.target.value)}>
-              <option value="">가장 센 AP</option>${((d && d.aps) || []).map((a) => html`<option key=${a.ap_id} value=${a.ap_id}>${a.ssid}</option>`)}
+              <option value="" disabled>측정 AP 선택</option>${((d && d.aps) || []).map((a) => html`<option key=${a.ap_id} value=${a.ap_id}>${a.ssid}</option>`)}
             </select></span>
-            <span class="lg"><i class="hm" style=${{ background: '#16a34a' }}></i>≥ ${d ? d.thr + 10 : -62}</span>
-            <span class="lg"><i class="hm" style=${{ background: '#f59e0b' }}></i>그 아래</span>
-            <span class="lg"><i class="hm" style=${{ background: '#dc2626' }}></i>${'<'} ${d ? d.thr : -72} dBm (후보 기준)</span>
+            <span class="lg"><span class="signal-gradient" style=${{width:120,height:8,display:'inline-block'}}></span>중앙값 −90…−40 dBm · DB 의심 기준 ${d?.thr ?? '—'} dBm</span>
             <span class="lg">● 후보 (주황 열림 · 보라 정밀측정 중 · 빨강 확정 · 초록 해제)</span>
             <span class="lg">◯ 설비 판정 (초록 정상 · 빨강 이상 · 회색 미확인)</span>
           </span>
@@ -636,8 +724,9 @@ function HistoryPage({ onAuthLost }) {
         <div class="panel"><h3>이 순찰의 이벤트 <span class="no">${events.length}건</span></h3><${EventList} events=${events} max=${200} /></div>
       </div>
     </div>
-    ${d && html`<div class="panel">
-      <div class="ttl"><b>task</b><code>tasks</code>
+    <button class="btn" aria-expanded=${advanced} onClick=${() => setAdvanced(!advanced)}>${advanced ? '상세 표 접기' : '작업·판정 상세 표 보기'}</button>
+    ${d && advanced && html`<div class="panel">
+      <div class="ttl"><b>작업</b><code>tasks</code>
         <span class="filters">${TASK_FILTERS.map(([k, label]) => html`<button key=${k} class=${'pg' + (filter === k ? ' on' : '')}
           onClick=${() => setFilter(k)}>${label} ${(d.tasks || []).filter((t) => !k || t.type === k).length}</button>`)}</span></div>
       <table class="grid"><thead><tr><th>task</th><th>로봇</th><th>종류</th><th>대상</th><th>점</th><th>상태</th><th>진행률</th><th>사유</th><th>보낸 시각</th><th>끝난 시각</th><th></th></tr></thead>
@@ -837,6 +926,7 @@ function MasterPage({ onAuthLost, selected, setSelected }) {
   const apSig = ui ? JSON.stringify(ui.aps || []) : '';
   const [cards, setCards] = useState(null);
   const [err, setErr] = useState('');
+  const [advanced, setAdvanced] = useState(false);
   const [open, setOpen] = useState(null);
   const load = useCallback(() => {
     api('/api/master/summary')
@@ -854,11 +944,12 @@ function MasterPage({ onAuthLost, selected, setSelected }) {
     if (c) turnPage('aps', c.page || 1);
   }, [apSig]);
   const byTable = Object.fromEntries((cards || []).map((c) => [c.table, c]));
-  const shown = selected.filter((t) => byTable[t]);
+  const shown = selected.filter((t) => byTable[t] && (advanced || ['maps','aps','facilities','robots'].includes(t)));
 
   return html`<main>
-    <h2>정보</h2>
-    <p class="sub">오른쪽 탭에서 표를 선택하면 아래로 쌓여 보입니다(다시 누르면 해제). 「목록」에서 행을 추가·삭제하고 값을 바꿉니다.</p>
+    <h2>설정</h2>
+    <p class="sub">지도·측정 AP·설비 등록 정보를 관리합니다. 공통 시작 참고값과 ROS 구역은 지도에서 자동으로 읽습니다.</p>
+    <label class="settings-advanced"><input type="checkbox" checked=${advanced} onChange=${() => setAdvanced(!advanced)}/> 고급 관리 항목 표시</label>
     ${err && html`<div class="msg">${err}</div>`}
     <div class="info">
       <div class="stack">
@@ -866,25 +957,25 @@ function MasterPage({ onAuthLost, selected, setSelected }) {
         ${shown.map((t) => {
           const c = byTable[t];
           return html`<section key=${t} class="panel">
-            <div class="ttl"><b>${c.title}</b><code>${c.table}</code><span class="n">${c.count}행</span>
+            <div class="ttl"><b>${c.title}</b>${advanced && html`<code>${c.table}</code>`}<span class="n">${c.count}개 등록</span>
               <button class="btn" onClick=${() => setOpen(c.table)}>목록</button></div>
             <div class="desc">${c.desc}</div>
-            ${c.items.length
+            ${advanced && c.items.length
               ? html`<div class=${'kvgrid' + (c.items.some((x) => x[2]) ? ' sub' : '')}>
                   ${c.items.map(([k, v, sub], i) => html`<div key=${i} class="kvi">
                     <span>${k}${sub ? html`<em>${sub}</em>` : ''}</span><span>${v}</span></div>`)}
                 </div>`
-              : html`<div class="desc">등록된 행이 없습니다.</div>`}
+              : html`<div class="desc">${c.count ? '등록 내용은 목록에서 확인·수정할 수 있습니다.' : '등록된 항목이 없습니다.'}</div>`}
             <${Pager} page=${c.page} pages=${c.pages} onPage=${(p) => turnPage(t, p)} />
           </section>`;
         })}
       </div>
       <nav class="vtabs">
-        ${(cards || []).map((c) => {
+        ${(cards || []).filter((c) => advanced || ['maps','aps','facilities','robots'].includes(c.table)).map((c) => {
           const on = selected.includes(c.table);
           return html`<button key=${c.table} class=${'vtab' + (on ? ' on' : '')} onClick=${() => toggle(c.table)}>
             <span class="chk">${on ? selected.indexOf(c.table) + 1 : ''}</span>
-            <span class="vt"><b>${c.title}</b><code>${c.table}</code></span>
+            <span class="vt"><b>${c.title}</b>${advanced && html`<code>${c.table}</code>`}</span>
             <span class="n">${c.count}</span>
           </button>`;
         })}
@@ -1071,26 +1162,35 @@ function ListModal({ table, onClose, onAuthLost, live }) {
 
 function MapUpload({ busy, onSubmit, onCancel }) {
   const ref = useRef(null);
+  const [source, setSource] = useState(null), [message, setMessage] = useState('');
+  const [importing, setImporting] = useState(false);
+  useEffect(() => { api('/api/reference-map').then(setSource).catch((e) => setMessage(e.message)); }, []);
   const submit = (e) => { e.preventDefault(); onSubmit(new FormData(ref.current)); };
-  return html`<form class="upload" ref=${ref} onSubmit=${submit}>
-    <div class="field"><label>이름</label><input name="name" required placeholder="testbed_20261010" /></div>
-    <div class="field"><label>제어 PC 지도 경로 (yaml)</label>
-      <input name="robot_map_path" required placeholder="/opt/scv/maps/testbed_20261010.yaml" /></div>
-    <div class="field"><label>격자 크기 (m)</label><input name="grid_size_m" type="number" step="any" min="0.1" defaultValue="1.0" /></div>
-    <div class="field"><label>yaml 파일</label><input name="yaml_file" type="file" accept=".yaml,.yml" required /></div>
-    <div class="field"><label>pgm 파일</label><input name="pgm_file" type="file" accept=".pgm,.png" required /></div>
-    <div style=${{ display: 'flex', gap: '6px' }}>
-      <button class="btn primary" disabled=${busy}>업로드</button>
-      <button class="btn" type="button" onClick=${onCancel}>취소</button>
-    </div>
-  </form>`;
+  const importReference = async () => {
+    const robotPath = ref.current.elements.robot_map_path.value;
+    if (!robotPath.trim()) { setMessage('로봇 PC에서 사용하는 지도 YAML 경로를 입력해 주세요.'); return; }
+    setImporting(true);
+    try {
+      await api('/api/maps/import-reference', { json: { robot_map_path: robotPath } });
+      // Close/reload the owning list without a second upload.
+      onCancel(); location.reload();
+    } catch (e) { setMessage(e.message); } finally { setImporting(false); }
+  };
+  return html`<div><form class="upload" ref=${ref} onSubmit=${submit}>
+    <div class="field"><label>이름</label><input name="name" required placeholder="지도 이름" /></div>
+    <div class="field"><label>로봇 PC 지도 경로 (yaml)</label><input name="robot_map_path" required defaultValue=${source?.robot_map_path || ''} placeholder="로봇이 실제 사용하는 YAML 경로" /></div>
+    <div class="field"><label>격자 크기 (m)</label><input key=${source?.grid_size_m || 'pending'} name="grid_size_m" type="number" step="any" min="0.1" defaultValue=${source?.grid_size_m || ''} placeholder="측정 간격" required /></div>
+    <div class="field"><label>YAML 파일</label><input name="yaml_file" type="file" accept=".yaml,.yml" required /></div>
+    <div class="field"><label>PGM 파일</label><input name="pgm_file" type="file" accept=".pgm,.png" required /></div>
+    <div style=${{display:'flex',gap:6}}><button class="btn" disabled=${busy || importing}>파일로 등록</button><button class="btn" type="button" onClick=${onCancel}>취소</button></div>
+  </form><div class="reference-import">${source?.available && html`<b>공통 기준 지도 ${source.name}</b><span>측정 간격 ${source.grid_size_m} m를 설정에서 읽었습니다. 파일 선택 없이 등록할 수 있습니다.</span><button class="btn primary" disabled=${busy || importing} onClick=${importReference}>기준 지도 읽어 등록</button>`}${message && html`<p class="msg">${message}</p>`}</div></div>`;
 }
 
 // ---------------------------------------------------------------- 앱
 function App() {
   const [me, setMe] = useState(undefined);        // undefined = 확인 중, null = 로그인 안 됨
   const [page, setPage] = useState(pageFromPath());
-  const [infoSel, setInfoSel] = useState([]);    // 정보 탭에서 선택한 표 (다른 탭에 다녀와도 유지)
+  const [infoSel, setInfoSel] = useState(['maps', 'aps', 'facilities']);    // 정보 탭에서 선택한 표 (다른 탭에 다녀와도 유지)
   const go = useCallback((p) => {
     if (location.pathname !== `/server/${p}`) history.pushState({}, '', `/server/${p}`);
     setPage(p);
@@ -1110,7 +1210,7 @@ function App() {
 
   return html`
     <header class="top">
-      <div class="brand">SCV 관제<small>server page</small></div>
+      <div class="brand">SCV 관제<small>CONTROL</small></div>
       <nav class="tabs">
         ${TABS.map((t) => html`<button key=${t.id} class=${'tab' + (page === t.id ? ' on' : '')}
           disabled=${!me} title=${me ? '' : '로그인 후 사용할 수 있습니다'} onClick=${() => go(t.id)}>${t.label}</button>`)}

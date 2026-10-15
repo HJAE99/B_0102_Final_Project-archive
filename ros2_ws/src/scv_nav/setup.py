@@ -9,7 +9,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/config', ['config/navigate_through_poses_scv.xml', 'config/navigate_to_pose_scv.xml']),
+        ('share/' + package_name + '/config', ['config/navigate_through_poses_scv.xml', 'config/navigate_to_pose_scv.xml', 'config/robot_references.json']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

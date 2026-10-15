@@ -1,0 +1,7 @@
+{
+  "map": {"name": "testbed_v1", "resolution_m": 0.05, "origin": [-0.15, -0.25, 0], "width": 69, "height": 138, "pixels_sha256": "0f42f4b6dc09c12837f800401f63ad653b9c473df09689539367c26eaaa097e3"},
+  "robots": {
+    "robot3": {"x": 2.806, "y": 4.610, "yaw_deg": 179.9},
+    "robot4": {"x": 2.863, "y": 0.948, "yaw_deg": 175.8}
+  }
+}

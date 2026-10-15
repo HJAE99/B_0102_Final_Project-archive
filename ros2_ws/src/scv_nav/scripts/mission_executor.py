@@ -14,6 +14,7 @@
 # 막힘(E1): 5초 동안 5 cm·0.3 rad 도 못 움직이면 BLOCKED, BLOCKED 때 길 없는 점이 있으면 바로, 아니면 10초에 지금 향하던 점을 건너뜀
 # 배터리(E2): 30 % 이하 새 작업 거절(DOCK 제외), DOCK_PCT 이하 작업 취소 후 dock
 import math
+from scv_nav.references import home_defaults
 import threading
 import time
 
@@ -43,7 +44,6 @@ KIND = {'EXT': InspectionResult.KIND_EXTINGUISHER, 'SHT': InspectionResult.KIND_
 # undock 직후 위치 (x m, y m, yaw 도). pose_check 3회 평균 — robot3 10/12 재측정(좌우 spin 으로 AMCL 수렴 뒤, yaw 범위 2.1°), robot4 10/11 (docs/driving/data/2026-10-1{1,2}_pose_check.csv)
 DOCK_BACKOFF = 0.3   # dock 명령 내리는 자리: undock 위치보다 dock 에서 이만큼 더 먼 곳 (m, 10/12 hhj 요청)
 DOCK_PCT = 20.0   # 스스로 dock 하는 배터리 % (process_flow E2 는 15, 10/12 hhj 요청으로 20)
-HOME = {'/robot3': (2.806, 4.610, 179.9), '/robot4': (2.863, 0.948, 175.8)}
 
 
 class MissionExecutor(Node):
@@ -364,6 +364,7 @@ def main():
     nav = TurtleBot4Navigator()
     xyyaw = [nav.declare_parameter(k, math.nan).value for k in ('x', 'y', 'yaw')]
     if any(map(math.isnan, xyyaw)):
+        HOME = home_defaults()
         if nav.get_namespace() not in HOME:
             raise SystemExit(f'HOME 에 {nav.get_namespace()} 없음 — -p x y yaw 를 주세요')
         xyyaw = HOME[nav.get_namespace()]

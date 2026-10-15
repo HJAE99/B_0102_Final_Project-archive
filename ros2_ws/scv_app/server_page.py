@@ -31,6 +31,7 @@ SCV server page — 관제 PC (3-3차)
 """
 from __future__ import annotations
 
+import sys
 import asyncio
 import json
 import math
@@ -44,6 +45,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from heatmap_data import read_readings
+from web_config import SRC, map_configuration, reference_map_files
+try:
+    from scv_monitor.telemetry import Telemetry
+    from scv_monitor.ros_reader import RosReader
+except ImportError:
+    sys.path.insert(0, str(SRC / "scv_monitor"))
+    from scv_monitor.telemetry import Telemetry
+    from scv_monitor.ros_reader import RosReader
+
 import numpy as np
 import psycopg
 import psycopg.errors
@@ -52,7 +63,7 @@ import yaml
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from psycopg import sql
@@ -87,6 +98,9 @@ ROBOT_ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")     # DB CHECK robots_robot_id_fo
 # 섹터 ↔ 로봇 기본 배정 (3차). 순찰 시작 때 바꿀 수 있고 run마다 runs.sector_robots에 저장(3-3차)
 DEFAULT_SECTOR_ROBOTS = {"1": "robot3", "2": "robot4"}
 
+TELEMETRY = Telemetry()
+ROS_READER = None
+
 pool = ConnectionPool(DSN, min_size=1, max_size=5, kwargs={"row_factory": dict_row}, open=False)
 # 관제 PC 메모리 상태 (3-2차 — Redis 대신). 요청 처리 스레드 풀과 이벤트 루프가 함께 쓰므로 잠금 하나로 보호
 MEM_LOCK = threading.Lock()
@@ -103,9 +117,17 @@ async def lifespan(_app: FastAPI):
     MAIN_LOOP = asyncio.get_running_loop()
     reset_reported_active()
     restore_memory()                                   # 진행 중 run · 최근 이벤트 · 순찰 중 로봇 대기 상태 (3-3차)
+    global ROS_READER
+    if RUN_OWNER == "ros":
+        with pool.connection() as conn:
+            robot_ids = [r["robot_id"] for r in conn.execute("SELECT robot_id FROM robots")]
+        ROS_READER = RosReader(TELEMETRY, robot_ids, MEDIA_DIR)
+        ROS_READER.start()
     watchdog = asyncio.create_task(state_watchdog())
     yield
     watchdog.cancel()
+    if ROS_READER:
+        ROS_READER.stop()
     pool.close()
 
 
@@ -871,7 +893,7 @@ async def upload_map(request: Request,
         img = img.convert("L")
     except Exception:
         raise HTTPException(400, "pgm 이미지를 읽지 못했습니다")
-    fname = f"{slug(name)}_{int(time.time())}.png"
+    fname = f"{slug(name)}_{uuid.uuid4().hex}.png"
     path = MEDIA_DIR / "maps" / fname
     img.save(path, format="PNG")                        # 크기는 바꾸지 않음
     try:
@@ -884,6 +906,36 @@ async def upload_map(request: Request,
         path.unlink(missing_ok=True)
         raise db_error(e)
     return {"ok": True, "map_id": row["map_id"], "width": img.width, "height": img.height}
+
+
+@app.get("/api/reference-map")
+def reference_map_info(request: Request):
+    current_user(request)
+    try:
+        path, image, size, meta = reference_map_files()
+        return {"available": image.is_file(), "name": path.stem, "grid_size_m": size,
+                "resolution_m": meta["resolution"], "robot_map_path": os.environ.get("SCV_ROBOT_MAP_PATH", "")}
+    except (OSError, ValueError, KeyError, yaml.YAMLError):
+        return {"available": False, "message": "기준 지도/구역 설정을 읽지 못했습니다. 수동 등록을 사용하세요."}
+
+
+@app.post("/api/maps/import-reference")
+async def import_reference_map(request: Request):
+    current_user(request)
+    body = await request.json()
+    try:
+        path, image, size, _ = reference_map_files()
+        # The server reads canonical files; robot-side deployment path remains explicit.
+        robot_path = str(body.get("robot_map_path") or os.environ.get("SCV_ROBOT_MAP_PATH", "")).strip()
+        if not robot_path:
+            raise HTTPException(400, "로봇 PC에서 사용하는 지도 YAML 경로가 필요합니다")
+        from starlette.datastructures import UploadFile as StarletteUploadFile
+        with path.open('rb') as yf, image.open('rb') as pf:
+            return await upload_map(request, name=path.stem, robot_map_path=robot_path, grid_size_m=size,
+                                    yaml_file=StarletteUploadFile(yf, filename=path.name),
+                                    pgm_file=StarletteUploadFile(pf, filename=image.name))
+    except (OSError, ValueError, KeyError, yaml.YAMLError):
+        raise HTTPException(400, "공통 기준 지도 파일을 읽지 못했습니다")
 
 
 def split_sectors(cells) -> dict[tuple[int, int], int]:
@@ -1048,11 +1100,22 @@ def delete_map(conn, map_id: int):
 def active_map(request: Request):
     """모니터 · 이력 탭 지도 — 현재 지도 행 + 이미지 크기 · URL, 격자 칸, 섹터 요약, 진행 중 run, AP 설치 위치, 설비. 읽기만"""
     current_user(request)
+    return map_response()
+
+
+@app.get("/api/maps/{map_id}")
+def map_by_id(map_id: int, request: Request):
+    current_user(request)
+    return map_response(map_id)
+
+
+def map_response(map_id=None):
     with pool.connection() as conn:
+        where = "m.is_active" if map_id is None else "m.map_id = %s"
         m = conn.execute("SELECT m.*, (SELECT count(*) FROM grid_cells g WHERE g.map_id = m.map_id) AS cell_count "
-                         "FROM maps m WHERE m.is_active").fetchone()
+                         "FROM maps m WHERE " + where, () if map_id is None else (map_id,)).fetchone()
     if not m:
-        return {"map": None}
+        return {"map": None, "run_owner": RUN_OWNER}
     png = MEDIA_DIR / m["image_key"]
     if png.exists():
         with Image.open(png) as im:
@@ -1076,7 +1139,8 @@ def active_map(request: Request):
         m["facilities"] = conn.execute(
             "SELECT facility_id, facility_type, has_gauge, expected_x, expected_y, view_pose, is_active "
             "FROM facilities WHERE map_id = %s ORDER BY facility_id", (m["map_id"],)).fetchall()
-    return {"map": m}
+    m["configuration"] = map_configuration(m, png)
+    return {"map": m, "run_owner": RUN_OWNER}
 
 
 # ---------------------------------------------------------------------------
@@ -1334,6 +1398,8 @@ def robots_snapshot() -> list[dict[str, Any]]:
     """/ws/ui용 로봇 목록 — 등록된 로봇마다 {robot_id, is_active, connected(AGENTS), state(ROBOT_STATE를 형식 변환 + ttl_s · raw), last_e3}"""
     with pool.connection() as conn:
         robots = conn.execute("SELECT robot_id, is_active FROM robots ORDER BY robot_id").fetchall()
+    if RUN_OWNER == "ros":
+        return TELEMETRY.snapshot([r["robot_id"] for r in robots])["robots"]
     limit = status_timeout()
     out = []
     for r in robots:
@@ -2194,7 +2260,8 @@ def api_runs(request: Request):
             "SELECT r.run_id, r.status, r.run_type, r.sector_robots, r.started_at, r.ended_at, r.is_baseline_ok, "
             "m.name AS map_name FROM runs r JOIN maps m USING (map_id) WHERE r.map_id = %s "
             "ORDER BY r.run_id DESC LIMIT 50", (m["map_id"],)).fetchall()
-    return {"runs": rows, "current": CURRENT_RUN["run_id"], "map": m}
+    current = next((r["run_id"] for r in rows if r["status"] == "running"), None)
+    return {"runs": rows, "current": current, "map": m}
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -2229,14 +2296,17 @@ def api_run_detail(run_id: int, request: Request):
             "(SELECT array_agg(md.object_key ORDER BY md.media_id) FROM media md WHERE md.inspection_id = i.inspection_id) AS photos "
             "FROM inspections i JOIN facilities f ON f.map_id = i.map_id AND f.facility_id = i.facility_id "
             "WHERE i.run_id = %s ORDER BY i.inspection_id", (run_id,)).fetchall()
-        aps = conn.execute("SELECT ap_id, ssid FROM aps WHERE map_id = %s ORDER BY ssid", (run["map_id"],)).fetchall()
+        aps = conn.execute("SELECT ap_id, ssid, is_target FROM aps WHERE map_id = %s ORDER BY ssid", (run["map_id"],)).fetchall()
         live = live_cells(conn, run_id)
         n_samples = conn.execute("SELECT count(*) AS n FROM net_samples WHERE run_id = %s", (run_id,)).fetchone()["n"]
-        thr = fset(settings_values(conn), "rssi_suspect_dbm", -72)
+        settings = settings_values(conn)
+        thr = fset(settings, "rssi_suspect_dbm", -72)
+        readings = read_readings(conn, run_id, run["map_id"], int(fset(settings, "min_samples", 3)))
     with MEM_LOCK:                                     # 히트맵 = 칸 · AP별 평균(sum / n)
         heat = {cid: {ap: [round(v[1] / v[0], 1), int(v[0])] for ap, v in d.items() if v[0]} for cid, d in live.items()}
     return {"run": run, "tasks": tasks, "candidates": cands, "inspections": ins, "aps": aps, "heat": heat,
-            "samples": n_samples, "thr": thr, "current": CURRENT_RUN["run_id"]}
+            "samples": n_samples, "thr": thr, "current": CURRENT_RUN["run_id"],
+            "readings": readings, "fetched_at": datetime.now(timezone.utc).isoformat()}
 
 
 def cell_key(grid: dict[str, Any], x: float, y: float) -> dict[str, Any] | None:
@@ -2356,6 +2426,9 @@ def ui_extra() -> dict[str, Any]:
     with pool.connection() as conn:
         aps = conn.execute("SELECT a.ap_id, a.ssid, a.is_active, a.is_target FROM aps a JOIN maps m USING (map_id) "
                            "WHERE m.is_active ORDER BY a.ap_id").fetchall()
+        if RUN_OWNER == "ros":
+            run = running_run(conn)
+            return {"aps": aps, "start": None, "run_id": run and run["run_id"]}
         f = start_form(conn)
     return {"aps": aps, "start": {k: f[k] for k in ("can_start", "problems", "running", "target_ap")}
             | {"robots": f["robots"]}}
@@ -2373,15 +2446,28 @@ async def ws_ui(ws: WebSocket):
         while True:                                    # 끊길 때까지 1초마다 보냄 (DB 조회는 스레드 풀에서)
             snap = await run_in_threadpool(robots_snapshot)
             extra = await run_in_threadpool(ui_extra)
+            telemetry = TELEMETRY.snapshot([]) if RUN_OWNER == "ros" else {}
             cur = CURRENT_RUN["run_id"]
             with MEM_LOCK:                             # 진행 중 순찰의 이벤트만 (순찰이 없으면 비움)
                 events = [e for e in RECENT_EVENTS if cur and e.get("run_id") == cur][-30:]
             await ws.send_json({"type": "robots", "ts": datetime.now(timezone.utc).isoformat(),
                                 "timeout_s": status_timeout(), "robots": snap, "run_id": cur,
-                                "events": json.loads(json.dumps(events, default=str)), **extra})
+                                "events": json.loads(json.dumps(events, default=str)), "run_owner": RUN_OWNER,
+                                "telemetry": telemetry, **extra})
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, RuntimeError):
         pass
+
+
+@app.get("/api/telemetry/inspection-image")
+def telemetry_image(request: Request, run_id: int, robot_id: str, facility_id: str):
+    current_user(request)
+    photo = TELEMETRY.inspection_photo(run_id, robot_id, facility_id)
+    if not photo:
+        raise HTTPException(404, "실시간 사진이 없거나 캐시에서 만료되었습니다")
+    import base64
+    return Response(base64.b64decode(photo.split(",", 1)[1]), media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/agents")
