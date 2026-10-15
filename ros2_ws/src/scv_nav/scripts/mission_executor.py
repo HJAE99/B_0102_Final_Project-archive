@@ -79,6 +79,9 @@ class MissionExecutor(Node):
         self.cmd_pub = self.create_publisher(TwistStamped, 'cmd_vel', 10)
         self.status_pub = self.create_publisher(RobotStatus, 'status', 10)
         self.create_subscription(BatteryState, 'battery_state', self.on_battery, qos_profile_sensor_data)
+        # 손으로 올리거나 Dock 명령을 따로 보낸 것도 status 에 DOCKED 로 (관제가 도크 위 표본을 버림 · 작업 때 undock, 10/15)
+        from irobot_create_msgs.msg import DockStatus
+        self.create_subscription(DockStatus, 'dock_status', self.on_dock, qos_profile_sensor_data)
         self.create_subscription(PoseWithCovarianceStamped, 'amcl_pose', self.on_pose,
                                  QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Costmap, 'global_costmap/costmap_raw', self.on_costmap, 1)
@@ -96,6 +99,14 @@ class MissionExecutor(Node):
     # ---------- 상태 (IF-12) ----------
     def on_battery(self, msg):
         self.battery = msg.percentage * 100.0   # Create 3 는 0–1
+
+    def on_dock(self, msg):
+        if self.busy:                           # 작업 중(undock · dock 포함)에는 작업 쪽이 state 를 정함
+            return
+        if msg.is_docked:
+            self.state = S.STATE_DOCKED
+        elif self.state == S.STATE_DOCKED:
+            self.state = S.STATE_IDLE
 
     def on_costmap(self, msg):
         self.costmap = msg

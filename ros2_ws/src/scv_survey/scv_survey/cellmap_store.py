@@ -213,6 +213,13 @@ class DbStore:
         return self._q("INSERT INTO runs (map_id, run_type, sector_robots) VALUES (%s, 'patrol', %s::jsonb) "
                        'RETURNING run_id', (self.map_id, json.dumps(sector_robots)))[0][0]
 
+    def close_stale_runs(self) -> list:
+        """관제를 다시 띄웠을 때 DB 에 running 으로 남은 회차 — manager 는 기억이 없어 이어 갈 수 없으므로 aborted 로 닫음"""
+        stale = [r[0] for r in self._q("SELECT run_id FROM runs WHERE status = 'running'")]
+        for run_id in stale:
+            self.close_run(run_id, 'aborted')
+        return stale
+
     def close_run(self, run_id: int, status: str) -> None:
         # 남은 작업 줄은 취소로 닫는다 (tasks 는 inspection_manager 가 sync_tasks 로 씀, 10/14 ROS 통합)
         self._q("UPDATE tasks SET status = 'CANCELED', ended_at = now() WHERE run_id = %s AND status IN ('PENDING', 'ACTIVE')",
