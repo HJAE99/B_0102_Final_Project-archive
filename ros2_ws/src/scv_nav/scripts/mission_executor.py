@@ -528,10 +528,15 @@ def localize(nav, home):
         # → 30 s 동안 amcl_pose 가 없고 amcl 이 active 가 아니면 lifecycle_manager_localization 을 RESET · STARTUP (최대 3번)
         if time.time() - since > 30.0 and restarts < 3:
             since = time.time()
-            if node_state(nav, 'amcl') != 'active':
+            st = node_state(nav, 'amcl')
+            if st is None:                               # 서비스를 못 찾음(discovery 느림) — 멀쩡한 amcl 을 RESET 하지 않음
+                nav.get_logger().warn('amcl_pose 30 s 없음 · amcl 상태 확인 못 함 (discovery?) — scan · amcl 확인 필요, 계속 기다림')
+            elif st != 'active':
                 restarts += 1
                 nav.get_logger().warn(f'amcl 이 active 아님 — localization bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
                 restart_nav2(nav, 'lifecycle_manager_localization')
+            else:
+                nav.get_logger().warn('amcl 은 active 인데 amcl_pose 30 s 없음 — scan(라이다)이 오는지 확인 필요')
         msg.header.stamp = nav.get_clock().now().to_msg()
         nav.initial_pose_pub.publish(msg)
         # spin_once 는 메시지가 하나라도 오면 바로 돌아온다 (이 노드가 initialpose 도 받음) → 1초 동안은
@@ -552,6 +557,12 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
         if not cli.wait_for_service(timeout_sec=2.0):
             nav.get_logger().info(f'{node_name}/get_state 서비스 대기 중')
             nav.destroy_client(cli)
+            stuck_since = stuck_since or time.time()     # 서비스를 오래 못 찾아도 아래와 같이 셈 (120 s)
+            if time.time() - stuck_since > 120.0 and restarts < 3:
+                restarts += 1
+                nav.get_logger().warn(f'{node_name} 서비스 120초 없음 — Nav2 다시 띄움 ({restarts}/3)')
+                restart_nav2(nav)
+                stuck_since = None
             continue
         fut = cli.call_async(GetState.Request())
         rclpy.spin_until_future_complete(nav, fut, timeout_sec=3.0)
@@ -562,15 +573,15 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
             return
         nav.get_logger().info(f'{node_name} 상태 {state or "응답 없음 — 다시 물음"}')
         # lifecycle_manager 가 bond 4 s 초과로 "Aborting bringup" 하면 inactive 로 영원히 남음 (10/15 robot3) → RESET · STARTUP
-        if state == 'inactive':
+        if state in ('inactive', 'unconfigured'):        # RESET 뒤 STARTUP 이 configure 전에 실패하면 unconfigured 로 남음
             stuck_since = stuck_since or time.time()
             if time.time() - stuck_since > 30.0 and restarts < 3:
                 restarts += 1
-                nav.get_logger().warn(f'{node_name} 30초 넘게 inactive — Nav2 bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
+                nav.get_logger().warn(f'{node_name} 30초 넘게 {state} — Nav2 bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
                 restart_nav2(nav)
                 stuck_since = None
         elif state is not None:                         # 응답 없음(None)은 타이머를 유지 — 섞여 들어와도 30초를 채움
-            stuck_since = None
+            stuck_since = None                          # (activating 등 전환 중)
         time.sleep(1.0)
 
 
@@ -595,6 +606,9 @@ def restart_nav2(nav, manager='lifecycle_manager_navigation'):
         nav.destroy_client(cli)
         return
     for cmd in (ManageLifecycleNodes.Request.RESET, ManageLifecycleNodes.Request.STARTUP):
+        if cmd == ManageLifecycleNodes.Request.STARTUP and not ok:
+            nav.get_logger().warn(f'{manager} RESET 실패/응답 없음 — STARTUP 은 다음 주기로 미룸')
+            break
         req = ManageLifecycleNodes.Request()
         req.command = cmd
         fut = cli.call_async(req)
@@ -660,6 +674,15 @@ def start_lidar(nav):
 
 
 def settle(nav):
+    if not nav.spin_client.wait_for_server(timeout_sec=20.0):
+        refresh_action_clients(nav)                    # 서버가 다시 만들어진 뒤 매칭이 안 된 경우 (10/15 robot3)
+        if not nav.spin_client.wait_for_server(timeout_sec=20.0):
+            nav.get_logger().warn('Spin 서버 없음 — settle 건너뜀 (AMCL 방향 보정 없이 진행)')
+            return
+    _settle(nav)
+
+
+def _settle(nav):
     # 제자리에서 좌우로 0.26 rad(15°) 돌려 AMCL 이 라이다로 방향을 맞추게 함 (10/12 시험: ±0.5 두 번과 차이 없음)
     for yaw in (0.26, -0.26):
         nav.spin(yaw)
@@ -684,8 +707,12 @@ def main():
     # → 기본은 오전 방식(켤 때 undock, 1~5회차 라이다 문제 0번). -p stay_docked:=true 일 때만 도크에 머물며 라이다를 켬
     stay = nav.declare_parameter('stay_docked', False).value
     if docked and not stay:
-        nav.undock()
-        docked = False
+        for n in range(1, 4):                          # undock 이 거절 · 실패해도 navigator 는 완료로 봄 → 도크 상태로 다시 확인
+            nav.undock()
+            if not nav.getDockedStatus():
+                break
+            nav.get_logger().warn(f'undock 뒤에도 도크 위 — 다시 undock ({n}/3)')
+        docked = nav.getDockedStatus()
     if docked:
         start_lidar(nav)
     # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
