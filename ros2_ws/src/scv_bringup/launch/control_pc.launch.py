@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -55,6 +55,9 @@ def _nodes(context):
 
 def generate_launch_description():
     return LaunchDescription([
+        # 관제 노드는 일반 클라이언트로 (turtlebot4_discovery 는 SUPER_CLIENT=True — 네트워크의 모든 참가자 discovery 를 다 받음).
+        # 10/15 Victus Wi-Fi 수신이 discovery · 죽은 엔드포인트로 오는 데이터로 가득 참. robot_pc.launch 와 같은 설정. ros2 CLI 는 셸 값 그대로
+        SetEnvironmentVariable('ROS_SUPER_CLIENT', 'False'),
         DeclareLaunchArgument('robots', default_value='both', description='both · robot4 · robot3'),
         DeclareLaunchArgument('backend', default_value='file', description='칸 맵 저장: file(~/scv_cellmap) · db'),
         DeclareLaunchArgument('ap_ssid', default_value='', description='측정 대상 핫스팟 SSID (db 면 필수, rssi_scanner 와 같은 값)'),
