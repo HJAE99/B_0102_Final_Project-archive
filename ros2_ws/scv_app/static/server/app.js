@@ -213,10 +213,10 @@ const rssiColor = (v, thr) => (v < thr ? '#dc2626' : v < thr + 10 ? '#f59e0b' : 
 
 // 레이어 (시안 11개 + 모니터용). 히트맵은 늘 켬
 const LAYERS = [
-  ['cells', '셀 원본'], ['plan', '계획 경로'], ['track', '방문 궤적'], ['samples', 'NetSample'], ['unmeasured', '미측정'],
+  ['raw', '원본 지도'], ['cells', '셀 원본'], ['plan', '계획 경로'], ['track', '방문 궤적'], ['samples', 'NetSample'], ['unmeasured', '미측정'],
   ['failed', '도달 실패'], ['keepout', '회피 구역'], ['fac', '설비'], ['dock', '관측·Dock'], ['zone', '구역'], ['grid', '격자·값'],
 ];
-const MONITOR_LAYERS = ['plan', 'track', 'cells', 'fac', 'dock', 'zone', 'grid'];
+const MONITOR_LAYERS = ['plan', 'track', 'cells', 'fac', 'dock', 'zone', 'grid', 'raw'];
 const MONITOR_DEFAULT = { plan: true, track: true, fac: true, dock: true };
 const HISTORY_DEFAULT = { cells: true, track: true, samples: true, unmeasured: true, failed: true, fac: true };
 const ALL_ON = Object.fromEntries(LAYERS.map(([k]) => [k, true]));
@@ -249,6 +249,26 @@ function MapLegend({ opacity, setOpacity, history }) {
   </div>`;
 }
 
+// 웹 표시용 도면 — 지도 이미지의 빈 공간(밝은 픽셀)이 많은 행 · 열 범위 = 방 안쪽 직사각형 (지도 좌표).
+//   벽 픽셀이 들쭉날쭉하고 조금 기울어 있어도 곧게 그림. 행 · 열마다 빈 칸이 가장 많은 줄의 30% 넘는 곳만 (구석 잡음 제외)
+const freeRect = (m) => new Promise((ok) => {
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas'), w = img.width, h = img.height;
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const px = ctx.getImageData(0, 0, w, h).data, rows = new Array(h).fill(0), cols = new Array(w).fill(0);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) if (px[(j * w + i) * 4] > 230) { rows[j] += 1; cols[i] += 1; }
+    const span = (a) => { const lim = Math.max(...a) * 0.3, idx = a.map((v, k) => (v > lim ? k : -1)).filter((k) => k >= 0); return idx.length ? [idx[0], idx[idx.length - 1]] : null; };
+    const cr = span(cols), rr = span(rows), r = m.resolution_m;
+    if (!cr || !rr) { ok(null); return; }
+    ok({ x0: m.origin_x + cr[0] * r, x1: m.origin_x + (cr[1] + 1) * r, y0: m.origin_y + (h - 1 - rr[1]) * r, y1: m.origin_y + (h - rr[0]) * r });
+  };
+  img.onerror = () => ok(null);
+  img.src = m.image_url;
+});
+
 // 도달 실패 — FAILED task 의 reason "BLOCKED skipped=[i…] shortened=[j…]" → 그 경로점 자리 (manager blocked_cells 와 같은 읽기)
 function failedSpots(tasks) {
   const out = [];
@@ -278,12 +298,19 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       crs: L.CRS.Simple, minZoom: -3, maxZoom: 9, zoomSnap: 0.25, attributionControl: false,
     });
     const ext = mapExtent(m), bounds = boundsOf(ext, P);
+    map.createPane('floor').style.zIndex = 250;         // 지도 이미지 · 도면 — 히트맵 아래
     map.createPane('heat').style.zIndex = 380;          // 히트맵 — 부드럽게 (흐림), 지도 위 · 표시 아래
     map.getPane('heat').classList.add('heatpane');
-    L1.current.base = L.layerGroup().addTo(map);
+    L1.current.base = L.layerGroup();                  // 원본 지도 이미지 (「원본 지도」 레이어)
+    L1.current.plate = L.layerGroup();                 // 웹 표시용 도면 — 빈 공간 범위의 곧은 직사각형 (표시 전용, 좌표는 그대로)
     if (m.width && m.height) {
-      if (orient === 'h') rotatedImage(m.image_url).then((u) => mapRef.current === map && L.imageOverlay(u, bounds, { className: 'mapimg' }).addTo(L1.current.base)).catch(() => {});
-      else L.imageOverlay(m.image_url, bounds, { className: 'mapimg' }).addTo(L1.current.base);
+      if (orient === 'h') rotatedImage(m.image_url).then((u) => mapRef.current === map && L.imageOverlay(u, bounds, { className: 'mapimg', pane: 'floor' }).addTo(L1.current.base)).catch(() => {});
+      else L.imageOverlay(m.image_url, bounds, { className: 'mapimg', pane: 'floor' }).addTo(L1.current.base);
+      freeRect(m).then((r) => {
+        if (mapRef.current !== map || !r) return;
+        L.rectangle([P(r.x0, r.y0), P(r.x1, r.y1)], { pane: 'floor', color: '#9aa5ae', weight: 5, fillColor: '#ffffff', fillOpacity: 1, interactive: false })
+          .addTo(L1.current.plate);
+      }).catch(() => {});
     } else {                                           // 지도 이미지 파일이 없음 — 격자 · 등록 정보 범위로 맞추고 알림
       const Note = L.Control.extend({ onAdd: () => {
         const d = L.DomUtil.create('div', 'map-note');
@@ -322,6 +349,7 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       raf = requestAnimationFrame(() => { if (userMoved) map.invalidateSize(); else fit(); });
     });
     ro.observe(container);
+    (lay.raw ? L1.current.base : L1.current.plate).addTo(map);
     L1.current.info = L.layerGroup().addTo(map);
     L1.current.overlay = L.layerGroup().addTo(map);
     L1.current.plan = L.layerGroup().addTo(map);
@@ -335,6 +363,13 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
 
   // 등록 정보 (격자 · 구역 · 설비 · 도크 · AP) — 레이어 · 정렬이 바뀔 때 다시
   const layKey = JSON.stringify(lay);
+  useEffect(() => {                                    // 원본 지도 ↔ 도면
+    const map = mapRef.current, { base, plate } = L1.current;
+    if (!map || !base) return;
+    const [show, hide] = lay.raw ? [base, plate] : [plate, base];
+    if (map.hasLayer(hide)) map.removeLayer(hide);
+    if (!map.hasLayer(show)) { show.addTo(map); show.eachLayer((l) => l.bringToBack && l.bringToBack()); }
+  }, [lay.raw, orient]);
   useEffect(() => {
     const L = window.L, info = L1.current.info;
     if (!info) return;
@@ -828,7 +863,7 @@ function HistoryPage({ onAuthLost }) {
       </div>
       <${LayerBar} keys=${LAYERS.map(([k]) => k)} on=${lay} setOn=${setLay}
         disabled=${{ keepout: '회피 구역 기록이 아직 DB에 없습니다 (manager keepout 마스크는 저장하지 않음)' }}
-        extra=${html`<span class="lyrbtns"><button class="btn small" onClick=${() => setLay({ ...ALL_ON, keepout: false })}>전체 표시</button>
+        extra=${html`<span class="lyrbtns"><button class="btn small" onClick=${() => setLay({ ...ALL_ON, keepout: false, raw: false })}>전체 표시</button>
           <button class="btn small" onClick=${() => setLay(HISTORY_DEFAULT)}>기본 보기</button></span>`} />
       ${!m ? html`<div class="empty">현재 지도가 없습니다.</div>`
         : html`<${MapView} m=${m} robots=${[]} overlay=${overlay} layers=${lay} opacity=${opacity} />`}
