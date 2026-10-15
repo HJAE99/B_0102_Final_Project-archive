@@ -1,0 +1,62 @@
+[
+  {
+    "model": "yolov8n",
+    "source_weights": "/home/hv-05/Downloads/finalproj.v5/yolov8n.pt",
+    "run_dir": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n",
+    "best_weights": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n/weights/best.pt",
+    "val": {
+      "metrics/precision(B)": 0.9806555647803885,
+      "metrics/recall(B)": 0.9669360152566171,
+      "metrics/mAP50(B)": 0.9719765478424016,
+      "metrics/mAP50-95(B)": 0.8842054324507765,
+      "fitness": 0.8842054324507765
+    },
+    "test": {
+      "metrics/precision(B)": 0.9820699320341765,
+      "metrics/recall(B)": 0.9714192811334417,
+      "metrics/mAP50(B)": 0.981932086160332,
+      "metrics/mAP50-95(B)": 0.9031760755676413,
+      "fitness": 0.9031760755676413
+    }
+  },
+  {
+    "model": "yolo11n",
+    "source_weights": "/home/hv-05/Downloads/finalproj.v5/yolo11n.pt",
+    "run_dir": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n",
+    "best_weights": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n/weights/best.pt",
+    "val": {
+      "metrics/precision(B)": 0.9728317921293101,
+      "metrics/recall(B)": 0.9665402490497031,
+      "metrics/mAP50(B)": 0.9727013008983038,
+      "metrics/mAP50-95(B)": 0.8828217272053414,
+      "fitness": 0.8828217272053414
+    },
+    "test": {
+      "metrics/precision(B)": 0.9714325782482256,
+      "metrics/recall(B)": 0.9768704279717862,
+      "metrics/mAP50(B)": 0.9703650793650794,
+      "metrics/mAP50-95(B)": 0.8874824088752254,
+      "fitness": 0.8874824088752254
+    }
+  },
+  {
+    "model": "yolo26n",
+    "source_weights": "/home/hv-05/Downloads/finalproj.v5/yolo26n.pt",
+    "run_dir": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2",
+    "best_weights": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2/weights/best.pt",
+    "val": {
+      "metrics/precision(B)": 0.972287925621336,
+      "metrics/recall(B)": 0.9745120165992457,
+      "metrics/mAP50(B)": 0.9746613219094249,
+      "metrics/mAP50-95(B)": 0.8925748692236987,
+      "fitness": 0.8925748692236987
+    },
+    "test": {
+      "metrics/precision(B)": 0.9705408732008711,
+      "metrics/recall(B)": 0.9731866505292137,
+      "metrics/mAP50(B)": 0.9805603715170278,
+      "metrics/mAP50-95(B)": 0.8950398997752074,
+      "fitness": 0.8950398997752074
+    }
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "run": "yolov8n",
+    "unfused_parameters": 3138975,
+    "unfused_one2one_head_parameters": 0,
+    "fused_parameters": 3133679,
+    "fused_gflops_640": 8.6431872,
+    "end2end": false,
+    "head_end2end_attribute": false,
+    "reg_max": 16,
+    "classes": 5
+  },
+  {
+    "run": "yolo11n",
+    "unfused_parameters": 2605855,
+    "unfused_one2one_head_parameters": 0,
+    "fused_parameters": 2598023,
+    "fused_gflops_640": 6.4417024,
+    "end2end": false,
+    "head_end2end_attribute": false,
+    "reg_max": 16,
+    "classes": 5
+  },
+  {
+    "run": "yolo26n-2",
+    "unfused_parameters": 2535830,
+    "unfused_one2one_head_parameters": 136603,
+    "fused_parameters": 2390707,
+    "fused_gflops_640": 5.3795072,
+    "end2end": false,
+    "head_end2end_attribute": false,
+    "reg_max": 1,
+    "classes": 5
+  }
+]

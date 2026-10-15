@@ -1,0 +1,66 @@
+{
+  "created_at": "2026-10-15T19:48:11.839239+09:00",
+  "purpose": "Read-only evidence snapshot for model-family comparison; no training or deployment performed.",
+  "files": [
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/metrics_summary.json",
+      "sha256": "d29fead78297fe8e43ea4e9a3379d2cbc9c412df3944abe66ef4f7ad14044653"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/train_yolo_models.py",
+      "sha256": "d50b95ed25205ab82d2a3fa8ac2479450fdbcc82783de5904a6208517cf8fff0"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/data.yaml",
+      "sha256": "c4ca21cf495fb123559b22932f153ae51fa08e3de064cc5f57a0d84c363a2215"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n/results.csv",
+      "sha256": "c7da7c4750bc9aa4f14bdc42d5f2048ed528f4cd5ebd77318d493974189f3cea"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n/args.yaml",
+      "sha256": "1971ec4c08f22490bffb45f0b2123d076391bf844137965bd80caad36d326798"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n/weights/best.pt",
+      "sha256": "4c739ebecfed9300aebc809eeac1fda1a9d9aeb2f0d7ac65fb96cc2719e73efc"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/evaluation/yolov8n_test/BoxPR_curve.png",
+      "sha256": "9cf2e1f406ba26f5395d4562b305b201c26e8f9aff9211e1e1226896e762dc1a"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n/results.csv",
+      "sha256": "0487bd646cf10abb3e1c6c883d0215b697dbc3387650da1599ab26b4edc44a96"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n/args.yaml",
+      "sha256": "7d72dbad6e79b46e0972415354731df9f62210c6081099d3f4f0f36fe4b0a10d"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n/weights/best.pt",
+      "sha256": "df0af25008ade33c10aa268844f798cc151f868e2a0fd7326c44ad138d0998e7"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/evaluation/yolo11n_test/BoxPR_curve.png",
+      "sha256": "b83f3b91baf17462c16b0f4564fd31977a3e3ca53ed821757daf19d5cdb81ea4"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2/results.csv",
+      "sha256": "6fc5b9ab5f91c45cded42ccfc87fbaf53922b1e156dfdda7c3ca03f14b760c0f"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2/args.yaml",
+      "sha256": "0ae4450e69d7e121d4b448d5faa63a4617704079741cbcc3f72eb233dcc29b8f"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2/weights/best.pt",
+      "sha256": "c4d77ecd9f89c253add458050965764c1e6df6ddb95c9c802b5d92a0f058142e"
+    },
+    {
+      "path": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/evaluation/yolo26n_test-2/BoxPR_curve.png",
+      "sha256": "ab7bc74ae01bf8f20b0beee6919757f30c28358ce159e15bb2ad56f6d6c407ce"
+    }
+  ]
+}

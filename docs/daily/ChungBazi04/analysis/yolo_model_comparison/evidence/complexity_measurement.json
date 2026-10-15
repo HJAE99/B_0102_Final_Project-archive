@@ -1,0 +1,97 @@
+{
+  "ultralytics_version": "8.4.177",
+  "torch_version": "2.11.0+cu128",
+  "device": "cpu",
+  "method": "FP32 model.float().cpu().eval(); model.fuse(); parameter numel sum; Ultralytics get_flops(imgsz=640)",
+  "models": [
+    {
+      "run": "yolov8n",
+      "checkpoint": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolov8n/weights/best.pt",
+      "unfused_parameters": 3138975,
+      "unfused_one2one_head_parameters": 0,
+      "end2end": false,
+      "head_end2end_attribute": false,
+      "reg_max": 16,
+      "classes": 5,
+      "fused_parameters": 3133679,
+      "fused_gflops_640": 8.6431872
+    },
+    {
+      "run": "yolo11n",
+      "checkpoint": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo11n/weights/best.pt",
+      "unfused_parameters": 2605855,
+      "unfused_one2one_head_parameters": 0,
+      "end2end": false,
+      "head_end2end_attribute": false,
+      "reg_max": 16,
+      "classes": 5,
+      "fused_parameters": 2598023,
+      "fused_gflops_640": 6.4417024
+    },
+    {
+      "run": "yolo26n-2",
+      "checkpoint": "/home/hv-05/Downloads/finalproj.v5/runs/fire_extinguisher/yolo26n-2/weights/best.pt",
+      "unfused_parameters": 2535830,
+      "unfused_one2one_head_parameters": 136603,
+      "end2end": false,
+      "head_end2end_attribute": false,
+      "reg_max": 1,
+      "classes": 5,
+      "fused_parameters": 2390707,
+      "fused_gflops_640": 5.3795072
+    }
+  ],
+  "label_counts": {
+    "train": {
+      "label_files": 1000,
+      "instances": {
+        "box": 1251,
+        "exit_sign": 306,
+        "fire_extinguisher": 289,
+        "pressure_gauge": 260,
+        "rack": 635
+      },
+      "images_with_class": {
+        "box": 481,
+        "exit_sign": 160,
+        "fire_extinguisher": 289,
+        "pressure_gauge": 260,
+        "rack": 508
+      }
+    },
+    "valid": {
+      "label_files": 71,
+      "instances": {
+        "box": 78,
+        "exit_sign": 20,
+        "fire_extinguisher": 27,
+        "pressure_gauge": 27,
+        "rack": 42
+      },
+      "images_with_class": {
+        "box": 29,
+        "exit_sign": 11,
+        "fire_extinguisher": 27,
+        "pressure_gauge": 27,
+        "rack": 31
+      }
+    },
+    "test": {
+      "label_files": 33,
+      "instances": {
+        "box": 41,
+        "exit_sign": 9,
+        "fire_extinguisher": 11,
+        "pressure_gauge": 11,
+        "rack": 18
+      },
+      "images_with_class": {
+        "box": 16,
+        "exit_sign": 5,
+        "fire_extinguisher": 11,
+        "pressure_gauge": 11,
+        "rack": 13
+      }
+    }
+  }
+}
