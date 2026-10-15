@@ -537,6 +537,7 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
     # waitUntilNav2Active(localizer='robot_localization') 와 같이 bt_navigator 가 active 가 될 때까지 기다리되,
     # get_state 한 번에 3초 제한 — 응답을 놓치면 클라이언트를 새로 만들어 다시 부름
     from lifecycle_msgs.srv import GetState
+    stuck_since, restarts = None, 0
     while rclpy.ok():
         cli = nav.create_client(GetState, f'{node_name}/get_state')
         if not cli.wait_for_service(timeout_sec=2.0):
@@ -551,7 +552,34 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
             nav.get_logger().info('Nav2 is ready for use!')
             return
         nav.get_logger().info(f'{node_name} 상태 {state or "응답 없음 — 다시 물음"}')
+        # lifecycle_manager 가 bond 4 s 초과로 "Aborting bringup" 하면 inactive 로 영원히 남음 (10/15 robot3) → RESET · STARTUP
+        if state == 'inactive':
+            stuck_since = stuck_since or time.time()
+            if time.time() - stuck_since > 30.0 and restarts < 3:
+                restarts += 1
+                nav.get_logger().warn(f'{node_name} 30초 넘게 inactive — Nav2 bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
+                restart_nav2(nav)
+                stuck_since = None
+        else:
+            stuck_since = None
         time.sleep(1.0)
+
+
+def restart_nav2(nav):
+    from nav2_msgs.srv import ManageLifecycleNodes
+    cli = nav.create_client(ManageLifecycleNodes, 'lifecycle_manager_navigation/manage_nodes')
+    if not cli.wait_for_service(timeout_sec=3.0):
+        nav.get_logger().warn('lifecycle_manager_navigation/manage_nodes 서비스 없음')
+        nav.destroy_client(cli)
+        return
+    for cmd in (ManageLifecycleNodes.Request.RESET, ManageLifecycleNodes.Request.STARTUP):
+        req = ManageLifecycleNodes.Request()
+        req.command = cmd
+        fut = cli.call_async(req)
+        rclpy.spin_until_future_complete(nav, fut, timeout_sec=60.0)
+        ok = fut.done() and fut.result() is not None and fut.result().success
+        nav.get_logger().info(f'manage_nodes {"RESET" if cmd == ManageLifecycleNodes.Request.RESET else "STARTUP"} → {"성공" if ok else "실패/응답 없음"}')
+    nav.destroy_client(cli)
 
 
 def start_lidar(nav):
