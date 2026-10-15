@@ -6,11 +6,11 @@ import numpy as np
 from scv_detection import shutter_obstacle
 
 
-def _scene(box_height_m=None, noise_m=0.012, seed=0):
+def _scene(box_height_m=None, noise_m=0.012, seed=0, box_rows=(280, 330), box_cols=(280, 360)):
     """카메라가 바닥을 비스듬히 보는 가상 장면을 만든다.
 
     반환값은 (BGR 영상, 미터 Depth, 픽셀 방향, 카메라 기준 위쪽 방향)이다.
-    box_height_m을 주면 구역 가운데에 그 높이의 상자 윗면을 Depth로 넣는다.
+    box_height_m을 주면 box_rows·box_cols(화면 행·열 범위, 기본은 구역 가운데)에 그 높이의 상자 윗면을 Depth로 넣는다.
     """
     height, width, focal = 480, 640, 518.0
     matrix = (focal, 0.0, 320.0, 0.0, focal, 240.0, 0.0, 0.0, 1.0)
@@ -29,7 +29,7 @@ def _scene(box_height_m=None, noise_m=0.012, seed=0):
     if box_height_m is not None:
         box = np.zeros((height, width), bool)
         # 윗면의 바닥 투영이 가까운 변의 안쪽 띠(obstacle_boundary_inset_m)에 걸리지 않게 조금 멀리 둔다.
-        box[280:330, 280:360] = True
+        box[box_rows[0]:box_rows[1], box_cols[0]:box_cols[1]] = True
         top = camera_height - box_height_m
         depth[box] = top / along_down[box]
     depth = depth + np.random.default_rng(seed).normal(0, noise_m, depth.shape)
@@ -128,7 +128,11 @@ def test_fixed_plane_skips_ransac_but_still_detects_box():
 
 
 def test_display_bbox_covers_object_outside_zone():
-    """구역 밖으로 이어진 상자 윗부분까지 표시용 사각형에 포함되고, 판정용 bbox 는 구역 안에 머무는지 확인한다."""
+    """구역 밖으로 이어진 상자 윗부분까지 표시용 사각형에 포함되고, 판정용 bbox 는 구역 근처에 머무는지 확인한다.
+
+    판정은 선 위에 선 물체도 잡도록 벽이 아닌 변에서 테이프 폭(짧은 변의 2%, 이 장면 10px)만큼 바깥까지 허용한다.
+    먼 쪽 선은 y=250 에 두께 8px 로 그려 바깥 가장자리가 약 246 이므로 판정 bbox 위 끝은 246 - 10 = 236 이상이다.
+    """
     frame, depth, rays, up = _scene(box_height_m=0.10)
     # 같은 높이·거리의 상자 면을 구역 위쪽(빨간 테두리 밖, 행 200~280)까지 이어 붙인다.
     box_rows = slice(200, 330)
@@ -139,7 +143,7 @@ def test_display_bbox_covers_object_outside_zone():
     report = shutter_obstacle.inspect(frame, depth, rays, up)
     assert report['status'] == 'ABNORMAL' and report['obstacles']
     obstacle = report['obstacles'][0]
-    assert obstacle['bbox'][1] >= 250 and obstacle['display_bbox'][1] < obstacle['bbox'][1]
+    assert obstacle['bbox'][1] >= 236 and obstacle['display_bbox'][1] < obstacle['bbox'][1]
     assert obstacle['display_bbox'][2] >= obstacle['bbox'][2] and obstacle['display_bbox'][3] >= obstacle['bbox'][3]
 
 
@@ -261,3 +265,14 @@ def test_one_side_line_fills_hidden_opposite_side():
     for x, y in hidden:
         assert cv2.pointPolygonTest(polygon.astype(np.float32), (float(x), float(y)), False) < 0  # 원래는 구역 밖
         assert cv2.pointPolygonTest(completed.astype(np.float32), (float(x), float(y)), True) >= -3  # 보간 뒤 구역 안
+
+
+def test_box_standing_on_side_line_is_obstacle():
+    """오른쪽 테두리 선 위에 걸쳐 놓인 10cm 상자도 장애물로 판정한다.
+
+    오른쪽 변은 화면에서 (490,250)→(600,460)이라 행 330~380에서 x≈532~558 이다. 상자 열 525~570이 선을 가운데에 둔다.
+    이 변은 좌우 긴 선(띠 방향과 나란한 변)이라 벽으로 보지 않고, 테이프 폭만큼 바깥까지 장애물 후보로 인정한다.
+    """
+    report = shutter_obstacle.inspect(*_scene(box_height_m=0.10, box_rows=(330, 380), box_cols=(525, 570)))
+    assert report['status'] == 'ABNORMAL' and report['obstacles']
+    assert report['zone_wall_edges'] == 0

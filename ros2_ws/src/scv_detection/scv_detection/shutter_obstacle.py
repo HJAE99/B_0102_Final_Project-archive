@@ -40,9 +40,16 @@ DEFAULT_OPTIONS = {
     # 그보다 높고 10cm보다 충분히 낮은 7cm를 기본 높이로 둔다.
     'min_floor_span_m': 0.15, 'min_obstacle_height_m': 0.07, 'cluster_voxel_m': 0.03,
     'min_cluster_points': 20, 'min_obstacle_area_m2': 0.0004, 'boundary_tolerance_m': 0.005,
-    # 벽 밑단이 구역 윗변과 겹쳐 벽 픽셀이 15cm 넘는 가짜 장애물로 잡혔다(2026-10-15 robot4). 장애물 후보는
-    # 경계에서 이만큼(미터) 안쪽 띠를 뺀 영역에서만 찾는다. 바닥 관측 비율 계산에는 쓰지 않는다.
+    # (현재 쓰지 않음) 예전에는 장애물 후보를 바닥 좌표에서 경계 안쪽 이만큼(m) 띠를 뺀 곳에서만 찾았다.
+    # 먼 쪽 바닥 좌표가 크게 밀려 화면 좌표 판정으로 바꿨으며, 기존 실행 설정과의 호환을 위해 이름만 남긴다.
     'obstacle_boundary_inset_m': 0.05,
+    # 선 위에 선 물체도 장애물로 잡는다(2026-10-15). 판정은 화면 좌표로 한다(먼 쪽은 광선이 바닥과 거의 나란해 바닥 좌표가
+    # 크게 밀려, 바닥 좌표로 판정하면 먼 꼭짓점 2.9~3.2m·실제 벽 2.6m 로 벽 전체가 구역 안 물체가 됐다).
+    # 높은 점 자체와 그 발(바닥에 내린 위치)이 모두 화면 구역 안이어야 한다. 좌우 선 등 일반 변은 바깥으로
+    # obstacle_line_margin_ratio(테이프 폭 정도) 픽셀까지 허용하고, 벽에 붙은 변(변 바로 바깥 wall_strip_ratio 픽셀 띠에
+    # 높은 점이 변 길이의 wall_edge_ratio 이상 이어짐)은 점 자체를 안쪽 obstacle_boundary_inset_ratio 픽셀 띠에서 뺀다.
+    # 먼 쪽(약 2.6m)에서는 바닥 위 7cm가 화면 약 28px라 벽을 찾는 띠를 짧은 변의 8%(704px에서 56px)로 둔다.
+    'obstacle_line_margin_ratio': 0.02, 'wall_strip_ratio': 0.08, 'wall_edge_ratio': 0.5,
     # 먼 경계에서는 미터 띠가 화면에서 2~3픽셀밖에 안 돼 벽 밑단 줄이 남았다. 화면 기준으로도 짧은 변의
     # 이 비율(픽셀)만큼 구역 테두리 안쪽을 장애물 후보에서 뺀다. 화면 가장자리에 잘린 변에도 적용된다.
     'obstacle_boundary_inset_ratio': 0.02,
@@ -109,7 +116,7 @@ def validate_options(**overrides):
                  'min_plane_inlier_ratio', 'min_coverage_ratio', 'min_valid_depth_ratio',
                  'max_tape_width_ratio', 'tracking_min_inlier_ratio', 'tracking_red_support_ratio',
                  'plane_update_ratio', 'confirm_zone_overlap_ratio', 'zone_keep_iou', 'zone_min_visible_red_ratio',
-                 'zone_max_missing_red_ratio'):
+                 'zone_max_missing_red_ratio', 'wall_edge_ratio', 'wall_strip_ratio'):
         if not 0 < settings[name] < 1:
             raise ValueError(f'shutter_{name} must be within 0..1')
     positive = ('depth_min_m', 'depth_max_m', 'plane_distance_m', 'min_floor_span_m',
@@ -118,7 +125,8 @@ def validate_options(**overrides):
                 'geometry_max_gap_seconds', 'occlusion_margin_m', 'band_width_m', 'side_line_min_length_m')
     if (any(settings[name] <= 0 for name in positive) or settings['boundary_tolerance_m'] < 0
             or settings['obstacle_boundary_inset_m'] < 0 or not 0 <= settings['obstacle_boundary_inset_ratio'] < 0.5
-            or settings['obstacle_display_depth_tolerance_m'] < 0 or settings['flying_pixel_depth_m'] < 0):
+            or settings['obstacle_display_depth_tolerance_m'] < 0 or settings['flying_pixel_depth_m'] < 0
+            or not 0 <= settings['obstacle_line_margin_ratio'] < 0.5):
         raise ValueError('shutter distance/area/time must be positive and boundary tolerance nonnegative')
     if (settings['depth_min_m'] >= settings['depth_max_m']
             or settings['min_obstacle_height_m'] <= settings['plane_distance_m']
@@ -881,6 +889,25 @@ def _floor_side_lines(polygon, red, rays, plane, settings, axis):
     return lines, points @ across
 
 
+def _camera_points_to_pixels(points3d, rays):
+    """카메라 좌표 3D 점들을 화면 픽셀 좌표로 바꿔 (픽셀 배열, 카메라 앞쪽 여부)를 반환한다.
+
+    rays에서 화면 가운데의 초점 거리·주점을 읽어 바늘구멍 모형으로 투영한다(가장자리 왜곡 몇 픽셀은 무시한다).
+    카메라 앞쪽(z > 0.05m)이 아닌 점은 픽셀 배열에서 빠지고 여부 배열이 거짓이다.
+    """
+    front = points3d[:, 2] > 0.05
+    visible = points3d[front]
+    height, width = rays.shape[:2]
+    row, column = height // 2, width // 2
+    focal_x = 1.0 / (rays[row, column + 1, 0] - rays[row, column, 0])
+    focal_y = 1.0 / (rays[row + 1, column, 1] - rays[row, column, 1])
+    center_x = column - rays[row, column, 0] * focal_x
+    center_y = row - rays[row, column, 1] * focal_y
+    pixels = np.column_stack((center_x + focal_x * visible[:, 0] / visible[:, 2],
+                              center_y + focal_y * visible[:, 1] / visible[:, 2]))
+    return pixels, front
+
+
 def _project_floor_points(points2d, plane, rays):
     """바닥 2D 좌표(옆, 앞) 점들을 화면 픽셀 좌표로 바꾼다. 카메라 뒤쪽 점은 버린다.
 
@@ -888,15 +915,7 @@ def _project_floor_points(points2d, plane, rays):
     """
     normal, forward, side = _floor_basis(plane)
     points3d = (points2d[:, :1] * side + points2d[:, 1:2] * forward - float(plane[3]) * normal)
-    points3d = points3d[points3d[:, 2] > 0.05]
-    height, width = rays.shape[:2]
-    row, column = height // 2, width // 2
-    focal_x = 1.0 / (rays[row, column + 1, 0] - rays[row, column, 0])
-    focal_y = 1.0 / (rays[row + 1, column, 1] - rays[row, column, 1])
-    center_x = column - rays[row, column, 0] * focal_x
-    center_y = row - rays[row, column, 1] * focal_y
-    return np.column_stack((center_x + focal_x * points3d[:, 0] / points3d[:, 2],
-                            center_y + focal_y * points3d[:, 1] / points3d[:, 2]))
+    return _camera_points_to_pixels(points3d, rays)[0]
 
 
 def _complete_band(polygon, red, rays, plane, settings, state):
@@ -1162,6 +1181,36 @@ def _fit_floor(points, up, settings, anchor_points=None, diagnostics=None):
     return plane, *quality
 
 
+def _wall_backed_edges(polygon, tall_mask, settings, skip):
+    """화면 구역 다각형의 변마다 바로 바깥에 벽처럼 높은 물체가 변을 따라 이어져 있는지 참·거짓 배열로 반환한다.
+
+    tall_mask는 바닥보다 장애물 기준 이상 높은 픽셀 마스크, skip은 판단하지 않을 변(화면 가장자리 변)이다.
+    변을 따라 점을 찍고, 각 점에서 구역 바깥쪽으로 wall_strip_ratio×짧은 변 픽셀 안에 높은 픽셀이 있으면 그 점을 '벽'으로 센다.
+    벽인 점이 변의 wall_edge_ratio 이상이면 벽에 붙은 변이다. 선 위에 놓인 물체 하나는 변 일부만 덮어 벽으로 보지 않는다.
+    """
+    corners = np.asarray(polygon, dtype=float)
+    height, width = tall_mask.shape
+    strip = max(4, int(round(min(height, width) * settings['wall_strip_ratio'])))
+    area = np.sum(corners[:, 0] * np.roll(corners[:, 1], -1) - corners[:, 1] * np.roll(corners[:, 0], -1))
+    walled = np.zeros(len(corners), dtype=bool)
+    for index, (start, end) in enumerate(zip(corners, np.roll(corners, -1, axis=0))):
+        edge = end - start
+        length = float(np.linalg.norm(edge))
+        if skip[index] or length < 10:
+            continue
+        along = edge / length
+        # 넓이 부호로 구역 바깥 방향을 정한다(넓이가 양수면 안쪽이 변 진행 방향의 (-y, x) 쪽이므로 바깥은 반대).
+        outward = np.array([along[1], -along[0]]) if area > 0 else np.array([-along[1], along[0]])
+        samples = start + np.outer(np.linspace(0, 1, max(2, int(length // 5))), edge)
+        hit = np.zeros(len(samples), dtype=bool)
+        for step in np.linspace(4, 4 + strip, 6):
+            probe = np.rint(samples + outward * step).astype(int)
+            ok = (probe[:, 0] >= 0) & (probe[:, 0] < width) & (probe[:, 1] >= 0) & (probe[:, 1] < height)
+            hit[ok] |= tall_mask[probe[ok, 1], probe[ok, 0]]
+        walled[index] = np.mean(hit) >= settings['wall_edge_ratio']
+    return walled
+
+
 def _inside_polygon(points, polygon, tolerance=0.0):
     """바닥의 2D 점들과 볼록 구역 다각형을 받아 경계를 포함한 구역 내부 여부 배열을 반환한다.
 
@@ -1344,7 +1393,9 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     바닥 분류 거리는 측정 오차를 반영하며 최소 장애물 높이보다 작게 제한한다.
     그 거리 안에 들어온 구역 안의 유효 픽셀과, 바닥보다 그 거리 넘게 아래로 잰 Depth 오차 픽셀을 빨간 바닥 표시
     (바닥 제거) 마스크에 보관한다. 아래쪽 오차 픽셀은 관측 범위 계산에는 넣지 않고 비율만 below_floor_pixel_ratio로 알린다.
-    장애물은 화면의 검사 구역 안에 있고 바닥에 투영한 실제 위치도 구역 안일 때만 판정한다.
+    장애물 후보는 바닥에 내린 발 위치를 화면에 투영했을 때 화면 구역 다각형 안인 높은 점이다. 화면에서 구역 밖으로
+    나간 물체 윗부분도 발이 구역 안이면 포함한다. 좌우 선 등 일반 변은 바깥으로 obstacle_line_margin_ratio 픽셀까지
+    허용해 선 위에 선 물체도 잡고, 벽에 붙은 변만 안쪽 obstacle_boundary_inset_ratio 픽셀 띠를 빼서 벽을 장애물로 보지 않는다.
     장애물 최소 높이는 잡음에 따라 올리지 않는다. 잡음이 크면 정상 확정을 보류한다.
     구역을 못 찾은 경우에도 빨간 선의 인식 마스크와 실패 단계를 반환한다.
     구역 안 Depth 값의 계단 간격(depth_step_m)도 반환해 스테레오 Depth의 해상도 문제를 구분한다.
@@ -1484,30 +1535,52 @@ def inspect(frame, depth_m, rays, up, *, geometry_state=None, observation_time=N
     axis_y = np.cross(normal, axis_x)
     basis = np.column_stack((axis_x, axis_y))
     floor_polygon = (world_polygon - origin) @ basis
-    # 바닥 좌표와 다각형 안 판정은 화면 구역 안 픽셀에만 쓰인다(장애물 후보·관측 바닥 모두 구역 안).
-    # 화면 전체 유효 픽셀 대신 구역 안 픽셀만 계산하고, 구역 밖은 좌표 0·판정 거짓으로 둔다.
-    in_zone = zone_mask[ys, xs]
-    floor_xy = np.zeros((len(heights), 2))
-    floor_xy[in_zone] = (available[in_zone] - heights[in_zone, None] * normal - origin) @ basis
-    inside = np.zeros(len(heights), dtype=bool)
-    inside[in_zone] = _inside_polygon(floor_xy[in_zone], floor_polygon, settings['boundary_tolerance_m'])
-    # 벽 밑단과 겹치는 경계 바로 안쪽은 벽 픽셀이 장애물로 보이므로 후보에서 뺀다(바닥 관측 비율은 그대로).
-    # 화면 가장자리에서 잘린 변은 테이프 경계가 아니므로 띠를 빼지 않는다.
-    edge_tolerance = np.where(_edge_on_image_border(polygon, depth_m.shape),
-                              settings['boundary_tolerance_m'], -settings['obstacle_boundary_inset_m'])
-    inset_inside = np.zeros(len(heights), dtype=bool)
-    inset_inside[in_zone] = _inside_polygon(floor_xy[in_zone], floor_polygon, edge_tolerance)
-    # 먼 경계는 미터 띠가 화면에서 몇 픽셀뿐이라 화면 기준 띠도 함께 뺀다.
-    inset_pixels = int(round(min(depth_m.shape) * settings['obstacle_boundary_inset_ratio']))
-    if inset_pixels > 0:
-        kernel = np.ones((2 * inset_pixels + 1, 2 * inset_pixels + 1), np.uint8)
-        candidate_mask = cv2.erode(zone_mask.astype(np.uint8), kernel,
-                                   borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
-    else:
-        candidate_mask = zone_mask
     effective_height = settings['min_obstacle_height_m']
     report['effective_height_m'] = effective_height
-    candidates = candidate_mask[ys, xs] & inset_inside & (heights >= effective_height)
+    is_tall = heights >= effective_height
+    # 바닥 좌표는 화면 구역 안 픽셀(관측 바닥)과 바닥보다 높은 픽셀(장애물 후보)만 계산한다. 화면에서 구역 밖으로
+    # 나간 물체 윗부분도 바닥에 내린 위치가 구역 안이면 장애물 점으로 쓰기 위해서다. 나머지는 좌표 0·판정 거짓이다.
+    in_zone = zone_mask[ys, xs]
+    need = in_zone | is_tall
+    floor_xy = np.zeros((len(heights), 2))
+    floor_xy[need] = (available[need] - heights[need, None] * normal - origin) @ basis
+    inside = np.zeros(len(heights), dtype=bool)
+    inside[in_zone] = _inside_polygon(floor_xy[in_zone], floor_polygon, settings['boundary_tolerance_m'])
+    # 벽에 붙은 변은 벽 밑단이 장애물로 보이므로 안쪽 띠를 빼고, 나머지 변은 선 위에 선 물체도 잡도록 바깥까지 허용한다.
+    # 판정은 화면 좌표로 한다: 높은 점의 발(바닥에 내린 위치)을 화면에 투영해 화면 구역 다각형과 비교한다.
+    on_border = _edge_on_image_border(polygon, depth_m.shape)
+    tall_image = np.zeros(depth_m.shape, dtype=bool)
+    tall_image[ys[is_tall], xs[is_tall]] = True
+    # 벽은 띠의 끝(먼 쪽 가로선)에만 있다고 본다. 띠 방향과 45° 이내로 나란한 변(좌우 긴 선)은 벽 판단에서 빼서,
+    # 선 위에 선 큰 물체가 변의 절반 이상을 덮어도 벽으로 오인해 그 물체를 빼지 않게 한다.
+    _, forward_3d, side_3d = _floor_basis(plane)
+    band_axis = geometry.get('band_axis')
+    axis_3d = (forward_3d if band_axis is None
+               else band_axis[0] * side_3d + band_axis[1] * forward_3d)
+    axis_2d = axis_3d @ basis
+    axis_2d = axis_2d / max(np.linalg.norm(axis_2d), 1e-9)
+    edges_2d = np.roll(floor_polygon, -1, axis=0) - floor_polygon
+    edge_cos = np.abs(edges_2d @ axis_2d) / np.maximum(np.linalg.norm(edges_2d, axis=1), 1e-9)
+    side_edge = edge_cos >= np.cos(np.deg2rad(45))
+    walled = _wall_backed_edges(polygon, tall_image, settings, on_border | side_edge)
+    report['zone_wall_edges'] = int(np.count_nonzero(walled))
+    inset_pixels = int(round(min(depth_m.shape) * settings['obstacle_boundary_inset_ratio']))
+    margin_pixels = int(round(min(depth_m.shape) * settings['obstacle_line_margin_ratio']))
+    polygon_float = np.asarray(polygon, dtype=float)
+    # 점 자체: 벽에 붙은 변은 안쪽 띠를 빼고, 나머지 변은 테이프 폭만큼 바깥까지 허용한다.
+    pixel_tolerance = np.where(on_border, 2.0, np.where(walled, -float(inset_pixels), float(margin_pixels)))
+    # 발: 모든 변에서 테이프 폭만큼 바깥까지 허용한다(벽 밑단 발은 먼 선 위에 있으므로 점 자체 조건으로 뺀다).
+    foot_tolerance = np.where(on_border, 2.0, float(margin_pixels))
+    tall_index = np.flatnonzero(is_tall)
+    pixel_inside = _inside_polygon(np.column_stack((xs[tall_index], ys[tall_index])).astype(float),
+                                   polygon_float, pixel_tolerance)
+    feet = available[tall_index] - heights[tall_index, None] * normal
+    feet_pixels, front = _camera_points_to_pixels(feet, rays)
+    foot_inside = np.zeros(len(tall_index), dtype=bool)
+    foot_inside[front] = _inside_polygon(feet_pixels, polygon_float, foot_tolerance)
+    # 구역 밖 카메라 앞쪽에 서서 화면상 구역을 가리는 물체는 점 자체는 구역 안이지만 발이 구역 밖이라 빠진다.
+    candidates = np.zeros(len(heights), dtype=bool)
+    candidates[tall_index] = pixel_inside & foot_inside
     tall = np.zeros(depth_m.shape, dtype=bool)
     tall[ys, xs] = heights >= effective_height
     if settings['flying_pixel_depth_m'] > 0:
