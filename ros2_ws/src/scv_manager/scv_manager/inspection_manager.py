@@ -1048,6 +1048,16 @@ class InspectionManager(Node):
                 + ", ".join(self.route_builder.skipped_facilities),
             )
 
+        # 설비는 관측 자세(view)가 들어 있는 섹터를 맡은 로봇이 점검한다. 어느 섹터에도 없거나 맡은 로봇이 없으면 알림
+        orphans = [r.facility_id for r in routes if r.zone_id not in self.zone_by_robot.values()]
+        if orphans:
+            self.publish_alert(
+                level=Alert.LEVEL_WARN,
+                code="FACILITY_NO_SECTOR",
+                robot_id="",
+                message="관측 자세가 이번 회차 섹터 밖이라 점검하지 않는 설비: " + ", ".join(orphans),
+            )
+
         for robot_id, zone_id in self.zone_by_robot.items():
             task_count = 0
 
