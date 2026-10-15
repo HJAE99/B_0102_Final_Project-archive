@@ -28,6 +28,7 @@ from .manager_core import (
     PatrolPhase,
     RobotStatusSnapshot,
     RunState,
+    TERMINAL_TASK_STATES,
     TaskState,
     Waypoint,
     blocked_cells,
@@ -797,6 +798,13 @@ class InspectionManager(Node):
     def complete_run_if_ready(self) -> None:
         if self.core.run_state != RunState.RUNNING:
             return
+        if getattr(self, "aborting_run", False):        # 순찰 종료 뒤 귀환 중 — 귀환 DOCK 이 다 끝나면 마침 (회차는 이미 aborted)
+            docks = [t for t in self.core.tasks.values() if t.task_id.endswith("-abort-dock")]
+            if all(t.state in TERMINAL_TASK_STATES or t.state == TaskState.CANCELED for t in docks):
+                self.aborting_run = False
+                self.core.complete_run()
+                self.get_logger().info(f"run_id={self.core.run_id}: 순찰 종료 뒤 귀환 끝")
+            return
         if not self.core.all_tasks_terminal():
             return
 
@@ -1268,7 +1276,8 @@ class InspectionManager(Node):
         return response
 
     def on_abort(self, request, response):
-        """순찰 종료 — 로봇 작업을 모두 취소(정지)하고 회차를 aborted 로 닫는다. 로봇은 그 자리에 선다"""
+        """순찰 종료 — 로봇 작업을 모두 취소하고 회차를 aborted 로 닫은 뒤, 로봇마다 DOCK 을 보내 도크로 돌려보낸다
+        (비상정지는 그 자리 정지 · 재개 대기, 순찰 종료는 끝내고 귀환 — 10/15 PM)"""
         del request
         if self.core.run_state not in {RunState.RUNNING, RunState.ESTOPPED}:
             response.success = False
@@ -1276,6 +1285,9 @@ class InspectionManager(Node):
             return response
         run_id = self.core.run_id
         self.core.estop()
+        for task in self.core.tasks.values():          # 대기 작업도 취소
+            if task.state == TaskState.PENDING:
+                task.state, task.reason = TaskState.CANCELED, "ABORT"
         self.canceling_task_ids.update(
             task.task_id for task in self.core.tasks.values() if task.state == TaskState.CANCELED
         )
@@ -1287,15 +1299,28 @@ class InspectionManager(Node):
             self.get_logger().error(f"회차를 닫지 못했습니다: {exc}")
         for robot_id in self.core.robots:
             self.publish_mask(robot_id, set())
-        self.core.complete_run()
+        # 귀환 — 로봇마다 DOCK (도크 위면 executor 가 바로 끝냄). 다 끝나면 complete_run_if_ready 가 회차를 마침
+        for robot_id in self.core.robots:
+            self.core.create_task(
+                task_id=f"run-{run_id}-{robot_id}-abort-dock",
+                run_id=run_id,
+                task_type=ExecuteTask.Goal.DOCK,
+                priority=1,
+                target_ref="dock",
+                preferred_robot_id=robot_id,
+                allowed_robot_ids=(robot_id,),
+                waypoints=(),
+            )
+        self.aborting_run = True
+        self.core.run_state = RunState.RUNNING
         self.publish_alert(
             level=Alert.LEVEL_WARN,
             code="RUN_ABORTED",
             robot_id="",
             ref=str(run_id),
-            message=f"run_id={run_id} 순찰을 종료했습니다 (관리자).",
+            message=f"run_id={run_id} 순찰을 종료했습니다 (관리자) — 로봇은 도크로 귀환합니다.",
         )
-        self.get_logger().warning(f"run_id={run_id} 순찰 종료 (관리자 abort)")
+        self.get_logger().warning(f"run_id={run_id} 순찰 종료 (관리자 abort) — 귀환 DOCK 전송")
         response.success = True
         response.message = f"run {run_id} 종료"
         return response
