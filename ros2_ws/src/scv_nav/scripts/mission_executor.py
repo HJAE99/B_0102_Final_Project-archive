@@ -522,7 +522,16 @@ def localize(nav, home):
     cov[35] = math.radians(10.0) ** 2
     msg.pose.covariance = cov
     nav.initial_pose_received = False
+    since, restarts = time.time(), 0
     while not nav.initial_pose_received:
+        # localization bringup 이 bond 4 s 초과로 중단되면 AMCL 이 inactive 로 남아 여기서 영원히 기다림 (10/15 robot3)
+        # → 30 s 동안 amcl_pose 가 없고 amcl 이 active 가 아니면 lifecycle_manager_localization 을 RESET · STARTUP (최대 3번)
+        if time.time() - since > 30.0 and restarts < 3:
+            since = time.time()
+            if node_state(nav, 'amcl') != 'active':
+                restarts += 1
+                nav.get_logger().warn(f'amcl 이 active 아님 — localization bringup 중단으로 보고 다시 띄움 ({restarts}/3)')
+                restart_nav2(nav, 'lifecycle_manager_localization')
         msg.header.stamp = nav.get_clock().now().to_msg()
         nav.initial_pose_pub.publish(msg)
         # spin_once 는 메시지가 하나라도 오면 바로 돌아온다 (이 노드가 initialpose 도 받음) → 1초 동안은
@@ -565,11 +574,24 @@ def wait_nav2_active(nav, node_name='bt_navigator'):
         time.sleep(1.0)
 
 
-def restart_nav2(nav):
+def node_state(nav, node_name):
+    from lifecycle_msgs.srv import GetState
+    cli = nav.create_client(GetState, f'{node_name}/get_state')
+    state = None
+    if cli.wait_for_service(timeout_sec=2.0):
+        fut = cli.call_async(GetState.Request())
+        rclpy.spin_until_future_complete(nav, fut, timeout_sec=3.0)
+        if fut.done() and fut.result() is not None:
+            state = fut.result().current_state.label
+    nav.destroy_client(cli)
+    return state
+
+
+def restart_nav2(nav, manager='lifecycle_manager_navigation'):
     from nav2_msgs.srv import ManageLifecycleNodes
-    cli = nav.create_client(ManageLifecycleNodes, 'lifecycle_manager_navigation/manage_nodes')
+    cli = nav.create_client(ManageLifecycleNodes, f'{manager}/manage_nodes')
     if not cli.wait_for_service(timeout_sec=3.0):
-        nav.get_logger().warn('lifecycle_manager_navigation/manage_nodes 서비스 없음')
+        nav.get_logger().warn(f'{manager}/manage_nodes 서비스 없음')
         nav.destroy_client(cli)
         return
     for cmd in (ManageLifecycleNodes.Request.RESET, ManageLifecycleNodes.Request.STARTUP):
