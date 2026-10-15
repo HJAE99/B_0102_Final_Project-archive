@@ -620,7 +620,9 @@ def main():
     if docked:
         start_lidar(nav)
     # undock 상태로 시작해도 home 을 줌. Nav2 bringup 이 map TF 를 기다리므로 Nav2 보다 먼저 보냄
-    localize(nav, home)
+    # 도크 위에서는 도크를 보고 있어 HOME(undock 뒤, 도크 반대쪽을 봄)과 방향이 180° 다르다 — 위치는 HOME 과 몇 cm 차이
+    # (10/15 실측 robot3 도킹 (2.85, 4.64, 0°) · HOME (2.81, 4.61, 180°)). 움직이지 않으면 AMCL 이 방향을 못 고치므로 뒤집어 줌
+    localize(nav, nav.getPoseStamped(xyyaw[:2], xyyaw[2] + 180.0) if docked else home)
     wait_nav2_active(nav)   # nav.waitUntilNav2Active 는 get_state 응답을 시간 제한 없이 기다려 놓치면 영원히 멈춤 (10/15 robot3 두 번)
     if not docked:
         settle(nav)   # 도크 위에서는 돌지 않음
