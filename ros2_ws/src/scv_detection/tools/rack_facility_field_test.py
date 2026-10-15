@@ -13,6 +13,7 @@
 
     cd <저장소 뿌리> && python3 ros2_ws/src/scv_detection/tools/rack_facility_field_test.py --ns robot4
     (--facility 기본: robot4 → RCK-01, robot3 → RCK-02 · --no-move 는 지금 자리에서 판정만 · Ctrl+C 는 이동을 멈추고 끝냄, 도킹은 하지 않음)
+    (Ctrl+C 는 Nav2 이동만 취소한다. undock · dock 동작 중이면 그 동작은 끝까지 간다)
 """
 import argparse
 import importlib.util
@@ -137,7 +138,8 @@ def main():
                   '-r', 'fire_extinguisher/detections/compressed:=rack_test/detections/compressed'],
         parameter_overrides=[Parameter('show', value=False), Parameter('device', value='cuda:0'),
                              Parameter('weights', value=str(SRC / 'scv_detection' / 'models' / 'best.pt')),
-                             Parameter('rack_reference_path', value='')])
+                             Parameter('rack_reference_path', value=''),
+                             Parameter('shutter_enabled', value=False)])   # 랙 시험엔 Depth · TF 구독 불필요 (Wi-Fi 부담)
     watch_node = rclpy.create_node('rack_test_dock', namespace=f'/{a.ns}', use_global_arguments=False)
     dock = DockWatch(watch_node)
     ex = MultiThreadedExecutor(num_threads=3)
