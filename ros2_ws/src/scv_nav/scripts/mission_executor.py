@@ -602,6 +602,24 @@ def restart_nav2(nav, manager='lifecycle_manager_navigation'):
         ok = fut.done() and fut.result() is not None and fut.result().success
         nav.get_logger().info(f'manage_nodes {"RESET" if cmd == ManageLifecycleNodes.Request.RESET else "STARTUP"} → {"성공" if ok else "실패/응답 없음"}')
     nav.destroy_client(cli)
+    refresh_action_clients(nav)
+
+
+def refresh_action_clients(nav):
+    # RESET · STARTUP 뒤 Nav2 액션 서버가 새로 만들어지면 기존 클라이언트가 다시 매칭되지 않아
+    # "'Spin' action server not available" 로 영원히 기다림 (10/15 robot3, Discovery Server) → 같은 이름 · 타입으로 다시 만듦
+    from rclpy.action import ActionClient as AC
+    n = 0
+    for attr, cli in list(vars(nav).items()):
+        if isinstance(cli, AC):
+            kind, name = cli._action_type, cli._action_name
+            try:
+                cli.destroy()
+            except Exception:   # 이미 없어진 클라이언트
+                pass
+            setattr(nav, attr, AC(nav, kind, name))
+            n += 1
+    nav.get_logger().info(f'Nav2 액션 클라이언트 {n}개 다시 만듦')
 
 
 def start_lidar(nav):
