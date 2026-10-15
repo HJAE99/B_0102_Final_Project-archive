@@ -51,6 +51,7 @@ class Bridge(Node):
         super().__init__("scv_ros_bridge")
         self.sp = sp
         self.task = {}                              # robot_id → 지금 작업 (status 로 본 것)
+        self.docked = {}                            # robot_id → 도크 위 (그동안 표본은 버림 — 회차가 열려 있어도 측정이 아님)
         self.samples = {}                           # (robot_id, run_id) → 모은 표본
         self.target = {}                            # run_id → 측정 AP SSID
         self.local_id = itertools.count(-1, -1)     # DB 에 넣지 않은 알림의 event_id (화면용)
@@ -97,6 +98,7 @@ class Bridge(Node):
         try:
             self.task[rid] = self.known_task(m.task_id)
             state = NAV_STATE[m.state] if m.state < len(NAV_STATE) else "UNKNOWN"
+            self.docked[rid] = state == "DOCKED"
             body = {"stamp": iso(m.stamp), "run_id": m.run_id or None, "task_id": self.task[rid],
                     "nav_state": state, "progress": m.progress, "x": m.x, "y": m.y, "yaw": m.yaw,
                     "battery_pct": m.battery_percent, "is_docked": state == "DOCKED", "estop": state == "ESTOP"}
@@ -160,7 +162,7 @@ class Bridge(Node):
 
     # ------------------------------------------------------------ B6 표본
     def on_sample(self, rid: str, m: NetSample):
-        if not m.detected:                                 # 미검출(RSSI 없음)은 넣지 않음
+        if not m.detected or self.docked.get(rid):         # 미검출(RSSI 없음) · 도크 위는 넣지 않음
             return
         with self.lock:
             self.samples.setdefault(rid, []).append(
