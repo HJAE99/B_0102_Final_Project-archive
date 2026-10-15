@@ -12,7 +12,7 @@
 순찰 주인은 inspection_manager 다 (10/14 PM 결정). web:=true 면 server_page 를 SCV_RUN_OWNER=ros 로 띄우고,
 그 안의 ros_bridge(scv_app/ros_bridge.py)가 상태 · 알림 · 판정 · 표본을 받아 DB · 화면에 넣고
 시작 · 비상정지 · 재개 버튼은 /inspection/* 서비스를 부른다. 웹은 backend:=db 일 때만 (같은 SCV_DB_DSN).
-웹 폴더는 이 워크스페이스의 scv_app (scv_app_dir 로 바꿈), 파이썬은 web_python (fastapi · psycopg 가 있는 것).
+웹 폴더는 이 워크스페이스의 src/scv_app (scv_app_dir 로 바꿈), 파이썬은 web_python (fastapi · psycopg 가 있는 것).
 network_map_engine 은 로봇 PC 쪽 미리보기로 뜬다.
 """
 import os
@@ -43,7 +43,7 @@ def _nodes(context):
     if arg('web') == 'true':
         if arg('backend') != 'db':
             raise RuntimeError('web:=true 는 backend:=db 와 함께 씁니다 (웹과 inspection_manager 가 같은 DB 를 봐야 함)')
-        app = Path(arg('scv_app_dir') or Path(get_package_share_directory('scv_bringup')).parents[3] / 'scv_app')
+        app = Path(arg('scv_app_dir') or Path(get_package_share_directory('scv_bringup')).parents[3] / 'src' / 'scv_app')
         if not (app / 'server_page.py').exists():
             raise RuntimeError(f'server_page.py 가 없습니다: {app} (scv_app_dir:=<경로>)')
         nodes.append(ExecuteProcess(cmd=[arg('web_python'), 'server_page.py'], cwd=str(app), output='screen',
@@ -64,7 +64,7 @@ def generate_launch_description():
         DeclareLaunchArgument('close_stale_run', default_value='false',
                               description='db: 닫히지 않은 running 회차가 남아 있으면 aborted 로 닫고 시작 (true · false)'),
         DeclareLaunchArgument('web', default_value='false', description='관제 웹 server_page 를 ros 모드로 함께 (true · false)'),
-        DeclareLaunchArgument('scv_app_dir', default_value='', description='server_page.py 폴더 (기본: 워크스페이스/scv_app)'),
+        DeclareLaunchArgument('scv_app_dir', default_value='', description='server_page.py 폴더 (기본: 워크스페이스/src/scv_app)'),
         DeclareLaunchArgument('web_python', default_value='python3', description='server_page 를 돌릴 파이썬 (fastapi · psycopg 설치된 것)'),
         OpaqueFunction(function=_nodes),
     ])

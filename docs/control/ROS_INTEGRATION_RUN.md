@@ -22,7 +22,7 @@ colcon build --symlink-install --packages-up-to scv_bringup scv_manager scv_surv
 
 웹 파이썬: `server_page` 는 rclpy(ROS)와 fastapi · psycopg 가 같은 파이썬에 있어야 한다.
 - 지금까지 server_page 를 돌리던 파이썬(가상환경)이 파이썬 3.12 이면 그대로 쓴다 — ROS 를 source 한 셸에서 그 파이썬을 `web_python:=` 으로 넘긴다.
-- 없으면 `python3 -m pip install --user -r ros2_ws/scv_app/requirements.txt`.
+- 없으면 `python3 -m pip install --user -r ros2_ws/src/scv_app/requirements.txt`.
 
 ## 2. DB · 지도 준비 (한 번, 순찰이 없을 때)
 
@@ -69,7 +69,7 @@ ros2 launch scv_bringup robot_pc.launch.py robot_ns:=robot4 iface:=<무선랜> s
 | 시작 → 「/inspection/start 서비스가 없습니다」 | `inspection_manager` 가 떴는지, 같은 도메인인지 |
 | 시작 → 「회차를 열 수 없습니다」 | manager 로그: DB 활성 지도 · 격자 0.5 m · origin 이 `testbed_v1` 과 같아야 함, 남은 running 회차는 `close_stale_run:=true` |
 | `web:=true 는 backend:=db 와 함께` | backend:=db 를 같이 준다 |
-| `server_page.py 가 없습니다` | `scv_app_dir:=~/B_0102_Final_Project/ros2_ws/scv_app` |
+| `server_page.py 가 없습니다` | `scv_app_dir:=~/B_0102_Final_Project/ros2_ws/src/scv_app` |
 | 웹이 `No module named fastapi / rclpy` | 1절 웹 파이썬 — ROS 를 source 한 셸 + fastapi 있는 파이썬 |
 
 ## 6. 로봇 없이 시험 (노트북에서 해 본 방법)
