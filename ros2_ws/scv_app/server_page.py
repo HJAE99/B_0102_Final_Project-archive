@@ -2286,8 +2286,10 @@ def api_run_detail(run_id: int, request: Request, lite: bool = False):
         thr = fset(settings_values(conn), "rssi_suspect_dbm", -72)
         # 10/15 UI 시안: 방문 궤적(robot_status_log 1 Hz) · NetSample 점 (lite=1 이면 표본 점은 뺌 — 모니터 2초 갱신용)
         tracks: dict[str, list] = {}
+        # 도크 위 · undock 중(DOCKED) · 도킹 중(DOCKING) 위치는 빼서 출발한 순간부터 그림 (끊긴 곳은 화면이 잇지 않음)
         for r in conn.execute("SELECT robot_id, extract(epoch FROM ts) AS t, x, y FROM robot_status_log "
-                              "WHERE run_id = %s AND x IS NOT NULL ORDER BY ts", (run_id,)):
+                              "WHERE run_id = %s AND x IS NOT NULL AND coalesce(nav_state, '') NOT IN ('DOCKED', 'DOCKING') "
+                              "ORDER BY ts", (run_id,)):
             tracks.setdefault(r["robot_id"], []).append([round(float(r["t"]), 1), round(r["x"], 3), round(r["y"], 3)])
         points = [] if lite else conn.execute(
             "SELECT robot_id, seq, stamp, x, y, pose_ok, ap_id, rssi_dbm, cell_id, task_id FROM net_samples "

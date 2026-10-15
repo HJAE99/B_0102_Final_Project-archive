@@ -167,6 +167,7 @@ function useOrient() {                                 // 모니터 · 이력이
   const set = (v) => { try { localStorage.setItem(ORIENT_KEY, v); } catch { /* 저장 못 해도 이 화면은 바뀜 */ } setO(v); dispatchEvent(new Event('scv-orient')); };
   return [o, set];
 }
+const PLAN_COLOR = '#eab308';                          // 계획 경로 — 두 섹터 모두 노랑 (10/15 PM)
 const projector = (o) => (o === 'h' ? (x, y) => [-x, y] : (x, y) => [y, x]);
 
 // 지도 범위(지도 좌표 x0..x1, y0..y1) — 이미지 크기를 알면 이미지 전체, 모르면(파일 없음) 격자 · 도크 · AP · 설비가 들어가는 범위
@@ -241,7 +242,7 @@ function OrientSelect() {
 }
 function MapLegend({ opacity, setOpacity, history }) {
   return html`<div class="maplegend">
-    <span class="lk"><i class="ln dash"></i>계획 경로</span><span class="lk"><i class="ln"></i>방문 궤적</span>
+    <span class="lk"><i class="ln dash" style="border-top-color:#eab308"></i>계획 경로</span><span class="lk"><i class="ln"></i>방문 궤적</span>
     <span class="lk grad">RSSI <i class="bar"></i><small>약 −90</small><small>−65</small><small>−40 dBm 강</small></span>
     <label class="lk">농도 <input type="range" min="0.15" max="0.9" step="0.05" value=${opacity} onInput=${(e) => setOpacity(Number(e.target.value))} /></label>
     ${history && html`<span class="lk"><i class="um"></i>미측정 · 표본 없음</span><span class="lk"><i class="ff">×</i>도달 실패 · 실행 사유 있음</span>
@@ -456,18 +457,20 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       seen.add(r.robot_id);
       const live = r.connected;
       const color = live ? robotColor(r.robot_id) : '#8a969e';
-      const yaw = st.yaw || 0, len = 0.45;
-      const head = [P(st.x, st.y), P(st.x + Math.cos(yaw) * len, st.y + Math.sin(yaw) * len)];
+      // 정면 화살표 — 몸통(폭 7 cm) + 머리(폭 26 cm), 로봇 중심에서 0.55 m (지도 좌표로 만든 뒤 같은 변환)
+      const yaw = st.yaw || 0, c = Math.cos(yaw), sn = Math.sin(yaw);
+      const at = (f, s2) => P(st.x + c * f - sn * s2, st.y + sn * f + c * s2);
+      const head = [at(0, 0.035), at(0.36, 0.035), at(0.36, 0.13), at(0.55, 0), at(0.36, -0.13), at(0.36, -0.035), at(0, -0.035)];
       const tip = `${r.robot_id}${live ? '' : ' (마지막 위치)'}`;
       let mm = mk[r.robot_id];
       if (!mm || !layer.hasLayer(mm.dot)) {
         mm = mk[r.robot_id] = {
-          line: L.polyline(head, { color, weight: 3, interactive: false }).addTo(layer),
+          line: L.polygon(head, { color: '#fff', weight: 1.5, fillColor: color, fillOpacity: 1, interactive: false }).addTo(layer),
           dot: L.circleMarker(P(st.x, st.y), { radius: 9, color: '#fff', weight: 2, fillColor: color, fillOpacity: 0.95 })
             .bindTooltip(tip, { permanent: true, direction: 'top', offset: [0, -8], className: 'robot-tip' }).addTo(layer),
         };
       } else {
-        mm.line.setLatLngs(head).setStyle({ color });
+        mm.line.setLatLngs(head).setStyle({ fillColor: color });
         mm.dot.setLatLng(P(st.x, st.y)).setStyle({ fillColor: color, fillOpacity: live ? 0.95 : 0.6 });
         mm.dot.setTooltipContent(tip);
       }
@@ -484,7 +487,7 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
     layer.clearLayers();
     if (!lay.plan) return;
     Object.entries(plans || {}).forEach(([rid, pts]) => {
-      const col = robotColor(rid), ll = (pts || []).map(([x, y]) => P(x, y));
+      const col = PLAN_COLOR, ll = (pts || []).map(([x, y]) => P(x, y));
       if (ll.length > 1) L.polyline(ll, { color: col, weight: 2.5, opacity: 0.9, dashArray: '6 5', interactive: false }).addTo(layer);
       ll.forEach((p) => L.circleMarker(p, { radius: 1.6, weight: 0, fillColor: col, fillOpacity: 0.9, interactive: false }).addTo(layer));
     });
@@ -554,7 +557,7 @@ function drawOverlay(L, layer, m, ov, P, lay = {}, opacity = 0.55) {
     (ov.tasks || []).forEach((t) => {
       if (!(t.waypoints || []).length) return;
       if (ov.live && !['ACTIVE', 'PENDING'].includes(t.status)) return;
-      const col = robotColor(t.robot_id), pts = t.waypoints.map((p) => P(p.x, p.y)), act = t.status === 'ACTIVE';
+      const col = PLAN_COLOR, pts = t.waypoints.map((p) => P(p.x, p.y)), act = t.status === 'ACTIVE';
       L.polyline(pts, { color: col, weight: act ? 2.5 : 1.5, opacity: act ? 0.75 : 0.4, dashArray: '5 6', interactive: false }).addTo(layer);
     });
   }
