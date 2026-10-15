@@ -382,3 +382,5 @@ main #map { height: 64vh; min-height: 420px; }
 .cell-val { font-size: 10px; color: #334155; text-align: center; transform: translate(-50%, -50%); white-space: nowrap; }
 .cell-val b { font-weight: 700; }
 .scrollbox { max-height: 320px; overflow: auto; }
+.leaflet-tooltip.start-tip { background: transparent; border: 0; box-shadow: none; padding: 0; font-size: 10.5px; color: #64748b; font-weight: 600; }
+.leaflet-tooltip.start-tip::before { display: none; }

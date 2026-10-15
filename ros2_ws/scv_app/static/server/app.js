@@ -418,11 +418,10 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
     const label = (cls) => ({ permanent: true, direction: 'right', offset: [8, 0], className: 'map-tip ' + cls });
     if (lay.dock) {
       Object.entries(m.dock_poses || {}).forEach(([rid, p]) => {
-        const c = robotColor(rid), d = 0.22;
-        L.rectangle([P(p.x - d, p.y - d), P(p.x + d, p.y + d)], { color: c, weight: 2, fillColor: c, fillOpacity: 0.2 })
-          .bindTooltip(`Dock ${rid.replace('robot', '')}`, label('dock')).addTo(info);
-        L.polyline([P(p.x, p.y), P(p.x + Math.cos(p.yaw || 0) * 0.4, p.y + Math.sin(p.yaw || 0) * 0.4)],
-          { color: c, weight: 2, dashArray: '3 3', interactive: false }).addTo(info);
+        // 출발 위치만 알림 — 작은 점 + 글자 (10/15 PM: 큰 사각형 · 테두리는 설비처럼 보여 헷갈림)
+        const c = robotColor(rid);
+        L.circleMarker(P(p.x, p.y), { radius: 4, weight: 0, fillColor: c, fillOpacity: 0.45 })
+          .bindTooltip(`R${rid.replace('robot', '')} 출발`, { permanent: true, direction: 'bottom', offset: [0, 4], className: 'start-tip' }).addTo(info);
       });
     }
     if (lay.fac) {
@@ -458,9 +457,10 @@ function MapView({ m, robots, overlay, mini, plans, layers, opacity = 0.55 }) {
       const live = r.connected;
       const color = live ? robotColor(r.robot_id) : '#8a969e';
       // 정면 화살표 — 몸통(폭 7 cm) + 머리(폭 26 cm), 로봇 중심에서 0.55 m (지도 좌표로 만든 뒤 같은 변환)
-      const yaw = st.yaw || 0, c = Math.cos(yaw), sn = Math.sin(yaw);
+      // 도킹 중에는 실행기가 undock 직후 자세(HOME, 도크 반대쪽을 봄)를 대략값으로 주므로 실제 방향(도크 쪽)으로 뒤집어 그림
+      const yaw = (st.yaw || 0) + (st.is_docked ? Math.PI : 0), c = Math.cos(yaw), sn = Math.sin(yaw);
       const at = (f, s2) => P(st.x + c * f - sn * s2, st.y + sn * f + c * s2);
-      const head = [at(0, 0.035), at(0.36, 0.035), at(0.36, 0.13), at(0.55, 0), at(0.36, -0.13), at(0.36, -0.035), at(0, -0.035)];
+      const head = [at(0, 0.018), at(0.18, 0.018), at(0.18, 0.065), at(0.28, 0), at(0.18, -0.065), at(0.18, -0.018), at(0, -0.018)];
       const tip = `${r.robot_id}${live ? '' : ' (마지막 위치)'}`;
       let mm = mk[r.robot_id];
       if (!mm || !layer.hasLayer(mm.dot)) {
