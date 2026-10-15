@@ -171,8 +171,8 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 10.0        # 원본 4.0. 측정 줄이 벽 inflation 에 걸려 경로가 줄에서 0.3 m 휘어 나감 (2026-10-13)
-        inflation_radius: 0.30           # 원본 0.45. 관제 경로 점의 벽 여유(obstacle_clearance_m 0.30)와 같게
+        cost_scaling_factor: 5.0         # 10/13 10.0 → 10/15 5.0 (통합 브랜치): 플래너가 상자 옆 몇 cm 로 붙어 지나가다 닿음 (실기 4회차). 전역만, local 은 그대로
+        inflation_radius: 0.40           # 10/13 0.30 → 10/15 0.40 (통합 브랜치). 벽 옆 측정 줄이 조금 휠 수 있음
       always_send_full_costmap: true
 
 planner_server:

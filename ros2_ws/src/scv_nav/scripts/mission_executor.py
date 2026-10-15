@@ -302,8 +302,9 @@ class MissionExecutor(Node):
                         last_xy, last_t = xy_yaw, time.time()
                         if self.state == S.STATE_BLOCKED:
                             self.state, self.warning = S.STATE_EXECUTING, ''
-                    elif time.time() - last_t > 10.0:
-                        break   # 막힘 10초
+                    elif time.time() - last_t > 40.0:
+                        break   # 막힘 40초 (10/15 통합 브랜치, 원래 10초): 그 사이 Nav2 복구(costmap 지우기 · 회전 · 대기 · 재계획)가
+                                # 상자를 돌아가게 둔다. 10초면 Nav2 진척 검사(10초)와 같아 복구 전에 끊고 점을 건너뜀 (실기 4회차)
                     elif time.time() - last_t > 5.0 and self.state != S.STATE_BLOCKED:
                         self.state, self.warning = S.STATE_BLOCKED, 'BLOCKED'   # 5초: Nav2 가 재계획하는 중
                         k = max(len(left) - fb.number_of_poses_remaining, 0)
