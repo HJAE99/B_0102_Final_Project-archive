@@ -525,6 +525,22 @@ class InspectionManager(Node):
                 continue
 
             ready, reason = self.robot_readiness(robot_id)
+            status = self.core.robots[robot_id].status
+            if not ready and status is not None and self.core.robots[robot_id].online \
+                    and not status.accepting_tasks \
+                    and status.state in {RobotStatus.STATE_IDLE, RobotStatus.STATE_DOCKED}:
+                # mission_executor 는 배터리가 낮으면 DOCK 만 받는다. 남은 작업을 기다리면 DOCK 도 영영 안 나가므로
+                # 그 로봇 몫을 실패로 닫고 바로 귀환시킨다 (10/15 실기: robot4 27% 에서 서서 교착)
+                dock = self.core.abandon_for_dock(
+                    robot_id, ExecuteTask.Goal.DOCK,
+                    f"LOW_BATTERY ({status.battery_percent:.0f}%)")
+                if dock is not None and self.execute_task_clients[robot_id].server_is_ready():
+                    self.get_logger().warning(
+                        f"{robot_id}: 작업을 받지 않음({reason}) → 남은 작업을 닫고 귀환")
+                    self.publish_alert(level=Alert.LEVEL_WARN, code="E2", robot_id=robot_id,
+                                       ref=dock.task_id, message=f"배터리 부족 귀환 ({status.battery_percent:.0f}%)")
+                    self.send_task(dock.task_id, robot_id)
+                    continue
             if not ready:
                 previous_reason = self.unready_robot_reasons.get(robot_id)
 

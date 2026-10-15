@@ -208,6 +208,26 @@ class ManagerCore:
 
         return None
 
+    def abandon_for_dock(self, robot_id: str, dock_type: int, reason: str) -> Optional[TaskRecord]:
+        """배터리 부족 등으로 로봇이 DOCK 외 작업을 안 받을 때: 그 로봇 몫 대기 작업을 실패로 닫고 DOCK 작업을 돌려줌.
+        DOCK 작업이 없거나 로봇이 작업 중이면 None (아무것도 안 바꿈)."""
+        if self.run_state != RunState.RUNNING or any(
+            task.robot_id == robot_id and task.state in {TaskState.ASSIGNED, TaskState.RUNNING}
+            for task in self.tasks.values()
+        ):
+            return None
+        mine = [self.tasks[t] for t in self.task_order
+                if self.tasks[t].state == TaskState.PENDING
+                and (self.tasks[t].preferred_robot_id == robot_id
+                     or robot_id in self.tasks[t].allowed_robot_ids)]
+        dock = next((t for t in mine if t.task_type == dock_type), None)
+        if dock is None:
+            return None
+        for task in mine:
+            if task is not dock:
+                task.state, task.reason = TaskState.FAILED, reason
+        return dock
+
     def assign_task(self, task_id: str, robot_id: str) -> None:
         task = self.tasks[task_id]
         task.robot_id = robot_id

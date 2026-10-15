@@ -170,6 +170,17 @@ def test_resume_keeps_only_waypoints_not_reached():
     assert core.tasks["survey"].waypoint_index == 0
 
 
+def test_low_battery_closes_pending_and_returns_dock():
+    core = ManagerCore(["robot4"])
+    run_id = core.start_run()
+    for tid, kind in (("s1", 0), ("s2", 0), ("dock", 3)):
+        core.create_task(task_id=tid, run_id=run_id, task_type=kind, priority=1,
+                         target_ref="Z1", preferred_robot_id="robot4")
+    dock = core.abandon_for_dock("robot4", 3, "LOW_BATTERY (27%)")
+    assert dock is core.tasks["dock"] and dock.state == TaskState.PENDING
+    assert core.tasks["s1"].state == TaskState.FAILED and core.tasks["s2"].reason == "LOW_BATTERY (27%)"
+
+
 def test_fixed_role_task_is_not_reassigned_to_other_robot():
     core = ManagerCore(["robot4", "robot3"])
     run_id = core.start_run()
