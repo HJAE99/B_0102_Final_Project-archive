@@ -218,6 +218,7 @@ class ScvDetectionManager(Node):
         self.declare_parameter('pressure_normal_confirm_frames', 3)
         # 이전 실행 설정과의 호환용이다. 새 바늘 존재 판정에는 각도 경계 여유를 적용하지 않는다.
         self.declare_parameter('pressure_boundary_margin_deg', 5.0)
+        self.declare_parameter('pressure_normal_margin_deg', 10.0)   # 정상 구간 양옆 여유 — 비스듬한 시점의 바늘 시차 (10/16 실기)
         self.declare_parameter('pressure_normal_start_deg', -1.0)
         self.declare_parameter('pressure_normal_end_deg', -1.0)
         self.declare_parameter('pressure_yellow_lower', [8, 40, 70])
@@ -293,6 +294,7 @@ class ScvDetectionManager(Node):
             min_gauge_diameter=self.get_parameter('pressure_min_gauge_diameter').value,
             needle_min_pixels=self.get_parameter('pressure_needle_min_pixels').value,
             boundary_margin_deg=self.get_parameter('pressure_boundary_margin_deg').value,
+            normal_margin_deg=self.get_parameter('pressure_normal_margin_deg').value,
             normal_start_deg=self.get_parameter('pressure_normal_start_deg').value,
             normal_end_deg=self.get_parameter('pressure_normal_end_deg').value,
             yellow_lower=self.get_parameter('pressure_yellow_lower').value,

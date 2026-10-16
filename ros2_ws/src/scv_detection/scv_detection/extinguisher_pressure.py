@@ -41,23 +41,28 @@ def gauge_belongs_to_extinguisher(gauge_box, extinguisher_box):
 def validate_options(*, min_gauge_diameter=24, boundary_margin_deg=5.0,
                      yellow_lower=(8, 40, 70), yellow_upper=(35, 255, 255),
                      green_lower=(38, 25, 20), green_upper=(120, 255, 255),
-                     normal_start_deg=-1.0, normal_end_deg=-1.0, needle_min_pixels=3):
+                     normal_start_deg=-1.0, normal_end_deg=-1.0, needle_min_pixels=3, normal_margin_deg=0.0):
     """크기·HSV·정상 범위·최소 바늘색 픽셀 수를 검사해 설정 사전을 반환한다.
 
     정상 범위 두 값이 -1이면 녹색만 사용한다. 보정 각도는 녹색 검출 실패 때만 사용한다.
     boundary_margin_deg는 이전 설정과의 호환을 위해 받지만 새 존재 판정에는 사용하지 않는다.
     needle_min_pixels는 정상 영역에서 붙어 있는 바늘색 픽셀이 몇 개 이상이어야 하는지 뜻한다.
+    normal_margin_deg는 찾은 정상 구간을 양옆으로 넓히는 각도다. 바늘이 눈금판보다 떠 있어 비스듬히 보면
+    정상 구간 바로 옆으로 밀려 보이는 시차를 흡수한다 (10/16 실기, 0이면 넓히지 않음).
     """
     if not np.isfinite(min_gauge_diameter) or min_gauge_diameter < 16:
         raise ValueError('pressure_min_gauge_diameter must be at least 16 pixels')
     if not np.isfinite(boundary_margin_deg) or not 0 <= boundary_margin_deg < 30:
         raise ValueError('pressure_boundary_margin_deg must satisfy 0 <= margin < 30')
+    if not np.isfinite(normal_margin_deg) or not 0 <= normal_margin_deg <= 30:
+        raise ValueError('pressure_normal_margin_deg must satisfy 0 <= margin <= 30')
     if (not np.isfinite(needle_min_pixels) or needle_min_pixels < 1
             or needle_min_pixels != int(needle_min_pixels)):
         raise ValueError('pressure_needle_min_pixels must be a positive integer')
     options = {'needle_min_pixels': int(needle_min_pixels),
                'min_gauge_diameter': int(min_gauge_diameter),
                'boundary_margin_deg': float(boundary_margin_deg),
+               'normal_margin_deg': float(normal_margin_deg),
                'normal_start_deg': float(normal_start_deg), 'normal_end_deg': float(normal_end_deg)}
     if (normal_start_deg, normal_end_deg) != (-1, -1):
         if (not np.isfinite((normal_start_deg, normal_end_deg)).all()
@@ -273,6 +278,17 @@ def _find_green_sector(mask, center, radius):
     return float(start), float((start + length - 1) % 360)
 
 
+def widen_sector(sector, margin_deg):
+    """정상 구간 (시작 각도, 끝 각도)를 양옆으로 margin_deg 씩 넓힌 구간을 반환한다 (0~360 범위로 감음).
+
+    판정에 쓰는 검사 영역만 넓히고, 화면에 그리는 정상 구간과 보고값(green_start/end)은 원래 구간을 쓴다.
+    """
+    start, end = sector
+    if margin_deg <= 0:
+        return float(start), float(end)
+    return float((start - margin_deg) % 360), float((end + margin_deg) % 360)
+
+
 def classify_angle(angle, green_start, green_end, boundary_margin_deg=5.0):
     """이전 호출과의 호환을 위한 각도 비교 함수다. 현재 inspect_pressure에서는 사용하지 않는다.
 
@@ -337,7 +353,8 @@ def inspect_pressure(frame, gauge_bbox, **options):
     report['green_start_deg'], report['green_end_deg'] = sector
     report['range_source'] = source
     needle_mask = _needle_color_mask(hsv, radius, settings['yellow_lower'], settings['yellow_upper'])
-    normal_mask = _normal_region_mask(crop, (cx, cy), radius, sector, needle_mask)
+    normal_mask = _normal_region_mask(crop, (cx, cy), radius, widen_sector(sector, settings['normal_margin_deg']),
+                                      needle_mask)
     if not np.any(normal_mask):
         report['reason'] = 'normal region empty after excluding abnormal colors'
         return report
