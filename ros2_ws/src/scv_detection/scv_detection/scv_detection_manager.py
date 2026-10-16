@@ -160,7 +160,8 @@ class ScvDetectionManager(Node):
         default_ref = self._find_default_reference()
         self.declare_parameter('rack_reference_path', default_ref)
         self.declare_parameter('camera_timeout', 2.0)
-        self.declare_parameter('facility_window_s', 6.0)   # IF-05: 한 설비를 보는 시간 (불량이 먼저 나오면 바로 끝)
+        self.declare_parameter('facility_window_s', 6.0)   # IF-05: 한 설비를 보는 최대 시간
+        self.declare_parameter('facility_min_s', 3.0)      # IF-05: 판정이 나도 이만큼은 계속 본다 (첫 한두 프레임으로 응답하지 않게, 10/16)
         self.declare_parameter('pressure_enabled', True)
         self.declare_parameter('aruco_enabled', True)
         self.declare_parameter('exit_sign_enabled', True)
@@ -393,6 +394,7 @@ class ScvDetectionManager(Node):
 
         # IF-05 {ns}/inspect_facility (mission_executor 가 설비 앞에서 부름). 다른 서비스와 달리 상대 이름
         self.facility_window = float(self.get_parameter('facility_window_s').value)
+        self.facility_min = min(float(self.get_parameter('facility_min_s').value), self.facility_window)
         self._facility_defects = None   # 서비스 처리 중에만 리스트: 이번 검사에서 발행한 (kind, detail)
         self._last_jpeg = None          # 마지막 결과 화면 (근거 사진)
         self.facility_service = self.create_service(
@@ -813,10 +815,12 @@ class ScvDetectionManager(Node):
         return self._handle_inspection('shutter', response)
 
     def _handle_inspect_facility(self, request, response):
-        """IF-05 서비스 (통합 브랜치 10/15): kind 에 맞는 검사를 facility_window_s 동안 켜고 판정을 돌려준다.
+        """IF-05 서비스 (통합 브랜치 10/15): kind 에 맞는 검사를 켜고 판정을 돌려준다.
 
-        ABNORMAL: 그동안 이 노드가 그 종류 불량을 발행했거나 마지막 판정이 비정상. NORMAL: 마지막 판정이 정상.
-        그 밖(카메라 없음 · 모델 없음 · 판정 못 함)은 UNCONFIRMED. 끝나면 검사를 끄고 결과를 inspect/result 로 낸다.
+        로봇(mission_executor)은 이 응답을 받을 때까지 관측 자리에 서 있다. 판정이 나도 facility_min_s(3 s)
+        동안은 계속 보고(첫 한두 프레임으로 응답하지 않게, 10/16), 그 뒤 확정 판정이 있으면 끝, 없으면
+        facility_window_s(6 s)까지 기다린다. 판정은 _facility_decision — 마지막 확정 판정을 따른다.
+        카메라 없음 · 모델 없음 · 판정 못 함은 UNCONFIRMED. 끝나면 검사를 끄고 결과를 inspect/result 로 낸다.
         """
         kind, verdict, detail = request.kind, InspectionResult.UNCONFIRMED, ''
         mode = FACILITY_MODES.get(kind)
@@ -833,10 +837,9 @@ class ScvDetectionManager(Node):
                 detail = f'{mode}: {started.message}'
             else:
                 seen, last, markers = None, None, {}
-                end = time.monotonic() + self.facility_window
+                start = time.monotonic()
+                end, min_end = start + self.facility_window, start + self.facility_min
                 while time.monotonic() < end and not self._stop_event.is_set():
-                    if any(k == kind for k, _ in self._facility_defects):
-                        break
                     with self._state_lock:
                         outcome = self._inspection_result
                     if outcome and outcome.get('time') != seen:
@@ -846,15 +849,18 @@ class ScvDetectionManager(Node):
                             for mk in rep.get('markers') or []:
                                 markers[mk['marker_id']] = {k: mk.get(k) for k in (
                                     'marker_id', 'manufacture_date', 'manufacture_number', 'expiry_date', 'expiry_status')}
+                    if last is not None and time.monotonic() >= min_end:   # 최소 시간을 봤고 확정 판정이 있음
+                        break
                     time.sleep(0.1)
                 with self._state_lock:
                     still = self._inspection_mode == mode
                 if still:
                     self._handle_inspection(mode, Trigger.Response())
                 hits = [d for k, d in self._facility_defects if k == kind]
-                if hits or last == 'ABNORMAL':
+                decision = self._facility_decision(last, bool(hits))
+                if decision == 'ABNORMAL':
                     verdict, detail = InspectionResult.ABNORMAL, hits[-1] if hits else f'{mode}: ABNORMAL'
-                elif last == 'NORMAL':
+                elif decision == 'NORMAL':
                     verdict, detail = InspectionResult.NORMAL, f'{mode}: NORMAL'
                 else:
                     detail = f'{mode}: 판정 못 함 ({last or "결과 없음"}, {self.facility_window:.0f}s)'
@@ -865,6 +871,15 @@ class ScvDetectionManager(Node):
         self.get_logger().info(f'inspect_facility {request.facility_id} kind={kind} → verdict={verdict} {detail[:120]}')
         response.verdict, response.detail, response.image_ref = verdict, detail, ''
         return response
+
+    @staticmethod
+    def _facility_decision(last, has_defect):
+        """IF-05 최종 판정: 마지막 확정 판정(last: 'NORMAL' · 'ABNORMAL' · None)을 따르고,
+        확정 판정이 한 번도 없을 때만 그동안 발행한 불량(has_defect)으로 ABNORMAL. 둘 다 없으면 None(판정 못 함).
+        한두 프레임의 이상 뒤 정상으로 확정되면 NORMAL 이 된다 (10/16 — 예전에는 불량 한 번이면 바로 ABNORMAL)."""
+        if last in ('NORMAL', 'ABNORMAL'):
+            return last
+        return 'ABNORMAL' if has_defect else None
 
     @staticmethod
     def _facility_status(kind, outcome):
