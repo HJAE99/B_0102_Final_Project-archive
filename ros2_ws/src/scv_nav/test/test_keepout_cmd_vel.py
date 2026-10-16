@@ -3,9 +3,9 @@ import ast
 import math
 from pathlib import Path
 
-scripts = Path(__file__).parents[1] / 'scripts' / 'mission_executor.py'
+scripts = Path(__file__).resolve().parents[1] / 'scripts' / 'mission_executor.py'
 tree = ast.parse(scripts.read_text())
-func = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'approach_twist')
+funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('approach_twist', 'odom_compose')]
 consts = {}
 for n in tree.body:   # CMD_LIN, CMD_ANG = 0.08, 0.4 · CMD_TOL = (...)
     if isinstance(n, ast.Assign):
@@ -15,8 +15,8 @@ for n in tree.body:   # CMD_LIN, CMD_ANG = 0.08, 0.4 · CMD_TOL = (...)
         elif isinstance(target, ast.Name) and target.id == 'CMD_TOL':
             consts['CMD_TOL'] = ast.literal_eval(n.value)
 namespace = {'math': math, **consts}
-exec(compile(ast.fix_missing_locations(ast.Module(body=[func], type_ignores=[])), str(scripts), 'exec'), namespace)
-approach_twist = namespace['approach_twist']
+exec(compile(ast.fix_missing_locations(ast.Module(body=funcs, type_ignores=[])), str(scripts), 'exec'), namespace)
+approach_twist, odom_compose = namespace['approach_twist'], namespace['odom_compose']
 
 
 def drive(start, goal, dt=0.1, steps=600):
@@ -53,10 +53,22 @@ def test_already_there_is_done():
     assert approach_twist((1.0, 1.0, 0.5), (1.0, 1.0, 0.5)) == (0.0, 0.0, True)
 
 
+def test_odom_compose_maps_odom_motion_into_map_frame():
+    """지도에서 +y 를 보고 시작, odom 에서는 +x 를 보고 시작 → odom 으로 0.3 m 직진은 지도에서 +y 0.3 m"""
+    x, y, yaw = odom_compose((1.0, 2.0, math.pi / 2), (5.0, 5.0, 0.0), (5.3, 5.0, 0.2))
+    assert abs(x - 1.0) < 1e-9 and abs(y - 2.3) < 1e-9 and abs(yaw - (math.pi / 2 + 0.2)) < 1e-9
+
+
+def test_time_limit_covers_slowest_case():
+    """robot3 QA: 0.1 m 앞뒤 180° 회전 두 번 같은 경우도 시간 안에"""
+    text = scripts.read_text()
+    assert '15.0 + dist / CMD_LIN + 2 * math.tau / CMD_ANG' in text
+
+
 def test_off_by_default_both_sides():
     """기존 순찰 동작은 그대로 — 로봇 · 관제 둘 다 켜야만 동작"""
     assert "declare_parameter('keepout_cmd_vel', False)" in scripts.read_text()
-    manager = Path(__file__).parents[2] / 'scv_manager' / 'scv_manager' / 'inspection_manager.py'
+    manager = Path(__file__).resolve().parents[2] / 'scv_manager' / 'scv_manager' / 'inspection_manager.py'
     assert 'declare_parameter("keepout_facility_cmd_vel", False)' in manager.read_text()
 
 

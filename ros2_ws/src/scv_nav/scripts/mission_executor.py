@@ -76,6 +76,7 @@ class MissionExecutor(Node):
         self.warning = ''
         self.battery = 100.0
         self.odom = None  # (수신 monotonic 시각, 선속도, 각속도)
+        self.odom_pose = None  # odom 프레임 (x, y, yaw) — cmd_vel 접근 때 amcl 사이를 메움 (10/16)
         self.precise_duration = int(self.declare_parameter("precise_duration_s", 15).value)
         self.cell_size = float(self.declare_parameter("cell_size", 0.5).value)
         if not 10 <= self.precise_duration <= 15:
@@ -239,6 +240,8 @@ class MissionExecutor(Node):
     def on_odom(self, msg):
         v = msg.twist.twist
         self.odom = (time.monotonic(), math.hypot(v.linear.x, v.linear.y), abs(v.angular.z))
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        self.odom_pose = (p.x, p.y, 2 * math.atan2(q.z, q.w))
 
     def on_pose(self, msg):
         p, q, c = msg.pose.pose.position, msg.pose.pose.orientation, msg.pose.covariance
@@ -626,19 +629,21 @@ class MissionExecutor(Node):
         """
         q = view.pose.orientation
         goal = (view.pose.position.x, view.pose.position.y, 2 * math.atan2(q.z, q.w))
-        if self.pose is None:
+        if self.pose is None or self.odom_pose is None:
             return False, 'CMD_VEL_NO_POSE'
         dist = math.dist(self.pose[:2], goal[:2])
         if dist > self.keepout_cmd_vel_max:
             return False, f'CMD_VEL_TOO_FAR {dist:.2f}m'
-        end = time.time() + max(15.0, 3 * dist / CMD_LIN)
+        # amcl_pose 는 0.1 m · 0.1 rad 움직여야 갱신되므로, 시작 때 amcl 자세에 odom 변화량을 더해 10 Hz 로 추정한다
+        start_map, start_odom = self.pose[:3], self.odom_pose
+        end = time.time() + 15.0 + dist / CMD_LIN + 2 * math.tau / CMD_ANG   # 직진 + 회전 두 바퀴 여유 (robot3 QA)
         try:
             while True:
                 if gh.is_cancel_requested:
                     return False, 'CANCELED'
                 if time.time() > end:
                     return False, 'CMD_VEL_TIMEOUT'
-                lin, ang, done = approach_twist(self.pose, goal)
+                lin, ang, done = approach_twist(odom_compose(start_map, start_odom, self.odom_pose), goal)
                 if done:
                     return True, ''
                 m = TwistStamped()
@@ -658,6 +663,16 @@ class MissionExecutor(Node):
 
 def xy(pose):
     return pose.pose.position.x, pose.pose.position.y
+
+
+def odom_compose(start_map, start_odom, now_odom):
+    """시작 때 지도 자세 start_map 에, odom 으로 잰 그 뒤의 움직임(start_odom → now_odom)을 더한 지금 지도 자세 (x, y, yaw)."""
+    dx, dy = now_odom[0] - start_odom[0], now_odom[1] - start_odom[1]
+    c, s = math.cos(-start_odom[2]), math.sin(-start_odom[2])
+    fx, fy = c * dx - s * dy, s * dx + c * dy                     # 시작 때 로봇 기준 이동량
+    c, s = math.cos(start_map[2]), math.sin(start_map[2])
+    return (start_map[0] + c * fx - s * fy, start_map[1] + s * fx + c * fy,
+            math.remainder(start_map[2] + now_odom[2] - start_odom[2], math.tau))
 
 
 def approach_twist(pose, goal):
