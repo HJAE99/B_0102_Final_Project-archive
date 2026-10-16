@@ -107,7 +107,7 @@ class MissionExecutor(Node):
         self.inspect_timeout = float(self.declare_parameter('inspect_timeout_s', 30.0).value)   # 비전 판정 최대 시간
         # 회피 구역(미검출 칸) 안 설비: Nav2 로 못 가면 cmd_vel 로 느리게 직선 접근해 점검 (10/16, 기본 꺼짐 · 실기 미검증)
         self.keepout_cmd_vel = bool(self.declare_parameter('keepout_cmd_vel', False).value)
-        self.keepout_cmd_vel_max = float(self.declare_parameter('keepout_cmd_vel_max_m', 1.0).value)
+        self.keepout_cmd_vel_max = float(self.declare_parameter('keepout_cmd_vel_max_m', 1.5).value)
         self.precise_cli = ActionClient(self, PreciseMeasure, 'survey/precise', callback_group=cb)
         ActionServer(self, ExecuteTask, 'execute_task', self.execute,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT,
@@ -297,17 +297,23 @@ class MissionExecutor(Node):
                         break
                 via_cmd_vel = False
                 # 그래도 못 가면(회피 구역 안 관측 자리 등) keepout_cmd_vel 이 켜졌을 때만 cmd_vel 로 접근 (10/16)
-                if (not ok and self.keepout_cmd_vel and reason not in ('CANCELED', 'LOW_BATTERY')
-                        and not gh.is_cancel_requested):
+                back = None
+                if (not ok and self.keepout_cmd_vel and g.waypoints and reason.startswith('BLOCKED')
+                        and not gh.is_cancel_requested and self.pose is not None):
                     self.get_logger().warn(f'{g.target_ref}: Nav2 로 관측 자리에 못 감({reason}) → cmd_vel 로 접근')
-                    ok, reason = self.cmd_vel_approach(gh, g.waypoints[-1])
+                    view = g.waypoints[-1]
+                    q = view.pose.orientation
+                    back = self.pose[:3]                         # 점검 뒤 되돌아 나올 자리 (회피 칸 밖, Nav2 가 다시 출발할 수 있게)
+                    ok, reason = self.cmd_vel_approach(gh, (view.pose.position.x, view.pose.position.y,
+                                                            2 * math.atan2(q.z, q.w)))
                     alt, via_cmd_vel = None, ok
                 if ok:
                     ok, reason = self.inspect(gh, g)
                     if alt is not None:
                         reason = f'ALT_VIEW ({alt.pose.position.x:.2f}, {alt.pose.position.y:.2f}) {reason}'
                     if via_cmd_vel:
-                        reason = f'KEEPOUT_CMD_VEL {reason}'
+                        back_ok, back_reason = self.cmd_vel_approach(gh, back)
+                        reason = f'KEEPOUT_CMD_VEL {reason}' + ('' if back_ok else f' RETURN_FAILED {back_reason}')
             elif g.type == T.REINSPECTION:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
                 if ok:
@@ -621,14 +627,13 @@ class MissionExecutor(Node):
                 return
             time.sleep(0.1)
 
-    def cmd_vel_approach(self, gh, view):
-        """회피 구역(미검출 칸) 안 관측 자리로 Nav2 대신 cmd_vel 로 느리게 접근한다 → (ok, reason).
+    def cmd_vel_approach(self, gh, goal):
+        """Nav2 대신 cmd_vel 로 goal (x, y, yaw)까지 느리게 간다 → (ok, reason). 회피 구역 안 관측 자리로 들어갈 때와
+        점검 뒤 들어온 자리로 되돌아 나올 때 쓴다.
 
         keepout_cmd_vel 이 켜졌을 때만 부른다(기본 꺼짐). Nav2 충돌 감시를 거치지 않으므로 지금 위치에서
         keepout_cmd_vel_max_m 이내인 자리만 · 시간 제한 · 취소되면 멈춘다. 움직임은 approach_twist 가 정한다.
         """
-        q = view.pose.orientation
-        goal = (view.pose.position.x, view.pose.position.y, 2 * math.atan2(q.z, q.w))
         if self.pose is None or self.odom_pose is None:
             return False, 'CMD_VEL_NO_POSE'
         dist = math.dist(self.pose[:2], goal[:2])
