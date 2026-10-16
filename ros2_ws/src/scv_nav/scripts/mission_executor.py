@@ -59,6 +59,8 @@ NEAR_GOAL = 0.5        # 골 둘레 이 안에 새 장애물(지도엔 빈칸, c
 MIN_STEP = 0.15        # 대신 갈 점이 앞 점(또는 지금 위치)에서 이보다 가까우면 그냥 뺌 (m)
 ALT_RINGS = (0.15, 0.25, 0.35, 0.45)   # 설비 관측 자리가 막혔을 때 대체 자리를 찾는 거리 (m, 10/15)
 ALT_MAX_COST = 100     # 대체 자리는 costmap 비용이 이 미만인 곳만 (inscribed 253 보다 충분히 여유)
+CMD_LIN, CMD_ANG = 0.08, 0.4   # 회피 구역 cmd_vel 접근 속도 (m/s, rad/s) — Nav2 충돌 감시를 거치지 않으므로 느리게 (10/16)
+CMD_TOL = (0.05, 0.087)        # cmd_vel 접근 도착 허용 (m, rad)
 
 
 class MissionExecutor(Node):
@@ -102,6 +104,9 @@ class MissionExecutor(Node):
         self.param_cli = self.create_client(SetParameters, 'controller_server/set_parameters', callback_group=cb)
         self.inspect_cli = self.create_client(InspectFacility, 'inspect_facility', callback_group=cb)
         self.inspect_timeout = float(self.declare_parameter('inspect_timeout_s', 30.0).value)   # 비전 판정 최대 시간
+        # 회피 구역(미검출 칸) 안 설비: Nav2 로 못 가면 cmd_vel 로 느리게 직선 접근해 점검 (10/16, 기본 꺼짐 · 실기 미검증)
+        self.keepout_cmd_vel = bool(self.declare_parameter('keepout_cmd_vel', False).value)
+        self.keepout_cmd_vel_max = float(self.declare_parameter('keepout_cmd_vel_max_m', 1.0).value)
         self.precise_cli = ActionClient(self, PreciseMeasure, 'survey/precise', callback_group=cb)
         ActionServer(self, ExecuteTask, 'execute_task', self.execute,
                      goal_callback=self.on_goal, cancel_callback=lambda _: CancelResponse.ACCEPT,
@@ -287,10 +292,19 @@ class MissionExecutor(Node):
                     ok, reason = self.follow(gh, [alt], precise=True)
                     if ok:
                         break
+                via_cmd_vel = False
+                # 그래도 못 가면(회피 구역 안 관측 자리 등) keepout_cmd_vel 이 켜졌을 때만 cmd_vel 로 접근 (10/16)
+                if (not ok and self.keepout_cmd_vel and reason not in ('CANCELED', 'LOW_BATTERY')
+                        and not gh.is_cancel_requested):
+                    self.get_logger().warn(f'{g.target_ref}: Nav2 로 관측 자리에 못 감({reason}) → cmd_vel 로 접근')
+                    ok, reason = self.cmd_vel_approach(gh, g.waypoints[-1])
+                    alt, via_cmd_vel = None, ok
                 if ok:
                     ok, reason = self.inspect(gh, g)
                     if alt is not None:
                         reason = f'ALT_VIEW ({alt.pose.position.x:.2f}, {alt.pose.position.y:.2f}) {reason}'
+                    if via_cmd_vel:
+                        reason = f'KEEPOUT_CMD_VEL {reason}'
             elif g.type == T.REINSPECTION:
                 ok, reason = self.follow(gh, g.waypoints, precise=True)
                 if ok:
@@ -604,6 +618,38 @@ class MissionExecutor(Node):
                 return
             time.sleep(0.1)
 
+    def cmd_vel_approach(self, gh, view):
+        """회피 구역(미검출 칸) 안 관측 자리로 Nav2 대신 cmd_vel 로 느리게 접근한다 → (ok, reason).
+
+        keepout_cmd_vel 이 켜졌을 때만 부른다(기본 꺼짐). Nav2 충돌 감시를 거치지 않으므로 지금 위치에서
+        keepout_cmd_vel_max_m 이내인 자리만 · 시간 제한 · 취소되면 멈춘다. 움직임은 approach_twist 가 정한다.
+        """
+        q = view.pose.orientation
+        goal = (view.pose.position.x, view.pose.position.y, 2 * math.atan2(q.z, q.w))
+        if self.pose is None:
+            return False, 'CMD_VEL_NO_POSE'
+        dist = math.dist(self.pose[:2], goal[:2])
+        if dist > self.keepout_cmd_vel_max:
+            return False, f'CMD_VEL_TOO_FAR {dist:.2f}m'
+        end = time.time() + max(15.0, 3 * dist / CMD_LIN)
+        try:
+            while True:
+                if gh.is_cancel_requested:
+                    return False, 'CANCELED'
+                if time.time() > end:
+                    return False, 'CMD_VEL_TIMEOUT'
+                lin, ang, done = approach_twist(self.pose, goal)
+                if done:
+                    return True, ''
+                m = TwistStamped()
+                m.header.stamp = self.get_clock().now().to_msg()
+                m.header.frame_id = 'base_link'
+                m.twist.linear.x, m.twist.angular.z = lin, ang
+                self.cmd_pub.publish(m)
+                time.sleep(0.1)
+        finally:
+            self.stop()
+
     def stop(self):
         for _ in range(5):
             self.cmd_pub.publish(TwistStamped())
@@ -612,6 +658,22 @@ class MissionExecutor(Node):
 
 def xy(pose):
     return pose.pose.position.x, pose.pose.position.y
+
+
+def approach_twist(pose, goal):
+    """cmd_vel 접근 한 걸음: pose · goal = (x, y, yaw) → (linear, angular, done).
+    목표 쪽으로 먼저 돌고(20° 넘게 틀어졌으면 제자리 회전), 느리게 직진, 도착하면 목표 방향으로 돈다."""
+    dx, dy = goal[0] - pose[0], goal[1] - pose[1]
+    dist = math.hypot(dx, dy)
+    if dist > CMD_TOL[0]:
+        err = math.remainder(math.atan2(dy, dx) - pose[2], math.tau)
+        if abs(err) > 0.35:
+            return 0.0, math.copysign(CMD_ANG, err), False
+        return min(CMD_LIN, dist), 1.5 * err, False
+    err = math.remainder(goal[2] - pose[2], math.tau)
+    if abs(err) > CMD_TOL[1]:
+        return 0.0, math.copysign(CMD_ANG, err), False
+    return 0.0, 0.0, True
 
 
 def localize(nav, home):

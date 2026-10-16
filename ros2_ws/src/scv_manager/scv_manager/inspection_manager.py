@@ -128,6 +128,8 @@ class InspectionManager(Node):
         # 1차 측정에서 미검출된 칸만 10~15초 정지 재측정 (선택 2차 작업, 10/15 PM). 약한 신호 칸 · 미측정 메우기는 넣지 않는다
         self.declare_parameter("include_unmeasured", False)
         self.declare_parameter("dock_keepout_radius_m", 0.6)
+        # 회피 구역 안 설비도 점검 작업을 보내 로봇이 cmd_vel 로 접근하게 (로봇 mission_executor keepout_cmd_vel 과 함께, 10/16 · 기본 꺼짐)
+        self.declare_parameter("keepout_facility_cmd_vel", False)
         self.declare_parameter("writer_node", "cell_map_writer")
         self.declare_parameter("commit_timeout_sec", 10.0)
         self.declare_parameter("close_stale_run", False)
@@ -1073,16 +1075,26 @@ class InspectionManager(Node):
                     origin[1],
                     self.cell_size,
                 ) in blocked:
+                    if not bool(self.get_parameter("keepout_facility_cmd_vel").value):
+                        self.publish_alert(
+                            level=Alert.LEVEL_WARN,
+                            code="KEEPOUT_BLOCKED",
+                            robot_id=robot_id,
+                            ref=route.facility_id,
+                            message=(
+                                f"{route.facility_id}: 회피 구역에 막혀 미확인"
+                            ),
+                        )
+                        continue
                     self.publish_alert(
                         level=Alert.LEVEL_WARN,
-                        code="KEEPOUT_BLOCKED",
+                        code="KEEPOUT_CMD_VEL",
                         robot_id=robot_id,
                         ref=route.facility_id,
                         message=(
-                            f"{route.facility_id}: 회피 구역에 막혀 미확인"
+                            f"{route.facility_id}: 회피 구역 안 — 로봇이 cmd_vel 로 접근해 점검"
                         ),
                     )
-                    continue
 
                 self.core.create_task(
                     task_id=(
