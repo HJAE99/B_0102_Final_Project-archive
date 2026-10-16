@@ -23,6 +23,16 @@ def test_zero_margin_keeps_sector():
     assert widen_sector((80.0, 100.0), 0.0) == (80.0, 100.0)
 
 
+def test_full_circle_not_inverted():
+    assert widen_sector((0.0, 345.0), 10.0) == (0.0, 345.0)
+
+
+def test_band_uses_strict_yellow_only():
+    text = source.read_text()
+    assert 'BAND_NEEDLE_LOWER = (18, 80, 70)' in text
+    assert 'cv2.bitwise_and(strict, band)' in text
+
+
 def test_defaults():
     """모듈 기본값은 0(이전 동작 그대로), 노드는 10° 로 켬"""
     assert 'normal_margin_deg=0.0' in source.read_text()

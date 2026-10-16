@@ -278,13 +278,18 @@ def _find_green_sector(mask, center, radius):
     return float(start), float((start + length - 1) % 360)
 
 
+# 넓힌 띠 안에서 바늘로 인정하는 순수 노랑 (HSV). robot4 실사진(good · badleft · badright 63장)으로 확인한 값 (10/16)
+BAND_NEEDLE_LOWER = (18, 80, 70)
+BAND_NEEDLE_UPPER = (35, 255, 255)
+
+
 def widen_sector(sector, margin_deg):
     """정상 구간 (시작 각도, 끝 각도)를 양옆으로 margin_deg 씩 넓힌 구간을 반환한다 (0~360 범위로 감음).
 
-    판정에 쓰는 검사 영역만 넓히고, 화면에 그리는 정상 구간과 보고값(green_start/end)은 원래 구간을 쓴다.
+    판정에 쓰는 검사 영역만 넓히고(그 띠 안에서는 순수 노랑만 바늘), 화면에 그리는 정상 구간과 보고값은 원래 구간을 쓴다.
     """
     start, end = sector
-    if margin_deg <= 0:
+    if margin_deg <= 0 or (end - start) % 360 + 2 * margin_deg >= 360:   # 넓히면 한 바퀴를 넘는 구간은 그대로
         return float(start), float(end)
     return float((start - margin_deg) % 360), float((end + margin_deg) % 360)
 
@@ -353,11 +358,19 @@ def inspect_pressure(frame, gauge_bbox, **options):
     report['green_start_deg'], report['green_end_deg'] = sector
     report['range_source'] = source
     needle_mask = _needle_color_mask(hsv, radius, settings['yellow_lower'], settings['yellow_upper'])
-    normal_mask = _normal_region_mask(crop, (cx, cy), radius, widen_sector(sector, settings['normal_margin_deg']),
-                                      needle_mask)
+    normal_mask = _normal_region_mask(crop, (cx, cy), radius, sector, needle_mask)
     if not np.any(normal_mask):
         report['reason'] = 'normal region empty after excluding abnormal colors'
         return report
+    if settings['normal_margin_deg'] > 0:
+        # 넓힌 띠(정상 구간 양옆)는 빨간 눈금판 위라, 그 안에서는 주황 보완 없이 순수 노랑만 바늘로 인정한다.
+        # (warm 보완을 쓰면 빨간 판의 밝은 부분이 바늘로 잡혀 실제 비정상이 정상으로 뒤집힘 — 10/16 robot4 실사진 QA)
+        wide = _normal_region_mask(crop, (cx, cy), radius, widen_sector(sector, settings['normal_margin_deg']),
+                                   needle_mask)
+        band = cv2.bitwise_and(wide, cv2.bitwise_not(normal_mask))
+        strict = cv2.inRange(hsv, BAND_NEEDLE_LOWER, BAND_NEEDLE_UPPER)
+        needle_mask = cv2.bitwise_or(cv2.bitwise_and(needle_mask, normal_mask), cv2.bitwise_and(strict, band))
+        normal_mask = cv2.bitwise_or(normal_mask, band)
     present, pixels, point = _needle_in_normal_region(
         needle_mask, normal_mask, settings['needle_min_pixels'])
     report['needle_in_normal_range'] = present
